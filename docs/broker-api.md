@@ -52,8 +52,12 @@ broker makes the bot if it is missing (in the group's org, in its `read` team) a
   "generation": 2, "minted": true, "token": "<value>" }
 ```
 
-`token` is present only when `minted` is true. The app writes `GITEA_URL` and `GITEA_TOKEN` onto
-the Mate's `zcp` service and restarts it.
+`token` is present only when `minted` is true. The app writes `GITEA_URL`, `MATE_BROKER_URL` and
+(when minted) `GITEA_TOKEN` onto the Mate's `zcp` service and restarts it. A Mate that already
+holds a token for this Gitea is not asked about at all; a Mate that holds a token but for
+**another** Gitea (its `GITEA_URL` differs) is asked with `rotate`, never `ensure` — `ensure`
+would answer `minted: false` for a bot whose token is live, and the app would write a URL whose
+token it does not hold.
 
 ## `POST /mate/repository` — a service repository for a Mate (guide 1.5, 2.1)
 

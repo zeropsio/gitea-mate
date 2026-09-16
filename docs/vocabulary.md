@@ -18,7 +18,8 @@ never `userRoles`. Budget: 65 534 bytes of compact JSON per project; entries sta
 
 `groupId`: the app's existing group id (today's `mate:g:{id}` on member projects stays as a display
 hint). `slug`: `^[a-z][a-z0-9-]{1,29}$`, unique in the account, derived from the group's name by the
-app at registration and never changed (it is the Gitea org).
+app at registration — on a collision the app numbers it (`acme-2`, `acme-3`) — and never changed
+(it is the Gitea org).
 
 ## Tags on a Mate's project (unchanged from today, listed for completeness)
 
@@ -56,6 +57,15 @@ app at registration and never changed (it is the Gitea org).
 | a Gitea throwaway | `gitea-signin:{gitea host}:{nonce}` — the same shape; used for sign-in consent and for `POST /mate/credential` |
 | an app version | named by the full commit sha; production's `{sha} {tag} {tagger login}` — the sha is always the first token |
 
+## Gitea's environment that the app fills in (service `web`, plain)
+
+| Variable | Holds |
+|---|---|
+| `GITEA_DOMAIN` | `web-${zeropsSubdomainHost}-3000.{region}.zerops.app` — Gitea derives `ROOT_URL` from it |
+| `GITEA_CORS_ALLOW_DOMAIN` | every origin the Mate app runs from, comma-separated, spelled literally with the port (`[cors] ALLOW_DOMAIN` matches strings) |
+| `BROKER_PUBLIC_URL` | the broker's public origin — the OIDC issuer `admin-init.sh` registers |
+| `OIDC_CLIENT_SECRET` | reference `${broker_OIDC_CLIENT_SECRET}` |
+
 ## The broker's environment (its own service, sensitive unless noted)
 
 | Variable | Set by | Holds |
@@ -80,4 +90,5 @@ app at registration and never changed (it is the Gitea org).
 where zcp asks for repositories), `GITEA_TOKEN` (sensitive, the bot's token), and `ZCP_API_KEY`
 moved here from the project as a sensitive service variable (guide 0.10). zcp reads all four from
 its process environment and nothing else; at sign-up the first three can land minutes after the
-Mate is up, so zcp waits for them with backoff.
+Mate is up, so zcp waits for them with backoff. The old `GITEA_REPO` is gone: a Mate asks the
+broker for its repositories and holds as many as it has dev pairs.

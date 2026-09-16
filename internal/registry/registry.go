@@ -239,7 +239,12 @@ func Tags(r Registry) []string {
 
 // RunnerHostname is the Zerops hostname of a group's Actions runner service:
 // "runner" plus the slug with its dashes removed, cut to 25 characters
-// (docs/vocabulary.md — Zerops hostnames are [a-z0-9], 25 at most).
+// (docs/vocabulary.md).
+//
+// The shape is not a style choice. Measured 2026-09-16: a Zerops service
+// hostname is [a-z][a-z0-9]* — a hyphen, an underscore, an upper-case letter
+// or a leading digit is refused with 400 serviceStackNameInvalid. The schema
+// promises 25 characters and the API takes 40, so 25 is the safe cut.
 func RunnerHostname(slug string) string {
 	name := "runner" + strings.ReplaceAll(slug, "-", "")
 	if len(name) > 25 {

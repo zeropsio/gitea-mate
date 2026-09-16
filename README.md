@@ -64,6 +64,24 @@ Optional tunables: `LISTEN_ADDR` (`:8080`), `GITEA_ADMIN_USERNAME` (`admin`), `M
 routes (`/users/{login}/tokens`) answer `401 auth required` to an API token, however privileged
 (measured on 1.27.2), so minting a Mate bot's credential needs the site admin's basic auth.
 
+## Gitea on Zerops
+
+`zerops.yaml` carries three setups. `gitea` fetches the pinned Gitea release in the **build** step
+and verifies it against a `sha256` written beside the version, so the runtime has no
+network-dependent prepare and a container that restarts at three in the morning does not depend on
+`dl.gitea.com`; `broker` is a static `go build` of `cmd/broker`; `runner` is `act_runner`, fetched
+and checksum-verified the same way, registered to one group's Gitea org and carrying no Zerops
+credential at all.
+
+`import/gitea-project.yaml` is the services-only import the Mate app sends — `db`, `volume`, `web`
+and `broker` — and `import/runner.yaml` the one the broker sends when a group's first workflow
+appears. Both document their placeholders at the top. The project keeps the platform's default
+`envIsolation`, which is what stops a runner job reading Gitea's admin token.
+
+`actions/deploy/action.yml` is the composite action a workflow calls instead of holding a deploy
+credential: it asks the broker, polls, and falls back to the commit status if the broker forgot the
+deploy across a restart.
+
 ## Tests
 
 ```sh

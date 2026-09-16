@@ -1,0 +1,152 @@
+zerops:
+  # ---------------------------------------------------------------------------
+  # Gitea itself.
+  #
+  # The release binary is fetched in the BUILD step and verified against a
+  # checksum pinned here, then shipped in deployFiles. The runtime therefore
+  # has no network-dependent prepare, the version is pinned in exactly one
+  # place, and a container that restarts at three in the morning does not
+  # depend on dl.gitea.com being up.
+  # ---------------------------------------------------------------------------
+  - setup: gitea
+    build:
+      base: ubuntu@26.04
+      envVariables:
+        GITEA_VERSION: 1.27.2
+        # sha256 of gitea-${GITEA_VERSION}-linux-amd64, from
+        # https://dl.gitea.com/gitea/1.27.2/gitea-1.27.2-linux-amd64.sha256
+        GITEA_SHA256: aa4e624ca6aa58a824a75562caecc2d206fcab8c70bc8fab765b456f182844fd
+      prepareCommands:
+        - sudo apt-get update
+        - sudo apt-get install -y --no-install-recommends ca-certificates curl
+      buildCommands:
+        - mkdir -p bin
+        - curl -fsSL -o bin/gitea "https://dl.gitea.com/gitea/${GITEA_VERSION}/gitea-${GITEA_VERSION}-linux-amd64"
+        - printf '%s  bin/gitea\n' "${GITEA_SHA256}" | sha256sum -c -
+        - chmod 755 bin/gitea
+      deployFiles:
+        - bin/gitea
+        - gitea/app.ini
+        - gitea/init.sh
+        - gitea/start.sh
+        - gitea/admin-init.sh
+        - gitea/dump.sh
+    run:
+      base: ubuntu@26.04
+      ports:
+        # SSH is off (app.ini): everything the account does with git goes over
+        # HTTPS with a token, and no port but this one is open.
+        - port: 3000
+          httpSupport: true
+      envVariables:
+        GITEA_BIN: /var/www/bin/gitea
+        GITEA_WORK_DIR: /mnt/volume/gitea
+        GITEA_DUMP_DIR: /mnt/volume/dumps
+        GITEA_DUMP_KEEP: 7
+        DB_HOST: db
+        DB_PORT: 5432
+        DB_NAME: giteadb
+        DB_USER: gitea
+        # The db service's superuser, used once by init.sh to create the gitea
+        # role and database.
+        DB_ADMIN_USER: ${db_superUser}
+        DB_ADMIN_PASSWORD: ${db_superUserPassword}
+        DB_ADMIN_DB: ${db_dbName}
+        # docs/vocabulary.md: the site admin is `admin`, never `mate`. It signs
+        # in through Zerops like everyone else; its token and password are what
+        # the broker's automation uses.
+        GITEA_ADMIN_USERNAME: admin
+      volume:
+        hostname: volume
+      prepareCommands:
+        - sudo apt-get update
+        # git for the repositories, postgresql-client for init.sh's role and
+        # database creation, ca-certificates for the broker's discovery URL.
+        # Nothing is downloaded at runtime.
+        - sudo apt-get install -y --no-install-recommends git ca-certificates postgresql-client
+        - sudo mkdir -p /etc/gitea
+        - sudo chown root:zerops /etc/gitea
+        - sudo chmod 770 /etc/gitea
+      initCommands:
+        - zsc execOnce prepare-gitea -- ./gitea/init.sh
+      # admin-init.sh hangs off the start command, not initCommands. Init
+      # commands do run on every container start, but a start command that exits
+      # non-zero is re-run on its own — which is what happens on the first boot,
+      # where start.sh keeps exiting until the secrets init.sh just wrote have
+      # propagated. From initCommands this would get one look at an empty
+      # environment and never run again. It must never keep Gitea down, hence
+      # the `|| true`.
+      start: bash -c './gitea/admin-init.sh || true; exec ./gitea/start.sh'
+      crontab:
+        # A dump a day, kept for GITEA_DUMP_KEEP days on the volume. One
+        # container writes it; the others would only fight over the same file.
+        - timing: "17 3 * * *"
+          command: ./gitea/dump.sh
+          allContainers: false
+          workingDir: /var/www
+
+  # ---------------------------------------------------------------------------
+  # The broker.
+  # ---------------------------------------------------------------------------
+  - setup: broker
+    build:
+      base: go@latest
+      buildCommands:
+        # A static binary: the runtime carries no Go toolchain and no cgo.
+        - CGO_ENABLED=0 go build -trimpath -o broker ./cmd/broker
+      deployFiles:
+        - broker
+    run:
+      base: ubuntu@26.04
+      ports:
+        - port: 8080
+          httpSupport: true
+      prepareCommands:
+        - sudo apt-get update
+        - sudo apt-get install -y --no-install-recommends ca-certificates
+      # One container: the sign-in codes and the runner's quiet-spell timers
+      # live in its memory, and a restart only means signing in again.
+      start: ./broker
+
+  # ---------------------------------------------------------------------------
+  # One Actions runner service per group, imported by the broker.
+  #
+  # It holds no Zerops token and no zcli: a workflow that wants to deploy asks
+  # the broker, which is the only deploy key in the account.
+  # ---------------------------------------------------------------------------
+  - setup: runner
+    build:
+      base: ubuntu@26.04
+      envVariables:
+        GITEA_RUNNER_VERSION: 3.5.0
+        # sha256 of gitea-runner-${GITEA_RUNNER_VERSION}-linux-amd64, from
+        # https://dl.gitea.com/gitea-runner/3.5.0/gitea-runner-3.5.0-linux-amd64.sha256
+        GITEA_RUNNER_SHA256: 16dc5c89ad5ac5496369642f01ed29c9bb130a2512e16a8cc3b400d9d0bfea73
+      prepareCommands:
+        - sudo apt-get update
+        - sudo apt-get install -y --no-install-recommends ca-certificates curl
+      buildCommands:
+        - mkdir -p bin
+        - curl -fsSL -o bin/gitea-runner "https://dl.gitea.com/gitea-runner/${GITEA_RUNNER_VERSION}/gitea-runner-${GITEA_RUNNER_VERSION}-linux-amd64"
+        - printf '%s  bin/gitea-runner\n' "${GITEA_RUNNER_SHA256}" | sha256sum -c -
+        - chmod 755 bin/gitea-runner
+      deployFiles:
+        - bin/gitea-runner
+        - gitea/runner-init.sh
+    run:
+      base: ubuntu@26.04
+      envVariables:
+        RUNNER_BIN: /var/www/bin/gitea-runner
+        GITEA_INSTANCE_URL: http://web:3000
+        # docs/vocabulary.md. Labels route jobs; only the registration scope
+        # isolates them, and this runner is registered to one group's org.
+        RUNNER_LABELS: ubuntu-latest:host,ubuntu-26.04:host
+      prepareCommands:
+        - sudo apt-get update
+        # Jobs run in host mode directly on the container, so ship what
+        # workflows need: git for checkouts, nodejs for JS actions. No zcli and
+        # no Zerops credential, ever.
+        - sudo apt-get install -y --no-install-recommends git ca-certificates curl nodejs
+      initCommands:
+        - ./gitea/runner-init.sh
+      start: /var/www/bin/gitea-runner daemon

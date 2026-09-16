@@ -1,0 +1,105 @@
+#zeropsPreprocessor=on
+#
+# The Gitea project's services, as the Mate app sends them.
+#
+# Services only: no `project:` block. The app creates the project itself, tags
+# it `mate:tool:gitea` and then imports this into it, so the project keeps the
+# platform's default `envIsolation: service` — which is what stops a runner job
+# reading Gitea's admin token or the database password (ledger 2026-09-16).
+# Never set envIsolation here.
+#
+# The app replaces these placeholders before sending the file:
+#
+#   __ZEROPS_TOKEN__       the broker's Zerops token: org READ_ONLY, BASIC_USER
+#                          on this project, and BASIC_USER on each group stage
+#                          and production as they are created. Minted by the
+#                          app as the owner; the only deploy key in the account.
+#   __ZEROPS_CLIENT_ID__   the org id.
+#   __ZEROPS_PROJECT_ID__  this project's id — where the registry tags live.
+#   __MATE_APP_URL__       the web app's origin; the sign-in consent page.
+#   __REGION__             the region's app host, e.g. `app-prg1`.
+#   __CORS__               every origin the Mate app runs from, comma-separated,
+#                          port included: ALLOW_DOMAIN matches a string, so
+#                          localhost does not cover 127.0.0.1 (measured
+#                          2026-09-16). The desktop and mobile shells' origins
+#                          belong here too.
+#
+# `<@generateRandomString(<64>)>` is the platform's preprocessor: the value is
+# generated inside the import and never passes through the browser.
+
+services:
+  - hostname: db
+    type: postgresql@18
+    mode: NON_HA
+    priority: 10
+
+  - hostname: volume
+    type: local-storage@1
+    priority: 10
+
+  - hostname: web
+    type: ubuntu@26.04
+    priority: 5
+    buildFromGit: https://github.com/zeropsio/gitea-mate
+    zeropsSetup: gitea
+    enableSubdomainAccess: true
+    maxContainers: 1
+    verticalAutoscaling:
+      minRam: 0.5
+    vault:
+      DB_PASSWORD:
+        value: <@generateRandomString(<64>)>
+        sensitive: true
+      GITEA_DOMAIN: web-${zeropsSubdomainHost}-3000.__REGION__.zerops.app
+      GITEA_CORS_ALLOW_DOMAIN: __CORS__
+      BROKER_PUBLIC_URL: https://broker-${zeropsSubdomainHost}-8080.__REGION__.zerops.app
+      # Gitea's client secret for the `zerops` login source. The broker
+      # generates nothing: the two services reference one another's values, so
+      # the secret exists in exactly one place.
+      OIDC_CLIENT_SECRET: ${broker_OIDC_CLIENT_SECRET}
+
+  - hostname: broker
+    type: ubuntu@26.04
+    priority: 5
+    buildFromGit: https://github.com/zeropsio/gitea-mate
+    zeropsSetup: broker
+    enableSubdomainAccess: true
+    maxContainers: 1
+    verticalAutoscaling:
+      minRam: 0.25
+    vault:
+      # docs/vocabulary.md § "The broker's environment".
+      ZEROPS_TOKEN:
+        value: __ZEROPS_TOKEN__
+        sensitive: true
+      ZEROPS_API_URL: https://api.__REGION__.zerops.io
+      ZEROPS_CLIENT_ID: __ZEROPS_CLIENT_ID__
+      ZEROPS_PROJECT_ID: __ZEROPS_PROJECT_ID__
+      GITEA_URL: http://web:3000
+      GITEA_PUBLIC_URL: https://web-${zeropsSubdomainHost}-3000.__REGION__.zerops.app
+      # Gitea publishes both of these itself, on its first boot. The broker
+      # needs the password as well as the token: Gitea's token routes answer
+      # 401 "auth required" to an API token, however privileged (measured on
+      # 1.27.2), so minting a Mate bot's credential takes basic auth. A
+      # reference resolves in the broker's container and nowhere else.
+      GITEA_ADMIN_TOKEN:
+        value: ${web_GITEA_ADMIN_TOKEN}
+        sensitive: true
+      GITEA_ADMIN_PASSWORD:
+        value: ${web_GITEA_ADMIN_PASSWORD}
+        sensitive: true
+      GITEA_ADMIN_USERNAME: admin
+      GITEA_WEBHOOK_SECRET:
+        value: <@generateRandomString(<64>)>
+        sensitive: true
+      OIDC_CLIENT_SECRET:
+        value: <@generateRandomString(<64>)>
+        sensitive: true
+      # The ES256 signing key is derived from this deterministically, so a
+      # restart signs the same way and no key is ever stored.
+      OIDC_SEED:
+        value: <@generateRandomString(<64>)>
+        sensitive: true
+      BROKER_PUBLIC_URL: https://broker-${zeropsSubdomainHost}-8080.__REGION__.zerops.app
+      MATE_APP_URL: __MATE_APP_URL__
+      LISTEN_ADDR: :8080
