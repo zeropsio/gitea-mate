@@ -282,3 +282,11 @@ func (c *Client) doRaw(ctx context.Context, method, path, contentType string, bo
 	}
 	return date, nil
 }
+
+// DeleteService is DELETE /service-stack/{id}. The broker calls it for one
+// thing only: the Actions runner of a group that left the registry, which is
+// the one service it created by itself.
+func (c *Client) DeleteService(ctx context.Context, serviceID string) error {
+	_, err := c.do(ctx, "DELETE", "/service-stack/"+url.PathEscape(serviceID), nil, nil)
+	return err
+}

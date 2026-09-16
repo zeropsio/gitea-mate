@@ -73,6 +73,7 @@ func (p *Pipeline) Pass(ctx context.Context) (PassResult, error) {
 		}
 	}
 
+	result.Problems = append(result.Problems, p.reconcileRunners(ctx, state.Registry)...)
 	return result, nil
 }
 
