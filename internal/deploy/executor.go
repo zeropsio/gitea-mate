@@ -33,6 +33,16 @@ type Target struct {
 	// PromoteFrom is the stage this production deploy may promote from. Nil
 	// for a stage, and for a production environment with no stage beside it.
 	PromoteFrom *PromoteSource
+	// Gate is environments.yaml's `requireOnStage`: this commit must already
+	// be live on that stage. Nil when the environment declares none.
+	Gate *Gate
+}
+
+// Gate is the stage a commit must already be live on before it reaches
+// production (docs/group-repo.md, environments.yaml `gates`).
+type Gate struct {
+	Environment string
+	Project     string
 }
 
 // PromoteSource is where a promotion looks for an already-built artifact.
@@ -162,6 +172,11 @@ func (e *Executor) one(ctx context.Context, job Job, target Target, service zero
 		return
 	}
 
+	if met, why := e.gate(ctx, target); !met {
+		e.fail(ctx, job, target, why)
+		return
+	}
+
 	e.status(ctx, target, job.Environment.Name, "pending", "deploying "+target.Sha)
 
 	zeropsYaml, err := e.zeropsYaml(ctx, target)
@@ -244,6 +259,33 @@ func (e *Executor) one(ctx context.Context, job Job, target Target, service zero
 		r.Message = ""
 	})
 	log.Info("deployed", "versionId", version.ID)
+}
+
+// gate enforces environments.yaml's `requireOnStage`: production runs nothing
+// a named stage is not already running. A stage the broker cannot read is a
+// gate that is not met — an unreadable gate must never read as an open one.
+func (e *Executor) gate(ctx context.Context, target Target) (bool, string) {
+	if target.Gate == nil {
+		return true, ""
+	}
+	services, err := e.Zerops.Services(ctx, e.ClientID, target.Gate.Project)
+	if err != nil {
+		return false, fmt.Sprintf("the gate %s could not be read: %v", target.Gate.Environment, err)
+	}
+	for _, s := range services {
+		if s.Name != target.Service {
+			continue
+		}
+		active, live, err := e.Zerops.ActiveAppVersion(ctx, s.ID)
+		if err != nil {
+			return false, fmt.Sprintf("the gate %s could not be read: %v", target.Gate.Environment, err)
+		}
+		if live && active.Sha() == target.Sha {
+			return true, ""
+		}
+		return false, fmt.Sprintf("%s is not live on %s, which this environment gates on", target.Sha, target.Gate.Environment)
+	}
+	return false, fmt.Sprintf("the gate %s has no service %s", target.Gate.Environment, target.Service)
 }
 
 // zeropsYaml reads the commit's own build file. Both the archive path and the

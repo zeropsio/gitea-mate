@@ -316,3 +316,58 @@ func TestDeployRefusals(t *testing.T) {
 		})
 	}
 }
+
+func TestTheGateRefusesACommitTheStageIsNotRunning(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	record := w.records.New("production", "api", "acme/api", "3f9c")
+
+	j := productionJob("api-prod", record.ID)
+	j.Targets[0].Gate = &deploy.Gate{Environment: "stage", Project: "prj-stage"}
+
+	// Nothing is live on stage, so production deploys nothing.
+	w.executor.Run(context.Background(), j)
+
+	back, _ := w.records.Get(record.ID)
+	if back.Status != deploy.StatusFailed || !strings.Contains(back.Message, "not live on stage") {
+		t.Fatalf("the record ended %+v, want a refusal naming the gate", back)
+	}
+	if len(w.zerops.AppVersions("svc-prod-api")) != 0 {
+		t.Fatal("a gate that is not met still deployed")
+	}
+}
+
+func TestTheGateOpensOnceTheStageRunsTheCommit(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	ctx := context.Background()
+	w.executor.Run(ctx, stageJob())
+
+	j := productionJob("api-prod")
+	j.Targets[0].Gate = &deploy.Gate{Environment: "stage", Project: "prj-stage"}
+	w.executor.Run(ctx, j)
+
+	if len(w.zerops.AppVersions("svc-prod-api")) != 1 {
+		t.Fatal("the gate was met and production still did not deploy")
+	}
+}
+
+func TestAGateThatAnswersNothingIsNotAnOpenOne(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	record := w.records.New("production", "api", "acme/api", "3f9c")
+
+	j := productionJob("api-prod", record.ID)
+	// A stage project that carries no such service: a gate the broker cannot
+	// read is never read as an open one.
+	j.Targets[0].Gate = &deploy.Gate{Environment: "stage", Project: "prj-unreachable"}
+	w.executor.Run(context.Background(), j)
+
+	back, _ := w.records.Get(record.ID)
+	if back.Status != deploy.StatusFailed {
+		t.Fatalf("the record ended %+v, want failed", back)
+	}
+	if len(w.zerops.AppVersions("svc-prod-api")) != 0 {
+		t.Fatal("a gate the broker could not read still let a deploy through")
+	}
+}
