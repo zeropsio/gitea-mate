@@ -16,6 +16,7 @@ func full() map[string]string {
 		"GITEA_URL":            "http://web:3000",
 		"GITEA_PUBLIC_URL":     "https://web-1234-3000.prg1.zerops.app",
 		"GITEA_ADMIN_TOKEN":    "gt",
+		"GITEA_ADMIN_PASSWORD": "gp",
 		"GITEA_WEBHOOK_SECRET": "ws",
 		"OIDC_CLIENT_SECRET":   "cs",
 		"OIDC_SEED":            "seed",
@@ -50,7 +51,24 @@ func TestLoad(t *testing.T) {
 				if c.RunnerQuietPeriod != 15*time.Minute {
 					t.Errorf("RunnerQuietPeriod = %v, want 15m", c.RunnerQuietPeriod)
 				}
+				if c.GiteaAdminUser != "admin" {
+					t.Errorf("GiteaAdminUser = %q, want admin", c.GiteaAdminUser)
+				}
 			},
+		},
+		{
+			name:   "the site admin's name can be overridden",
+			mutate: func(m map[string]string) { m["GITEA_ADMIN_USERNAME"] = "root" },
+			check: func(t *testing.T, c *Config) {
+				if c.GiteaAdminUser != "root" {
+					t.Errorf("GiteaAdminUser = %q", c.GiteaAdminUser)
+				}
+			},
+		},
+		{
+			name:    "the site admin's password is required: the token routes refuse an API token",
+			mutate:  func(m map[string]string) { delete(m, "GITEA_ADMIN_PASSWORD") },
+			wantErr: []string{"GITEA_ADMIN_PASSWORD"},
 		},
 		{
 			name:    "one missing variable is named",

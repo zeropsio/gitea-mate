@@ -50,15 +50,19 @@ named in the start-up error and no value is ever logged.
 export ZEROPS_TOKEN=…            ZEROPS_API_URL=https://api.app-prg1.zerops.io
 export ZEROPS_CLIENT_ID=…        ZEROPS_PROJECT_ID=…
 export GITEA_URL=http://127.0.0.1:3301   GITEA_PUBLIC_URL=http://127.0.0.1:3301
-export GITEA_ADMIN_TOKEN=…       GITEA_WEBHOOK_SECRET=…
+export GITEA_ADMIN_TOKEN=…       GITEA_ADMIN_PASSWORD=…    GITEA_WEBHOOK_SECRET=…
 export OIDC_CLIENT_SECRET=…      OIDC_SEED=…
 export BROKER_PUBLIC_URL=http://127.0.0.1:8080
 export MATE_APP_URL=http://127.0.0.1:5173
 go run ./cmd/broker
 ```
 
-Optional tunables: `LISTEN_ADDR` (`:8080`), `MIRROR_INTERVAL` (`3m`), `MIRROR_CAP` (`10`),
-`RUNNER_QUIET_PERIOD` (`15m`).
+Optional tunables: `LISTEN_ADDR` (`:8080`), `GITEA_ADMIN_USERNAME` (`admin`), `MIRROR_INTERVAL`
+(`3m`), `MIRROR_CAP` (`10`), `RUNNER_QUIET_PERIOD` (`15m`).
+
+`GITEA_ADMIN_PASSWORD` is not in `docs/vocabulary.md`'s table but guide 1.3 names it: Gitea's token
+routes (`/users/{login}/tokens`) answer `401 auth required` to an API token, however privileged
+(measured on 1.27.2), so minting a Mate bot's credential needs the site admin's basic auth.
 
 ## Tests
 
@@ -73,5 +77,9 @@ variables are set, and the token reaches it only through the environment — nev
 or a commit:
 
 ```sh
-GITEA_LAB_URL=http://127.0.0.1:3301 GITEA_LAB_ADMIN_TOKEN=… make lab-test
+GITEA_LAB_URL=http://127.0.0.1:3301 GITEA_LAB_ADMIN_TOKEN=… \
+GITEA_LAB_ADMIN_USER=… GITEA_LAB_ADMIN_PASSWORD=… make lab-test
 ```
+
+The two basic-auth variables are needed only by the sub-tests that mint a token; without them those
+skip and say why.

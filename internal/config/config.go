@@ -33,9 +33,17 @@ type Config struct {
 	ZeropsClientID  string
 	ZeropsProjectID string
 
-	GiteaURL           string
-	GiteaPublicURL     string
-	GiteaAdminToken    Secret
+	GiteaURL        string
+	GiteaPublicURL  string
+	GiteaAdminToken Secret
+	// GiteaAdminUser and GiteaAdminPassword are the site admin's basic-auth
+	// credentials. They exist because Gitea's token routes
+	// (/users/{login}/tokens) answer 401 "auth required" to an API token,
+	// however privileged — measured on 1.27.2 — so minting a Mate bot's
+	// credential has no other path. docs/vocabulary.md lists only
+	// GITEA_ADMIN_TOKEN; guide 1.3 names both.
+	GiteaAdminUser     string
+	GiteaAdminPassword Secret
 	GiteaWebhookSecret Secret
 
 	OIDCClientSecret Secret
@@ -63,6 +71,7 @@ func (c *Config) GiteaHost() string {
 
 const (
 	defaultListenAddr        = ":8080"
+	defaultGiteaAdminUser    = "admin"
 	defaultMirrorInterval    = 3 * time.Minute
 	defaultMirrorCap         = 10
 	defaultRunnerQuietPeriod = 15 * time.Minute
@@ -128,6 +137,8 @@ func Load(getenv func(string) string) (*Config, error) {
 		GiteaURL:           reqURL("GITEA_URL"),
 		GiteaPublicURL:     reqURL("GITEA_PUBLIC_URL"),
 		GiteaAdminToken:    Secret(req("GITEA_ADMIN_TOKEN")),
+		GiteaAdminUser:     strings.TrimSpace(getenv("GITEA_ADMIN_USERNAME")),
+		GiteaAdminPassword: Secret(req("GITEA_ADMIN_PASSWORD")),
 		GiteaWebhookSecret: Secret(req("GITEA_WEBHOOK_SECRET")),
 
 		OIDCClientSecret: Secret(req("OIDC_CLIENT_SECRET")),
@@ -143,6 +154,9 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 	if c.ListenAddr == "" {
 		c.ListenAddr = defaultListenAddr
+	}
+	if c.GiteaAdminUser == "" {
+		c.GiteaAdminUser = defaultGiteaAdminUser
 	}
 
 	var problems []string
