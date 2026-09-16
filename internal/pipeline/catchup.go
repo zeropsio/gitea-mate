@@ -112,7 +112,7 @@ func (p *Pipeline) catchUp(ctx context.Context, plan deploy.Plan, env environmen
 
 	p.log().Info("an environment is behind its sources",
 		"group", plan.Slug, "environment", env.Name, "services", len(behind))
-	p.Queue.Submit(ctx, deploy.Job{Slug: plan.Slug, Environment: env, Targets: behind})
+	p.Queue.Submit(deploy.Job{Slug: plan.Slug, Environment: env, Targets: behind})
 	return len(behind), problems
 }
 

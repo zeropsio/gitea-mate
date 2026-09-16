@@ -28,7 +28,7 @@ func TestQueueNewestWins(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{}, 1)
 
-	queue := deploy.NewQueue(func(_ context.Context, j deploy.Job) {
+	queue := deploy.NewQueue(context.Background(), func(_ context.Context, j deploy.Job) {
 		mu.Lock()
 		ran = append(ran, j.Sha())
 		first := len(ran) == 1
@@ -39,12 +39,11 @@ func TestQueueNewestWins(t *testing.T) {
 		}
 	}, nil)
 
-	ctx := context.Background()
-	queue.Submit(ctx, job("acme", "stage", "aaa"))
+	queue.Submit(job("acme", "stage", "aaa"))
 	<-started // the first one is now running and will not finish until released
 
-	queue.Submit(ctx, job("acme", "stage", "bbb"))
-	queue.Submit(ctx, job("acme", "stage", "ccc"))
+	queue.Submit(job("acme", "stage", "bbb"))
+	queue.Submit(job("acme", "stage", "ccc"))
 	close(release)
 	queue.Wait()
 
@@ -63,7 +62,7 @@ func TestQueueCarriesADroppedRequestsRecords(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{}, 1)
 
-	queue := deploy.NewQueue(func(_ context.Context, j deploy.Job) {
+	queue := deploy.NewQueue(context.Background(), func(_ context.Context, j deploy.Job) {
 		mu.Lock()
 		seen = append(seen, j.Records)
 		first := len(seen) == 1
@@ -74,11 +73,10 @@ func TestQueueCarriesADroppedRequestsRecords(t *testing.T) {
 		}
 	}, nil)
 
-	ctx := context.Background()
-	queue.Submit(ctx, job("acme", "stage", "aaa", "d_1"))
+	queue.Submit(job("acme", "stage", "aaa", "d_1"))
 	<-started
-	queue.Submit(ctx, job("acme", "stage", "bbb", "d_2"))
-	queue.Submit(ctx, job("acme", "stage", "ccc", "d_3"))
+	queue.Submit(job("acme", "stage", "bbb", "d_2"))
+	queue.Submit(job("acme", "stage", "ccc", "d_3"))
 	close(release)
 	queue.Wait()
 
@@ -101,7 +99,7 @@ func TestQueueRunsTwoEnvironmentsAtOnce(t *testing.T) {
 	inFlight, peak := 0, 0
 	hold := make(chan struct{})
 
-	queue := deploy.NewQueue(func(_ context.Context, _ deploy.Job) {
+	queue := deploy.NewQueue(context.Background(), func(_ context.Context, _ deploy.Job) {
 		mu.Lock()
 		inFlight++
 		if inFlight > peak {
@@ -114,10 +112,9 @@ func TestQueueRunsTwoEnvironmentsAtOnce(t *testing.T) {
 		mu.Unlock()
 	}, nil)
 
-	ctx := context.Background()
-	queue.Submit(ctx, job("acme", "stage", "aaa"))
-	queue.Submit(ctx, job("acme", "production", "bbb"))
-	queue.Submit(ctx, job("other", "stage", "ccc"))
+	queue.Submit(job("acme", "stage", "aaa"))
+	queue.Submit(job("acme", "production", "bbb"))
+	queue.Submit(job("other", "stage", "ccc"))
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -182,4 +179,38 @@ func TestRecordIDsAreDistinct(t *testing.T) {
 		}
 		seen[id] = true
 	}
+}
+
+// TestQueueOutlivesTheRequestThatAskedForIt pins what broke live on
+// 2026-09-16: every webhook-driven deploy failed with "context canceled". The
+// queue ran its jobs on the caller's context — a webhook dispatch's, or an
+// HTTP request's — and Submit does not block, so the context was cancelled the
+// instant the caller returned and the deploy died on its first API read. A
+// deploy outlives the request that asked for it, or it does not happen.
+func TestQueueOutlivesTheRequestThatAskedForIt(t *testing.T) {
+	t.Parallel()
+
+	done := make(chan error, 1)
+	queue := deploy.NewQueue(context.Background(), func(ctx context.Context, _ deploy.Job) {
+		// What a real job does first: a call that takes a context.
+		time.Sleep(20 * time.Millisecond)
+		done <- ctx.Err()
+	}, nil)
+
+	// The caller's context, cancelled as soon as it has submitted — exactly
+	// what `defer cancel()` in a webhook dispatch does.
+	caller, cancel := context.WithCancel(context.Background())
+	queue.Submit(job("acme", "stage", "aaa"))
+	cancel()
+	_ = caller
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the job ran on a dead context: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the job never ran")
+	}
+	queue.Wait()
 }

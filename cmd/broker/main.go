@@ -105,6 +105,11 @@ func run(log *slog.Logger) error {
 	}
 	log.Info("the signing key is derived", "kid", provider.Key().KeyID())
 
+	// The broker's own context: the loops run on it, and so does every queued
+	// deploy — a deploy outlives the webhook or the request that asked for it.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	records := deploy.NewRecords(0)
 	executor := &deploy.Executor{
 		Zerops:   zeropsClient,
@@ -113,7 +118,7 @@ func run(log *slog.Logger) error {
 		ClientID: cfg.ZeropsClientID,
 		Records:  records,
 	}
-	queue := deploy.NewQueue(executor.Run, log)
+	queue := deploy.NewQueue(ctx, executor.Run, log)
 	pipe := &pipeline.Pipeline{
 		Zerops:         zeropsClient,
 		Gitea:          giteaClient,
@@ -156,9 +161,6 @@ func run(log *slog.Logger) error {
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	loopDone := make(chan struct{})
 	go func() { loop.Run(ctx); close(loopDone) }()

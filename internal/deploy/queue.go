@@ -16,8 +16,15 @@ import (
 // of them learns what the environment actually settled on rather than being
 // told its request vanished.
 type Queue struct {
-	run func(context.Context, Job)
-	log *slog.Logger
+	// base is the context every job runs on. It is the broker's own — never
+	// the caller's: Submit does not block, so a webhook dispatch or an HTTP
+	// handler has returned (and cancelled its context) long before the deploy
+	// has read anything. Measured live on 2026-09-16, where every
+	// webhook-driven deploy died on "context canceled" and only the catch-up
+	// pass, which runs on the process's context, ever deployed anything.
+	base context.Context
+	run  func(context.Context, Job)
+	log  *slog.Logger
 
 	mu      sync.Mutex
 	pending map[string]*Job
@@ -25,16 +32,21 @@ type Queue struct {
 	live    sync.WaitGroup
 }
 
-// NewQueue builds a queue that performs jobs with run.
-func NewQueue(run func(context.Context, Job), log *slog.Logger) *Queue {
+// NewQueue builds a queue that performs jobs with run. base is the context the
+// jobs run on — the broker's, for as long as the broker lives.
+func NewQueue(base context.Context, run func(context.Context, Job), log *slog.Logger) *Queue {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Queue{run: run, log: log, pending: map[string]*Job{}, running: map[string]bool{}}
+	if base == nil {
+		base = context.Background()
+	}
+	return &Queue{base: base, run: run, log: log, pending: map[string]*Job{}, running: map[string]bool{}}
 }
 
-// Submit queues a job. It never blocks.
-func (q *Queue) Submit(ctx context.Context, job Job) {
+// Submit queues a job. It never blocks, and the job it queues does not belong
+// to whoever asked for it: it runs on the queue's own context.
+func (q *Queue) Submit(job Job) {
 	key := job.Key()
 
 	q.mu.Lock()
@@ -54,7 +66,7 @@ func (q *Queue) Submit(ctx context.Context, job Job) {
 	q.mu.Unlock()
 
 	q.live.Add(1)
-	go q.loop(ctx, key, job)
+	go q.loop(q.base, key, job)
 }
 
 // loop performs one job and then whatever queued behind it, until nothing is

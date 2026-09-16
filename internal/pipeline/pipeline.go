@@ -153,7 +153,7 @@ func (p *Pipeline) Deploy(ctx context.Context, plan deploy.Plan, env environment
 			}
 		}
 	})
-	p.Queue.Submit(ctx, deploy.Job{
+	p.Queue.Submit(deploy.Job{
 		Slug: plan.Slug, Environment: env, Targets: targets, Records: records,
 	})
 	return nil

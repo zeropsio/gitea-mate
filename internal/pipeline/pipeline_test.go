@@ -125,7 +125,7 @@ func newWorld(t *testing.T) *world {
 		Zerops: zclient, Gitea: client, ClientID: orgID, Records: records,
 		PollInterval: time.Millisecond, Timeout: 5 * time.Second,
 	}
-	queue := deploy.NewQueue(executor.Run, nil)
+	queue := deploy.NewQueue(context.Background(), executor.Run, nil)
 	return &world{
 		gitea: g, zerops: z, queue: queue,
 		pipe: &pipeline.Pipeline{
