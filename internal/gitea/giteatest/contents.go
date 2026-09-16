@@ -1,7 +1,9 @@
 package giteatest
 
 import (
+	"crypto/sha1"
 	"encoding/base64"
+	"encoding/hex"
 	"net/http"
 	"path"
 	"sort"
@@ -95,7 +97,7 @@ func (f *Fake) contents(w http.ResponseWriter, r *http.Request, full, filePath s
 	if body, ok := f.files[prefix+filePath]; ok && filePath != "" {
 		writeJSON(w, 200, gitea.Content{
 			Name: path.Base(filePath), Path: filePath, Type: "file",
-			SHA: last8(filePath), Size: int64(len(body)),
+			SHA: blobSha(body), Size: int64(len(body)),
 			Encoding: "base64", Content: base64.StdEncoding.EncodeToString([]byte(body)),
 		})
 		return
@@ -178,4 +180,11 @@ func (f *Fake) AddRepo(fullName, defaultBranch string) {
 		CloneURL:      f.srv.URL + "/" + fullName + ".git",
 		HTMLURL:       f.srv.URL + "/" + fullName,
 	}
+}
+
+// blobSha stands in for git's own: it changes when the body does, which is all
+// a recipe-delta pass compares.
+func blobSha(body string) string {
+	sum := sha1.Sum([]byte(body))
+	return hex.EncodeToString(sum[:])
 }

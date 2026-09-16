@@ -66,6 +66,8 @@ type Fake struct {
 	Minted []zerops.TokenSpec
 	// Deleted collects every token id deleted.
 	Deleted []string
+	// DeletedServices collects every service id deleted.
+	DeletedServices []string
 
 	// The deploy half (deploy.go): app versions by id, processes by id, which
 	// services have ever deployed, whose subdomain is on, and which version

@@ -99,6 +99,8 @@ func (f *Fake) serveDeploy(w http.ResponseWriter, r *http.Request, path, key str
 		f.appCode(w, strings.TrimSuffix(strings.TrimPrefix(path, "/app-version/"), "/app-code"))
 	case r.Method == "GET" && strings.HasPrefix(path, "/process/"):
 		f.process(w, lastSegment(path))
+	case r.Method == "DELETE" && strings.HasPrefix(path, "/service-stack/"):
+		f.deleteService(w, lastSegment(path))
 	default:
 		_ = key
 		return false
@@ -280,4 +282,41 @@ func (f *Fake) AddProcess(p zerops.Process) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.processes[p.ID] = p
+}
+
+// deleteService is DELETE /service-stack/{id}.
+func (f *Fake) deleteService(w http.ResponseWriter, serviceID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for projectID, list := range f.services {
+		for i, s := range list {
+			if s.ID != serviceID {
+				continue
+			}
+			f.services[projectID] = append(append([]zerops.Service{}, list[:i]...), list[i+1:]...)
+			f.DeletedServices = append(f.DeletedServices, serviceID)
+			writeJSON(w, 200, map[string]any{"id": "proc-delete"})
+			return
+		}
+	}
+	writeErr(w, 404, "serviceStackNotFound", "no such service")
+}
+
+// Services reads back one project's services.
+func (f *Fake) Services(projectID string) []zerops.Service {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]zerops.Service(nil), f.services[projectID]...)
+}
+
+// SetProjectTags replaces one project's tag list — what an owner writing the
+// registry does.
+func (f *Fake) SetProjectTags(projectID string, tags []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.projects {
+		if f.projects[i].ID == projectID {
+			f.projects[i].TagList = tags
+		}
+	}
 }
