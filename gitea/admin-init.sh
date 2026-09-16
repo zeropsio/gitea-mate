@@ -22,9 +22,13 @@
 
 set -euo pipefail
 
-cd /var/www
+# A test sources this file to drive one function on its own; a boot does not
+# set it and runs the whole thing at the bottom.
+if [ "${ADMIN_INIT_SOURCE_ONLY:-}" != 1 ]; then
+  cd /var/www
+fi
 : "${GITEA_BIN:=/var/www/bin/gitea}"
-CONF=/etc/gitea/app.ini
+: "${CONF:=/etc/gitea/app.ini}"
 USERNAME="${GITEA_ADMIN_USERNAME:-admin}"
 EMAIL="${GITEA_ADMIN_EMAIL:-$USERNAME@localhost}"
 
@@ -32,12 +36,14 @@ EMAIL="${GITEA_ADMIN_EMAIL:-$USERNAME@localhost}"
 # them, and a variable written now reaches processes started later, not this
 # one. start.sh is about to exit for the same reason, and the boot after this
 # one has everything.
-for secret in JWT_SECRET LFS_JWT_SECRET SECRET_KEY INTERNAL_TOKEN; do
-  if [ -z "${!secret:-}" ]; then
-    echo "admin-init.sh: $secret not set yet, nothing to do on this boot"
-    exit 0
-  fi
-done
+if [ "${ADMIN_INIT_SOURCE_ONLY:-}" != 1 ]; then
+  for secret in JWT_SECRET LFS_JWT_SECRET SECRET_KEY INTERNAL_TOKEN; do
+    if [ -z "${!secret:-}" ]; then
+      echo "admin-init.sh: $secret not set yet, nothing to do on this boot"
+      exit 0
+    fi
+  done
+fi
 
 # The admin commands read app.ini and talk to the database directly, so both
 # have to exist before the web server has ever run. `gitea migrate` is the
@@ -100,13 +106,35 @@ provision_admin() {
   printf '%s' "$token"    | zsc setEnv --sensitive GITEA_ADMIN_TOKEN -
 }
 
+# resolved: a value the platform has actually filled in. `OIDC_CLIENT_SECRET`
+# is `${broker_OIDC_CLIENT_SECRET}` in the import, and that reference reaches
+# this container VERBATIM until the platform resolves the sibling — 28
+# characters, not empty, so an emptiness guard lets it through. A login source
+# written with it is one Gitea can never authenticate with: every sign-in ends
+# `Failed OAuth callback: (internal) oauth2: "invalid_client"`, measured on a
+# real Mate 2026-09-16, and nothing repairs it because the source exists.
+resolved() {
+  case "${1:-}" in
+    "") return 1 ;;
+    '${'*'}') return 1 ;;
+  esac
+  return 0
+}
+
 add_oidc_source() {
-  if [ -z "${BROKER_PUBLIC_URL:-}" ] || [ -z "${OIDC_CLIENT_SECRET:-}" ]; then
-    echo "admin-init.sh: BROKER_PUBLIC_URL or OIDC_CLIENT_SECRET is not set yet, leaving the OIDC source for a later boot"
+  if ! resolved "${BROKER_PUBLIC_URL:-}" || ! resolved "${OIDC_CLIENT_SECRET:-}"; then
+    echo "admin-init.sh: BROKER_PUBLIC_URL or OIDC_CLIENT_SECRET has not resolved yet, leaving the OIDC source for a later boot"
     return 0
   fi
-  if "$GITEA_BIN" admin auth list --config "$CONF" 2>/dev/null | awk 'NR>1{print $2}' | grep -qx zerops; then
-    echo "admin-init.sh: the zerops login source already exists"
+  # Repair, not skip. The secret this boot holds is the authoritative one, and
+  # a source written on an earlier boot may carry the unresolved reference —
+  # the one state no sign-in can recover from and no other boot would fix.
+  # update-oauth with an unchanged secret is a no-op write.
+  source_id=$("$GITEA_BIN" admin auth list --config "$CONF" 2>/dev/null | awk '$2=="zerops"{print $1}' | head -n 1)
+  if [ -n "${source_id:-}" ]; then
+    echo "admin-init.sh: refreshing the zerops login source's client secret ..."
+    "$GITEA_BIN" admin auth update-oauth --config "$CONF" \
+      --id "$source_id" --key gitea --secret "$OIDC_CLIENT_SECRET"
     return 0
   fi
 
@@ -144,7 +172,8 @@ add_oidc_source() {
     --admin-group org:owner
 }
 
-provision_admin
-add_oidc_source
-
-echo "admin-init.sh: done"
+if [ "${ADMIN_INIT_SOURCE_ONLY:-}" != 1 ]; then
+  provision_admin
+  add_oidc_source
+  echo "admin-init.sh: done"
+fi

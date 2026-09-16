@@ -113,3 +113,85 @@ func TestWaitForURLIsExecutable(t *testing.T) {
 	}
 	_ = time.Now
 }
+
+// TestAdminInitOIDCSecret drives add_oidc_source with a stubbed Gitea binary.
+// The case that matters is the middle one: `${broker_OIDC_CLIENT_SECRET}`
+// reaches this container verbatim while the platform has not resolved the
+// sibling reference yet. It is 28 characters, so the emptiness guard lets it
+// through, and `add-oauth --secret` writes a login source Gitea can never
+// authenticate with — every sign-in afterwards ends
+// `Failed OAuth callback: (internal) oauth2: "invalid_client"`, and the
+// "already exists" guard means no later boot repairs it (measured live on a
+// real Mate, 2026-09-16).
+func TestAdminInitOIDCSecret(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is not on the path")
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("cwd: %v", err)
+	}
+
+	cases := []struct {
+		name     string
+		secret   string
+		existing bool
+		wantCmd  string
+		wantNone bool
+	}{
+		{name: "a resolved secret and no source", secret: "s3cr3t", wantCmd: "add-oauth"},
+		{name: "the reference has not resolved", secret: "${broker_OIDC_CLIENT_SECRET}", wantNone: true},
+		{name: "an empty secret", secret: "", wantNone: true},
+		{name: "a source from an earlier boot is repaired", secret: "s3cr3t", existing: true, wantCmd: "update-oauth"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"issuer":"x"}`))
+			}))
+			defer srv.Close()
+
+			list := "ID   Name     Type   Enabled\n"
+			if tc.existing {
+				list += "7    zerops   OAuth2   true\n"
+			}
+			stub := "#!/usr/bin/env bash\n" +
+				"printf '%s\\n' \"$*\" >> " + dir + "/calls\n" +
+				"if [ \"$1\" = admin ] && [ \"$2\" = auth ] && [ \"$3\" = list ]; then\n" +
+				"  cat <<'EOF'\n" + list + "EOF\n" +
+				"fi\nexit 0\n"
+			bin := dir + "/gitea-stub"
+			if err := os.WriteFile(bin, []byte(stub), 0o755); err != nil {
+				t.Fatalf("write stub: %v", err)
+			}
+
+			cmd := exec.Command("bash", "-c", "ADMIN_INIT_SOURCE_ONLY=1 . ./gitea/admin-init.sh && add_oidc_source")
+			cmd.Dir = root
+			cmd.Env = append(os.Environ(),
+				"GITEA_BIN="+bin, "CONF="+dir+"/app.ini",
+				"BROKER_PUBLIC_URL="+srv.URL, "OIDC_CLIENT_SECRET="+tc.secret)
+			out, runErr := cmd.CombinedOutput()
+			if runErr != nil {
+				t.Fatalf("add_oidc_source: %v\n%s", runErr, out)
+			}
+			calls, _ := os.ReadFile(dir + "/calls")
+			got := string(calls)
+			switch {
+			case tc.wantNone:
+				if strings.Contains(got, "add-oauth") || strings.Contains(got, "update-oauth") {
+					t.Errorf("the source must be left for a later boot; calls were:\n%s\noutput:\n%s", got, out)
+				}
+			default:
+				if !strings.Contains(got, tc.wantCmd) {
+					t.Errorf("want a %s call, calls were:\n%s\noutput:\n%s", tc.wantCmd, got, out)
+				}
+				if !strings.Contains(got, tc.secret) {
+					t.Errorf("the call must carry the resolved secret; calls were:\n%s", got)
+				}
+			}
+		})
+	}
+}
