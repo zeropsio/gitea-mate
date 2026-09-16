@@ -366,7 +366,8 @@ func (c *Client) DeleteProjectEnv(ctx context.Context, envID string) error {
 // Services
 // ---------------------------------------------------------------------------
 
-// Service is a service stack, as the search returns it.
+// Service is a service stack, as the search returns it. Name is the hostname
+// — the name an environment's recipe and a deploy request both use.
 type Service struct {
 	ID        string `json:"id"`
 	ProjectID string `json:"projectId"`
@@ -374,6 +375,32 @@ type Service struct {
 	Name      string `json:"name"`
 	Status    string `json:"status"`
 	Type      string `json:"serviceStackTypeId"`
+	// SubdomainAccess says whether the service already answers on its
+	// zerops.app host. Enabling it is a post-deploy call, so the broker only
+	// makes it when this is false.
+	SubdomainAccess bool `json:"subdomainAccess"`
+	// Ports is what the service listens on; one with HTTPRouting is what makes
+	// a subdomain meaningful.
+	Ports []ServicePort `json:"ports"`
+}
+
+// ServicePort is one port of a service.
+type ServicePort struct {
+	Port        int    `json:"port"`
+	Protocol    string `json:"protocol"`
+	Scheme      string `json:"scheme"`
+	HTTPRouting bool   `json:"httpRouting"`
+}
+
+// HTTP reports whether the service serves HTTP, which is what makes
+// enable-subdomain-access anything but a 400 serviceStackIsNotHttp.
+func (s Service) HTTP() bool {
+	for _, p := range s.Ports {
+		if p.HTTPRouting {
+			return true
+		}
+	}
+	return false
 }
 
 type servicePage struct {

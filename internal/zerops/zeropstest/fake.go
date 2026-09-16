@@ -66,6 +66,16 @@ type Fake struct {
 	Minted []zerops.TokenSpec
 	// Deleted collects every token id deleted.
 	Deleted []string
+
+	// The deploy half (deploy.go): app versions by id, processes by id, which
+	// services have ever deployed, whose subdomain is on, and which version
+	// names are doomed to a failed build.
+	versions   map[string]*AppVersionRecord
+	processes  map[string]zerops.Process
+	deployed   map[string]bool
+	subdomains map[string]bool
+	doomed     map[string]bool
+	sequence   int
 }
 
 // Import is one recorded service-stack import.
@@ -86,6 +96,11 @@ func New(t *testing.T, clientID string) *Fake {
 		Fail:       map[string]int{},
 		Stopped:    map[string]bool{},
 		started:    map[string]bool{},
+		versions:   map[string]*AppVersionRecord{},
+		processes:  map[string]zerops.Process{},
+		deployed:   map[string]bool{},
+		subdomains: map[string]bool{},
+		doomed:     map[string]bool{},
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
@@ -174,6 +189,12 @@ func (f *Fake) Wrote() bool {
 }
 
 func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
+	// A pre-signed blob URL carries no token and is outside the API prefix.
+	if strings.HasPrefix(r.URL.Path, appCodePath) {
+		f.appCodeBlob(w, r.URL.Path)
+		return
+	}
+
 	path := strings.TrimPrefix(r.URL.Path, "/api/rest/public")
 	key := r.Method + " " + path
 
@@ -220,6 +241,7 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		f.importServices(w, r, path)
 	case r.Method == "PUT" && (strings.HasSuffix(path, "/stop") || strings.HasSuffix(path, "/start")):
 		f.stopStart(w, path)
+	case f.serveDeploy(w, r, path, key):
 	default:
 		writeErr(w, http.StatusNotFound, "notFound", "the fake does not serve "+key)
 	}
