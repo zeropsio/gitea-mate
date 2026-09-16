@@ -14,10 +14,13 @@ every one of these holds, in this order, and refuses with `throwaway_invalid` pl
 otherwise:
 
 1. `GET /user/info` as the token answers — its `id` is the token's own id (`token_dead` otherwise).
-2. `GET /client/{ZEROPS_CLIENT_ID}/integration-token/{id}` as the token answers `200`
-   (`wrong_org` otherwise — a token from another org cannot read this org's tokens).
-3. `roleCode == NO_ACCESS`, `projects` empty, `canCreateProjects == false` and no finance flag
-   (`has_rights`).
+2. `GET /client/{org}/integration-token/{id}` as the token answers `200`, where `org` is **the
+   receiver's own org** — the broker's `ZEROPS_CLIENT_ID`, a Mate's project read with its own key —
+   never anything the presented token said about itself (`wrong_org` otherwise — a token from
+   another org cannot read this org's tokens).
+3. `roleCode == NO_ACCESS`, `projects` empty, and every flag false: `canCreateProjects`,
+   `canManageFinances`, `canManageFinance`, `hasFinances` — the spellings both implementations
+   refuse (`has_rights`).
 4. `name` starts with `gitea-signin:{host}:` where `host` is this broker's Gitea host
    (`GITEA_PUBLIC_URL` without scheme) (`wrong_name`).
 5. `created` is within five minutes of the **Zerops API's `Date` response header** — never the
@@ -150,7 +153,7 @@ one allowed `redirect_uri`: `{GITEA_PUBLIC_URL}/user/oauth2/zerops/callback`.
 | `GET /.well-known/openid-configuration` | discovery: `code` flow, `ES256`, scopes `openid email profile groups`, claims `sub email name preferred_username groups` |
 | `GET /oidc/jwks` | the ES256 key derived from `OIDC_SEED` (`kid` = the first 8 hex of its SHA-256) |
 | `GET /oidc/authorize` | validates `client_id`, `redirect_uri`, `response_type=code`; stores `{redirect_uri, state, nonce, scope}` under a random `rid` for ten minutes; `302` to `{MATE_APP_URL}/gitea-signin?rid={rid}&broker={BROKER_PUBLIC_URL}` |
-| `POST /oidc/complete` | body `{"rid": "…"}`, `Authorization: Bearer <gitea-signin throwaway>` (the check above); computes the person's claims; issues a one-use code (ten minutes, in memory) bound to the `rid`; answers `{"redirect": "<redirect_uri>?code=…&state=…"}`. CORS: `MATE_APP_URL` only |
+| `POST /oidc/complete` | body `{"rid": "…"}`, `Authorization: Bearer <gitea-signin throwaway>` (the check above); computes the person's claims; issues a one-use code (ten minutes, in memory) bound to the `rid`; answers `{"redirect": "<redirect_uri>?code=…&state=…"}`, which the app follows with a full-page navigation. CORS: the `POST` and its preflight are answered for `MATE_APP_URL` only |
 | `POST /oidc/token` | `client_secret_basic` or `_post`; `grant_type=authorization_code`; answers `access_token` (opaque, five minutes), `id_token` (ES256; `iss`, `aud=gitea`, `sub`, `nonce`, `email`, `name`, `preferred_username`, `groups`), `token_type=Bearer`, `expires_in` |
 | `GET /oidc/userinfo` | `Authorization: Bearer <access_token>` → the same claims |
 

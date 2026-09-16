@@ -7,7 +7,8 @@ none of them invents a name it does not list.
 
 Written only by org `OWNER`/`ADMIN` (the platform enforces it), read by the app and the broker.
 `PUT /project/{id}` with `name`, `description`, `tagList`, `publicIpV4Shared`, `maxCreditLimit` —
-never `userRoles`. Budget: 65 534 bytes of compact JSON per project; entries stay short.
+never `userRoles`: the call **replaces** `userRoles` when it is sent, so every tag write omits it
+and *Assign* (a role override) is the one write that carries it. Budget: 65 534 bytes of compact JSON per project; entries stay short.
 
 | Tag | Meaning |
 |---|---|
