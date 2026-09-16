@@ -1,6 +1,6 @@
 # The broker's HTTP API
 
-Five endpoints and an OIDC provider. **No endpoint takes a Zerops key**, and being inside the
+Six endpoints and an OIDC provider. **No endpoint takes a Zerops key**, and being inside the
 project proves nothing — the runners share its network — so every call is checked against the party
 it claims to be. JSON in and out; errors are `{"error": "<code>", "message": "<plain words>"}`.
 
@@ -142,6 +142,30 @@ Caller: Gitea. `X-Gitea-Signature` is the hex HMAC-SHA256 of the raw body with
 | anything else | `204`, ignored |
 
 Always `204` once the signature is good, whatever the payload; the work runs after the response.
+
+## `GET /gitea/oauth-client` — the Mate app's OAuth2 client (guide 3.7)
+
+Caller: the Mate app, from the browser, **with no credential at all**. A public client's id is not
+a secret; its redirect URIs are what protect it, and the app needs the id before anybody has signed
+in. CORS answers the origins of `MATE_APP_ORIGINS` by name — a runner in this project can reach
+this port, so nothing else is allowed, and `localhost` does not cover `127.0.0.1`.
+
+```json
+{ "clientId": "…", "redirectUris": ["https://app.example/gitea/callback"],
+  "authorizeUrl": "https://web-1234-3000.prg1.zerops.app/login/oauth/authorize",
+  "tokenUrl": "https://web-1234-3000.prg1.zerops.app/login/oauth/access_token" }
+```
+
+The client itself is registered by the rights loop, not by this route: the broker is Gitea's site
+admin, so a pass ensures one OAuth2 application named `Zerops Mate`, `confidential_client: false`,
+whose `redirect_uris` are `{origin}/gitea/callback` for every origin in `MATE_APP_ORIGINS`, sorted.
+The app cannot do this for itself — `POST /user/applications/oauth2` wants the person's Gitea
+session cookie, which `ALLOW_CREDENTIALS = false` refuses on purpose. Measured on 1.27.2: an
+application the site admin registers as a public client lets **any other person** complete the PKCE
+code flow, and the token it issues is that person's.
+
+`503 not_registered_yet` until a pass has run — the app waits and asks again rather than start a
+flow with a client id it invented.
 
 ## OIDC provider — Gitea's *Sign in with Zerops* (guide 3.6)
 

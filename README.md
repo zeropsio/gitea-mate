@@ -5,9 +5,10 @@ the only source of rights inside it.
 
 - **The broker** — a small stateless Go service (`cmd/broker`). It mirrors Zerops permissions into
   Gitea on a timer, signs people in to Gitea as an OIDC provider, hands each Mate its own Gitea bot
-  token, imports and wakes a group's Actions runner, and deploys what protected branches and tags
-  allow: a stage follows the head of its source branches, production the commits of the newest
-  release tag whose pusher it approved. It holds the account's only deploy key, and it executes no
+  token, registers the Mate app's public OAuth2 client and hands the app its `client_id`, imports
+  and wakes a group's Actions runner, and deploys what protected branches and tags allow: a stage
+  follows the head of its source branches, production the commits of the newest release tag whose
+  pusher it approved. It holds the account's only deploy key, and it executes no
   repository code — it moves a Gitea commit archive to Zerops and Zerops builds. It has no
   database, cache or queue of its own: everything it must know already lives somewhere
   authoritative (the registry tags, the group repo's `main`, the commit statuses it writes and the
@@ -64,11 +65,14 @@ export GITEA_ADMIN_TOKEN=…       GITEA_ADMIN_PASSWORD=…    GITEA_WEBHOOK_SEC
 export OIDC_CLIENT_SECRET=…      OIDC_SEED=…
 export BROKER_PUBLIC_URL=http://127.0.0.1:8080
 export MATE_APP_URL=http://127.0.0.1:5173
+export MATE_APP_ORIGINS=http://127.0.0.1:5173,http://localhost:5173
 go run ./cmd/broker
 ```
 
 Optional tunables: `LISTEN_ADDR` (`:8080`), `GITEA_ADMIN_USERNAME` (`admin`), `MIRROR_INTERVAL`
-(`3m`), `MIRROR_CAP` (`10`), `RUNNER_QUIET_PERIOD` (`15m`).
+(`3m`), `MIRROR_CAP` (`10`), `RUNNER_QUIET_PERIOD` (`15m`), `MATE_APP_ORIGINS` (`MATE_APP_URL`
+alone — every other origin the app runs from belongs in it, and the rights loop registers the app's
+OAuth2 client for a callback on each).
 
 `GITEA_ADMIN_PASSWORD` is not in `docs/vocabulary.md`'s table but guide 1.3 names it: Gitea's token
 routes (`/users/{login}/tokens`) answer `401 auth required` to an API token, however privileged

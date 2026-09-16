@@ -87,6 +87,7 @@ Zerops ones.
 | `OIDC_SEED` | import preprocessor | 64 random characters; the ES256 signing key is derived from it deterministically |
 | `BROKER_PUBLIC_URL` | import (plain) | `https://{BROKER_DOMAIN}` — the OIDC issuer |
 | `MATE_APP_URL` | the app, at import (plain) | the web app's origin; the sign-in consent page lives there |
+| `MATE_APP_ORIGINS` | the app, at import (plain) | every origin the app runs from, comma-separated — the same list `web` gets as `GITEA_CORS_ALLOW_DOMAIN`. The app's OAuth2 client is registered for `{origin}/gitea/callback` of each, and `GET /gitea/oauth-client` answers them CORS. `MATE_APP_URL` is one of them whether or not the value names it, so an unset variable is that origin alone |
 | `LISTEN_ADDR` | import (plain) | `:8080` |
 
 ## A Mate's environment (service `zcp`, written by the app — `giteaCredential.ts`)
