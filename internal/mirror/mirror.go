@@ -125,7 +125,28 @@ func (m *Mirror) Pass(ctx context.Context) (Result, error) {
 // search short of its declared total, ends the pass here — before a single
 // write.
 func (m *Mirror) Gather(ctx context.Context) (State, error) {
-	members, err := m.Zerops.Members(ctx, m.ClientID)
+	state, err := ReadOrg(ctx, m.Zerops, m.ClientID, m.GiteaProjectID)
+	if err != nil {
+		return State{}, err
+	}
+	giteaState, err := m.gatherGitea(ctx, state.Registry)
+	if err != nil {
+		return State{}, fmt.Errorf("%w: Gitea: %w", ErrUnreadable, err)
+	}
+	state.Gitea = giteaState
+	return state, nil
+}
+
+// ReadOrg reads the Zerops half of a pass: who the org's people are, what they
+// hold on each project, and the registry the Gitea project's tags carry. The
+// endpoints that must answer "may this person?" read the same thing, so one
+// rule is applied everywhere.
+//
+// Every failure is an ErrUnreadable, including a project search that came back
+// a page short of its declared total: a truncated list must never read as a
+// shrunken org.
+func ReadOrg(ctx context.Context, z *zerops.Client, clientID, giteaProjectID string) (State, error) {
+	members, err := z.Members(ctx, clientID)
 	if err != nil {
 		return State{}, fmt.Errorf("%w: the member list: %w", ErrUnreadable, err)
 	}
@@ -133,19 +154,19 @@ func (m *Mirror) Gather(ctx context.Context) (State, error) {
 		return State{}, fmt.Errorf("%w: the member list is empty, which no live org is", ErrUnreadable)
 	}
 
-	projects, err := m.Zerops.SearchProjects(ctx, m.ClientID)
+	projects, err := z.SearchProjects(ctx, clientID)
 	if err != nil {
 		return State{}, fmt.Errorf("%w: the project list: %w", ErrUnreadable, err)
 	}
 
 	var giteaProject *zerops.Project
 	for i := range projects.Projects {
-		if projects.Projects[i].ID == m.GiteaProjectID {
+		if projects.Projects[i].ID == giteaProjectID {
 			giteaProject = &projects.Projects[i]
 		}
 	}
 	if giteaProject == nil {
-		return State{}, fmt.Errorf("%w: the registry lives on project %s, which the project list does not carry", ErrUnreadable, m.GiteaProjectID)
+		return State{}, fmt.Errorf("%w: the registry lives on project %s, which the project list does not carry", ErrUnreadable, giteaProjectID)
 	}
 	reg, problems := registry.Parse(giteaProject.TagList)
 
@@ -183,13 +204,31 @@ func (m *Mirror) Gather(ctx context.Context) (State, error) {
 		}
 		state.Mates[prj.ID] = prj.Name
 	}
-
-	giteaState, err := m.gatherGitea(ctx, reg)
-	if err != nil {
-		return State{}, fmt.Errorf("%w: Gitea: %w", ErrUnreadable, err)
-	}
-	state.Gitea = giteaState
 	return state, nil
+}
+
+// Person finds one member of the org by their Zerops user id.
+func (s State) Person(userID string) (Member, bool) {
+	for _, m := range s.Members {
+		if m.UserID == userID {
+			return m, true
+		}
+	}
+	return Member{}, false
+}
+
+// RightsFor runs the role function for one person against this state.
+func (s State) RightsFor(userID string) (roles.Rights, bool) {
+	m, ok := s.Person(userID)
+	if !ok {
+		return roles.Rights{}, false
+	}
+	return roles.Compute(roles.Person{
+		ID:                m.UserID,
+		OrgRole:           m.RoleCode,
+		Status:            m.Status,
+		CanCreateProjects: m.CanCreateProjects,
+	}, s.Overrides[userID], s.Registry.Roles()), true
 }
 
 func (m *Mirror) gatherGitea(ctx context.Context, reg registry.Registry) (GiteaState, error) {

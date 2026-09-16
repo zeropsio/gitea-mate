@@ -3,31 +3,71 @@
 //
 // No endpoint takes a Zerops key, and being inside the project proves nothing
 // — the runners share its network — so every route that changes state proves
-// its caller for itself.
+// its caller for itself: /mate/credential a throwaway, /mate/repository a
+// Mate's Gitea token, /hooks/gitea the HMAC, and the OIDC routes the client
+// secret.
 package server
 
 import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/zeropsio/gitea-mate/internal/config"
+	"github.com/zeropsio/gitea-mate/internal/gitea"
+	"github.com/zeropsio/gitea-mate/internal/oidc"
+	"github.com/zeropsio/gitea-mate/internal/throwaway"
+	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
+
+// repoNamePattern is what a service repository may be called
+// (docs/vocabulary.md).
+var repoNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
+
+// Deps are what the broker's routes need. Everything is an explicit
+// dependency, so a test drives the whole router against two fakes.
+type Deps struct {
+	Zerops    *zerops.Client
+	Gitea     *gitea.Client
+	Throwaway *throwaway.Checker
+	OIDC      *oidc.Provider
+	// Hooks takes every webhook this brief does not handle. NoopHooks until the
+	// next one fills it in.
+	Hooks Hooks
+}
 
 // Server holds the broker's dependencies and builds its router.
 type Server struct {
-	cfg *config.Config
-	log *slog.Logger
+	cfg     *config.Config
+	log     *slog.Logger
+	deps    Deps
+	runners *runnerPool
 }
 
 // New builds a server. log may be nil, in which case the default logger is
-// used.
-func New(cfg *config.Config, log *slog.Logger) *Server {
+// used; Hooks may be nil, in which case nothing happens to the events the next
+// brief claims.
+func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{cfg: cfg, log: log}
+	if deps.Hooks == nil {
+		deps.Hooks = NoopHooks{}
+	}
+	s := &Server{cfg: cfg, log: log, deps: deps}
+	if deps.Zerops != nil {
+		s.runners = newRunnerPool(deps.Zerops, log, cfg.ZeropsClientID, cfg.ZeropsProjectID, cfg.RunnerQuietPeriod)
+	}
+	return s
+}
+
+// Close stops anything the server armed — a pending runner sleep, above all.
+func (s *Server) Close() {
+	if s.runners != nil {
+		s.runners.stop()
+	}
 }
 
 // Handler returns the router, wrapped in request logging.
@@ -39,15 +79,24 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	if s.deps.Throwaway != nil {
+		mux.HandleFunc("POST /mate/credential", s.handleCredential)
+	}
+	if s.deps.Gitea != nil {
+		mux.HandleFunc("POST /mate/repository", s.handleRepository)
+	}
+	mux.HandleFunc("POST /hooks/gitea", s.handleGiteaHook)
+	if s.deps.OIDC != nil {
+		s.deps.OIDC.Routes(mux)
+	}
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// WriteJSON writes v as the response body. A marshalling failure is logged by
-// the caller's absence of output, never by a half-written body: v is marshalled
-// before the header is sent.
+// WriteJSON writes v as the response body. v is marshalled before the header is
+// sent, so a failure never leaves a half-written body.
 func WriteJSON(w http.ResponseWriter, status int, v any) {
 	body, err := json.Marshal(v)
 	if err != nil {

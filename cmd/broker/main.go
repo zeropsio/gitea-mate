@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,7 +17,13 @@ import (
 	"time"
 
 	"github.com/zeropsio/gitea-mate/internal/config"
+	"github.com/zeropsio/gitea-mate/internal/gitea"
+	"github.com/zeropsio/gitea-mate/internal/mirror"
+	"github.com/zeropsio/gitea-mate/internal/oidc"
+	"github.com/zeropsio/gitea-mate/internal/roles"
 	"github.com/zeropsio/gitea-mate/internal/server"
+	"github.com/zeropsio/gitea-mate/internal/throwaway"
+	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
 
 func main() {
@@ -35,9 +42,74 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	srv := &http.Server{
+	zeropsClient := zerops.New(cfg.ZeropsAPIURL, cfg.ZeropsToken.Reveal(), nil)
+	giteaClient := gitea.New(gitea.Config{
+		BaseURL:       cfg.GiteaURL,
+		AdminToken:    cfg.GiteaAdminToken.Reveal(),
+		AdminUser:     cfg.GiteaAdminUser,
+		AdminPassword: cfg.GiteaAdminPassword.Reveal(),
+	})
+
+	checker := &throwaway.Checker{
+		Broker: zeropsClient,
+		AsCaller: func(bearer string) *zerops.Client {
+			return zerops.New(cfg.ZeropsAPIURL, bearer, nil)
+		},
+		ClientID:  cfg.ZeropsClientID,
+		GiteaHost: cfg.GiteaHost(),
+	}
+
+	rights := mirror.Mirror{
+		Zerops:         zeropsClient,
+		Gitea:          giteaClient,
+		Log:            log,
+		ClientID:       cfg.ZeropsClientID,
+		GiteaProjectID: cfg.ZeropsProjectID,
+		AdminLogin:     cfg.GiteaAdminUser,
+		HookURL:        cfg.BrokerPublicURL + "/hooks/gitea",
+		Cap:            cfg.MirrorCap,
+	}
+	rights.SetHookSecret(cfg.GiteaWebhookSecret.Reveal())
+
+	provider, err := oidc.New(oidc.Config{
+		Issuer:       cfg.BrokerPublicURL,
+		ClientSecret: cfg.OIDCClientSecret.Reveal(),
+		RedirectURI:  cfg.GiteaPublicURL + "/user/oauth2/zerops/callback",
+		MateAppURL:   cfg.MateAppURL,
+		Seed:         cfg.OIDCSeed.Reveal(),
+		Throwaway:    checker,
+		Rights: oidc.RightsFunc(func(ctx context.Context, caller throwaway.Caller) (roles.Rights, error) {
+			org, err := mirror.ReadOrg(ctx, zeropsClient, cfg.ZeropsClientID, cfg.ZeropsProjectID)
+			if err != nil {
+				return roles.Rights{}, err
+			}
+			computed, found := org.RightsFor(caller.UserID)
+			if !found {
+				return roles.Rights{}, fmt.Errorf("the org's member list does not carry %s", caller.UserID)
+			}
+			return computed, nil
+		}),
+		Log: log,
+	})
+	if err != nil {
+		return err
+	}
+	log.Info("the signing key is derived", "kid", provider.Key().KeyID())
+
+	srv := server.New(cfg, log, server.Deps{
+		Zerops:    zeropsClient,
+		Gitea:     giteaClient,
+		Throwaway: checker,
+		OIDC:      provider,
+		// The next brief fills these in: deploys, release approval, recipe
+		// deltas.
+		Hooks: server.NoopHooks{},
+	})
+	defer srv.Close()
+
+	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           server.New(cfg, log).Handler(),
+		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -47,7 +119,7 @@ func run(log *slog.Logger) error {
 	errs := make(chan error, 1)
 	go func() {
 		log.Info("broker listening", "addr", cfg.ListenAddr, "issuer", cfg.BrokerPublicURL)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errs <- err
 		}
 		close(errs)
@@ -62,5 +134,5 @@ func run(log *slog.Logger) error {
 	log.Info("broker shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	return httpServer.Shutdown(shutdownCtx)
 }

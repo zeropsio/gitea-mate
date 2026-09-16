@@ -280,3 +280,28 @@ func TestRolesProjection(t *testing.T) {
 		t.Errorf("Roles()\n got: %+v\nwant: %+v", got, want)
 	}
 }
+
+func TestRunnerHostname(t *testing.T) {
+	cases := []struct{ slug, want string }{
+		{"acme", "runneracme"},
+		{"acme-corp", "runneracmecorp"},
+		{"a", "runnera"},
+		// Zerops hostnames are 25 characters at most.
+		{"averyverylongcustomername", "runneraveryverylongcustom"},
+		{"a-very-very-long-customer", "runneraveryverylongcustom"},
+	}
+	for _, tc := range cases {
+		got := registry.RunnerHostname(tc.slug)
+		if got != tc.want {
+			t.Errorf("RunnerHostname(%q) = %q, want %q", tc.slug, got, tc.want)
+		}
+		if len(got) > 25 {
+			t.Errorf("RunnerHostname(%q) is %d characters", tc.slug, len(got))
+		}
+		for _, c := range got {
+			if !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') {
+				t.Errorf("RunnerHostname(%q) = %q carries %q", tc.slug, got, c)
+			}
+		}
+	}
+}

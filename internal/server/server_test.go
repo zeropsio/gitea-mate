@@ -21,6 +21,8 @@ func testConfig() *config.Config {
 		GiteaURL:           "http://web:3000",
 		GiteaPublicURL:     "https://git.example",
 		GiteaAdminToken:    "gt",
+		GiteaAdminUser:     "admin",
+		GiteaAdminPassword: "gp",
 		GiteaWebhookSecret: "ws",
 		OIDCClientSecret:   "cs",
 		OIDCSeed:           "seed",
@@ -31,7 +33,7 @@ func testConfig() *config.Config {
 }
 
 func TestHealthz(t *testing.T) {
-	s := New(testConfig(), slog.New(slog.DiscardHandler))
+	s := New(testConfig(), slog.New(slog.DiscardHandler), Deps{})
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -51,7 +53,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestUnknownRouteIs404(t *testing.T) {
-	s := New(testConfig(), slog.New(slog.DiscardHandler))
+	s := New(testConfig(), slog.New(slog.DiscardHandler), Deps{})
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/nothing-here", nil))
 	if rr.Code != http.StatusNotFound {

@@ -237,6 +237,17 @@ func Tags(r Registry) []string {
 	return out
 }
 
+// RunnerHostname is the Zerops hostname of a group's Actions runner service:
+// "runner" plus the slug with its dashes removed, cut to 25 characters
+// (docs/vocabulary.md — Zerops hostnames are [a-z0-9], 25 at most).
+func RunnerHostname(slug string) string {
+	name := "runner" + strings.ReplaceAll(slug, "-", "")
+	if len(name) > 25 {
+		name = name[:25]
+	}
+	return name
+}
+
 // IsRegistryTag reports whether a tag belongs to the registry — what a writer
 // strips before putting a fresh registry back on a project.
 func IsRegistryTag(tag string) bool {

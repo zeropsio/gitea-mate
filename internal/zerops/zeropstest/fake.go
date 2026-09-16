@@ -59,6 +59,7 @@ type Fake struct {
 	Requests []string
 	// Stopped tracks PUT /service-stack/{id}/stop|start.
 	Stopped map[string]bool
+	started map[string]bool
 	// Imports collects the yaml of every service-stack import.
 	Imports []Import
 	// Minted collects every token minted, by name.
@@ -84,6 +85,7 @@ func New(t *testing.T, clientID string) *Fake {
 		services:   map[string][]zerops.Service{},
 		Fail:       map[string]int{},
 		Stopped:    map[string]bool{},
+		started:    map[string]bool{},
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
@@ -457,8 +459,41 @@ func (f *Fake) stopStart(w http.ResponseWriter, path string) {
 	parts := strings.Split(strings.TrimPrefix(path, "/service-stack/"), "/")
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Stopped[parts[0]] = parts[1] == "stop"
+	stop := parts[1] == "stop"
+	f.Stopped[parts[0]] = stop
+	if !stop {
+		f.started[parts[0]] = true
+	}
+	for i, s := range f.services[f.projectOfService(parts[0])] {
+		if s.ID == parts[0] {
+			status := "ACTIVE"
+			if stop {
+				status = "STOPPED"
+			}
+			f.services[f.projectOfService(parts[0])][i].Status = status
+		}
+	}
 	writeJSON(w, 200, map[string]any{"id": "proc-1"})
+}
+
+// projectOfService finds which project a service belongs to. Called with the
+// lock held.
+func (f *Fake) projectOfService(serviceID string) string {
+	for projectID, list := range f.services {
+		for _, s := range list {
+			if s.ID == serviceID {
+				return projectID
+			}
+		}
+	}
+	return ""
+}
+
+// Started reports whether PUT /service-stack/{id}/start was ever called.
+func (f *Fake) Started(serviceID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.started[serviceID]
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
