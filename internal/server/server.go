@@ -43,6 +43,9 @@ type Deps struct {
 	// Runners imports a group's Actions runner the first time one of its
 	// workflows queues a job.
 	Runners RunnerImporter
+	// OAuthClient answers the Mate app's public OAuth2 client, and false until
+	// the rights loop has registered it. Nil means the route is not served.
+	OAuthClient func() (OAuthClient, bool)
 }
 
 // Server holds the broker's dependencies and builds its router.
@@ -96,6 +99,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	if s.deps.Deploys != nil && s.deps.Records != nil {
 		mux.HandleFunc("POST /deploy", s.handleDeploy)
 		mux.HandleFunc("GET /deploy/{id}", s.handleDeployStatus)
+	}
+	if s.deps.OAuthClient != nil {
+		mux.HandleFunc("GET /gitea/oauth-client", s.handleOAuthClient)
+		mux.HandleFunc("OPTIONS /gitea/oauth-client", s.handleOAuthClientPreflight)
 	}
 	if s.deps.OIDC != nil {
 		s.deps.OIDC.Routes(mux)

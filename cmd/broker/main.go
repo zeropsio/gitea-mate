@@ -71,6 +71,7 @@ func run(log *slog.Logger) error {
 		ClientID:       cfg.ZeropsClientID,
 		GiteaProjectID: cfg.ZeropsProjectID,
 		AdminLogin:     cfg.GiteaAdminUser,
+		AppOrigins:     cfg.MateAppOrigins,
 		HookURL:        cfg.BrokerPublicURL + "/hooks/gitea",
 		Cap:            cfg.MirrorCap,
 	}
@@ -153,6 +154,14 @@ func run(log *slog.Logger) error {
 		Deploys:   pipe,
 		Records:   records,
 		Runners:   pipe,
+		// The app's public OAuth2 client is whatever the last pass registered.
+		OAuthClient: func() (server.OAuthClient, bool) {
+			client, ok := rights.AppClient()
+			if !ok {
+				return server.OAuthClient{}, false
+			}
+			return server.OAuthClient{ClientID: client.ClientID, RedirectURIs: client.RedirectURIs}, true
+		},
 	})
 	defer srv.Close()
 
