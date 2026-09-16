@@ -61,6 +61,10 @@ func (p *Pipeline) Pass(ctx context.Context) (PassResult, error) {
 			continue
 		}
 
+		imported, problems := p.recipes(ctx, plan)
+		result.Imports += imported
+		result.Problems = append(result.Problems, problems...)
+
 		for _, env := range plan.File.Environments {
 			result.Environments++
 			deployed, problems := p.catchUp(ctx, plan, env)

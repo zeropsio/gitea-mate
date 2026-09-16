@@ -117,10 +117,14 @@ func (f *Fake) contents(w http.ResponseWriter, r *http.Request, full, filePath s
 			rel = strings.TrimPrefix(rel, filePath+"/")
 		}
 		name, _, isDir := strings.Cut(rel, "/")
-		entry := gitea.Content{Name: name, Path: strings.Trim(filePath+"/"+name, "/"), Type: "file", Size: int64(len(body))}
+		entry := gitea.Content{
+			Name: name, Path: strings.Trim(filePath+"/"+name, "/"),
+			Type: "file", Size: int64(len(body)), SHA: blobSha(body),
+		}
 		if isDir {
 			entry.Type = "dir"
 			entry.Size = 0
+			entry.SHA = ""
 		}
 		seen[name] = entry
 	}

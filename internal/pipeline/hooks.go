@@ -86,7 +86,7 @@ func (p *Pipeline) Push(ctx context.Context, org string, payload []byte) error {
 	// service's code.
 	if repo == deploy.GroupRepo {
 		if branch == environments.MainBranch {
-			return p.catchUpAll(ctx, plan)
+			return p.reconcileRecipes(ctx, plan)
 		}
 		return nil
 	}
@@ -274,7 +274,7 @@ func (p *Pipeline) PullRequest(ctx context.Context, org string, payload []byte) 
 	if err != nil {
 		return err
 	}
-	return p.catchUpAll(ctx, plan)
+	return p.reconcileRecipes(ctx, plan)
 }
 
 // Other is every event the deploy side does not claim. The runner pool takes

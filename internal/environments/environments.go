@@ -363,3 +363,60 @@ func (r Recipe) Runtimes() []RecipeService {
 	}
 	return out
 }
+
+// ---------------------------------------------------------------------------
+// Recipe deltas
+// ---------------------------------------------------------------------------
+
+// StartWithoutCode renders the given services as a services-only import
+// document, with `buildFromGit` and `zeropsSetup` replaced by
+// `startWithoutCode: true` and everything else kept as the recipe wrote it.
+//
+// The conversion is not a simplification: the platform cannot clone a private
+// repository, so a service imported from the recipe has to be created empty
+// and then deployed by the broker, which holds the credential
+// (docs/group-repo.md, "Recipe deltas").
+func StartWithoutCode(services []RecipeService) (string, error) {
+	nodes := make([]*yaml.Node, 0, len(services))
+	for _, service := range services {
+		node, err := withoutCode(service)
+		if err != nil {
+			return "", err
+		}
+		nodes = append(nodes, node)
+	}
+	if len(nodes) == 0 {
+		return "", nil
+	}
+	var rendered struct {
+		Services []*yaml.Node `yaml:"services"`
+	}
+	rendered.Services = nodes
+	raw, err := yaml.Marshal(rendered)
+	if err != nil {
+		return "", fmt.Errorf("import delta: %w", err)
+	}
+	return string(raw), nil
+}
+
+// withoutCode copies a service's mapping and swaps its two git fields for
+// startWithoutCode. The copy leaves the recipe the caller holds untouched.
+func withoutCode(service RecipeService) (*yaml.Node, error) {
+	if service.Raw == nil || service.Raw.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("import delta: %s is not a mapping", service.Hostname)
+	}
+	out := &yaml.Node{Kind: yaml.MappingNode, Tag: service.Raw.Tag}
+	for i := 0; i+1 < len(service.Raw.Content); i += 2 {
+		key := service.Raw.Content[i]
+		switch key.Value {
+		case "buildFromGit", "zeropsSetup", "startWithoutCode":
+			continue
+		}
+		out.Content = append(out.Content, key, service.Raw.Content[i+1])
+	}
+	out.Content = append(out.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "startWithoutCode"},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "true"},
+	)
+	return out, nil
+}
