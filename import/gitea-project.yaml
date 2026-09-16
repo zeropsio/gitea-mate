@@ -26,7 +26,10 @@
 #                          port included: ALLOW_DOMAIN matches a string, so
 #                          localhost does not cover 127.0.0.1 (measured
 #                          2026-09-16). The desktop and mobile shells' origins
-#                          belong here too.
+#                          belong here too. It is filled twice — `web` allows
+#                          those origins, the broker registers the app's public
+#                          OAuth2 client for a callback on each — and the two
+#                          lists are the same list on purpose.
 #
 # `<@generateRandomString(<64>)>` is the platform's preprocessor: the value is
 # generated inside the import and never passes through the browser.
@@ -110,4 +113,5 @@ services:
         sensitive: true
       BROKER_PUBLIC_URL: https://broker-${zeropsSubdomainHost}-8080.__REGION__.zerops.app
       MATE_APP_URL: __MATE_APP_URL__
+      MATE_APP_ORIGINS: __CORS__
       LISTEN_ADDR: :8080

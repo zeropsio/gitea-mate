@@ -73,6 +73,37 @@ func TestGiteaProjectImportHosts(t *testing.T) {
 	}
 }
 
+// The Mate app's origins are one list: `web` allows them, and the broker
+// registers the app's public OAuth2 client for a callback on each. A document
+// that fills __CORS__ for one service only would leave the app a client it
+// cannot use from half the shells it runs in.
+func TestGiteaProjectImportGivesBothServicesTheSameOrigins(t *testing.T) {
+	var doc struct {
+		Services []struct {
+			Hostname string         `yaml:"hostname"`
+			Vault    map[string]any `yaml:"vault"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(filledImport(t)), &doc); err != nil {
+		t.Fatalf("the import is not YAML: %v", err)
+	}
+	want := placeholders["__CORS__"]
+	got := map[string]any{}
+	for _, s := range doc.Services {
+		switch s.Hostname {
+		case "web":
+			got["web"] = s.Vault["GITEA_CORS_ALLOW_DOMAIN"]
+		case "broker":
+			got["broker"] = s.Vault["MATE_APP_ORIGINS"]
+		}
+	}
+	for _, hostname := range []string{"web", "broker"} {
+		if got[hostname] != want {
+			t.Errorf("%s got the origins %v, want %q", hostname, got[hostname], want)
+		}
+	}
+}
+
 func TestGiteaProjectImportServices(t *testing.T) {
 	var doc struct {
 		Services []struct {

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +55,13 @@ type Config struct {
 	OIDCSeed         Secret
 	BrokerPublicURL  string
 	MateAppURL       string
+	// MateAppOrigins is every origin the Mate app runs from — the web shell,
+	// the desktop and mobile ones — and it is the same list the app writes
+	// into `web`'s GITEA_CORS_ALLOW_DOMAIN. The broker registers the app's
+	// public OAuth2 client for `{origin}/gitea/callback` of each, and answers
+	// GET /gitea/oauth-client with CORS for each. MateAppURL is always one of
+	// them, whether or not the variable names it.
+	MateAppOrigins []string
 
 	ListenAddr string
 
@@ -132,6 +140,27 @@ func Load(getenv func(string) string) (*Config, error) {
 		return n
 	}
 
+	// originList reads a comma-separated list of origins. An entry that is not
+	// an absolute origin is named by the variable, never quoted.
+	originList := func(name string) []string {
+		var out []string
+		for _, raw := range strings.Split(getenv(name), ",") {
+			entry := strings.TrimSuffix(strings.TrimSpace(raw), "/")
+			if entry == "" {
+				continue
+			}
+			u, err := url.Parse(entry)
+			if err != nil || u.Scheme == "" || u.Host == "" {
+				bad = append(bad, name+" carries an entry that is not an absolute origin")
+				continue
+			}
+			if !slices.Contains(out, entry) {
+				out = append(out, entry)
+			}
+		}
+		return out
+	}
+
 	c := &Config{
 		ZeropsToken:     Secret(req("MATE_ZEROPS_TOKEN")),
 		ZeropsAPIURL:    reqURL("MATE_ZEROPS_API_URL"),
@@ -149,6 +178,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		OIDCSeed:         Secret(req("OIDC_SEED")),
 		BrokerPublicURL:  reqURL("BROKER_PUBLIC_URL"),
 		MateAppURL:       reqURL("MATE_APP_URL"),
+		MateAppOrigins:   originList("MATE_APP_ORIGINS"),
 
 		ListenAddr: strings.TrimSpace(getenv("LISTEN_ADDR")),
 
@@ -161,6 +191,11 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 	if c.GiteaAdminUser == "" {
 		c.GiteaAdminUser = defaultGiteaAdminUser
+	}
+	// The app's own URL is an origin of the app. A list that forgot it would
+	// register a client the app cannot use from the page it signs in on.
+	if c.MateAppURL != "" && !slices.Contains(c.MateAppOrigins, c.MateAppURL) {
+		c.MateAppOrigins = append(c.MateAppOrigins, c.MateAppURL)
 	}
 
 	var problems []string
