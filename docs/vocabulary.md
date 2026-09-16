@@ -39,7 +39,8 @@ app at registration and never changed (it is the Gitea org).
 | the site admin | `admin` (never `mate`) |
 | the OIDC source | `zerops` (callback `{ROOT_URL}/user/oauth2/zerops/callback`) |
 | protected branches | `main` on every repository: no direct push for anyone, merge by the `write` team; `env/*` on the group repo: the broker only; tags `v*` on the group repo: the `release` team |
-| commit statuses the broker writes | `mate/release` (`approved` / `refused`, on a tagged commit), `mate/deploy/{environment}/{service}` (`pending` / `success` / `failure`, description = the Zerops app version id) |
+| commit statuses the broker writes | `mate/release/{tag}` on the tagged group-repo commit (`success` = approved, `failure` = refused — per tag, since several tags may point at one commit), `mate/deploy/{environment}/{service}` on the service repo's commit (`pending` / `success` / `failure`, description = the Zerops app version id) |
+| the group repo's files | `environments.yaml` and the tier directories — `docs/group-repo.md` |
 | runner per group | registered at org scope, labels `ubuntu-latest:host,ubuntu-26.04:host`, named after its container hostname |
 | webhooks | one org hook per group, made by the broker, events `push`, `create`, `delete`, `pull_request`, `workflow_job`, `workflow_run`; secret `GITEA_WEBHOOK_SECRET` |
 
