@@ -59,7 +59,7 @@ func run(log *slog.Logger) error {
 		GiteaHost: cfg.GiteaHost(),
 	}
 
-	rights := mirror.Mirror{
+	rights := &mirror.Mirror{
 		Zerops:         zeropsClient,
 		Gitea:          giteaClient,
 		Log:            log,
@@ -70,6 +70,7 @@ func run(log *slog.Logger) error {
 		Cap:            cfg.MirrorCap,
 	}
 	rights.SetHookSecret(cfg.GiteaWebhookSecret.Reveal())
+	loop := mirror.NewLoop(rights, log, cfg.MirrorInterval, mirror.DefaultNudgeDelay)
 
 	provider, err := oidc.New(oidc.Config{
 		Issuer:       cfg.BrokerPublicURL,
@@ -90,6 +91,9 @@ func run(log *slog.Logger) error {
 			return computed, nil
 		}),
 		Log: log,
+		// Every token issued asks for a pass a few seconds later, so a person
+		// is in the right teams by the time they have looked at the page.
+		OnIssue: loop.Nudge,
 	})
 	if err != nil {
 		return err
@@ -116,6 +120,9 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	loopDone := make(chan struct{})
+	go func() { loop.Run(ctx); close(loopDone) }()
+
 	errs := make(chan error, 1)
 	go func() {
 		log.Info("broker listening", "addr", cfg.ListenAddr, "issuer", cfg.BrokerPublicURL)
@@ -134,5 +141,7 @@ func run(log *slog.Logger) error {
 	log.Info("broker shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return httpServer.Shutdown(shutdownCtx)
+	err = httpServer.Shutdown(shutdownCtx)
+	<-loopDone
+	return err
 }
