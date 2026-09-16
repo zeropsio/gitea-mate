@@ -101,7 +101,7 @@ The repository's org names the group; `environment` must be one of that group's 
 (`404 unknown_environment`); `service` a service of it (`404 unknown_service`). `not_a_job` is `401`,
 `wrong_repository` `403`. **The caller picks the
 environment, never a commit or a ref:** a stage deploys the head of its source ref; production the
-commits the newest tag with `mate/release: approved` lists. The request is queued per environment,
+commits the newest tag whose `mate/release/{tag}` status is `success` lists. The request is queued per environment,
 newest wins.
 
 `202`:
