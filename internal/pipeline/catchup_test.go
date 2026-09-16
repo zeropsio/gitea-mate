@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+
+	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
 
 // pushDelivery is what Gitea posts when a branch moves.
@@ -161,5 +163,49 @@ func TestAPassWithNothingRegisteredIsQuiet(t *testing.T) {
 	w.queue.Wait()
 	if result.Groups != 0 || result.Deploys != 0 || len(result.Problems) != 0 {
 		t.Fatalf("Pass = %+v", result)
+	}
+}
+
+// TestTheDeployedShaIsReadFromTheServicesEnvironment pins where the catch-up
+// pass learns what is live. The app-version API returns no name at all, so the
+// only answer is the appVersionName entry of the service's own environment —
+// and a service whose environment says it already runs the head is left alone.
+func TestTheDeployedShaIsReadFromTheServicesEnvironment(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	ctx := context.Background()
+	w.gitea.SetBranch("acme/api", "main", second)
+
+	// The stage is already there, as far as its own environment is concerned.
+	w.zerops.AddAppVersion(zerops.AppVersion{
+		ID: "ver-seeded", ServiceStackID: "svc-stage-api", Status: zerops.AppVersionActive, Sequence: 1,
+	}, second)
+
+	result, err := w.pipe.Pass(ctx)
+	if err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	w.queue.Wait()
+	if result.Deploys != 0 {
+		t.Fatalf("the pass deployed %d services, want none", result.Deploys)
+	}
+	if len(w.zerops.AppVersions("svc-stage-api")) != 1 {
+		t.Fatal("a service already at the head was deployed again")
+	}
+
+	// A production-shaped name is read the same way: the sha is the first token.
+	w.zerops.SetServices(stagePrj, zerops.Service{ID: "svc-stage-api", ProjectID: stagePrj, Name: "api",
+		Status: "ACTIVE", Ports: []zerops.ServicePort{{Port: 3000, HTTPRouting: true}}})
+	w.zerops.AddAppVersion(zerops.AppVersion{
+		ID: "ver-named", ServiceStackID: "svc-stage-api", Status: zerops.AppVersionActive, Sequence: 2,
+	}, second+" v1.0.0 u-abc")
+
+	result, err = w.pipe.Pass(ctx)
+	if err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	w.queue.Wait()
+	if result.Deploys != 0 {
+		t.Fatalf("a version named {sha} {tag} {tagger} was not read as its sha: %+v", result)
 	}
 }

@@ -25,7 +25,7 @@ func deployFake(t *testing.T) (*zeropstest.Fake, *zerops.Client) {
 	return f, f.Client("broker")
 }
 
-func TestAppVersionSha(t *testing.T) {
+func TestVersionSha(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name string
@@ -38,8 +38,8 @@ func TestAppVersionSha(t *testing.T) {
 		{"a name that starts with a space has none either", " v1", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := (zerops.AppVersion{Name: tc.in}).Sha(); got != tc.want {
-				t.Fatalf("Sha(%q) = %q, want %q", tc.in, got, tc.want)
+			if got := zerops.VersionSha(tc.in); got != tc.want {
+				t.Fatalf("VersionSha(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -54,8 +54,8 @@ func TestDeployOneArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAppVersion: %v", err)
 	}
-	if version.ID == "" || version.Name != "3f9c1b2e" {
-		t.Fatalf("CreateAppVersion = %+v, want an id and the name back", version)
+	if version.ID == "" {
+		t.Fatalf("CreateAppVersion = %+v, want an id", version)
 	}
 
 	archive := []byte("a tar.gz would go here")
@@ -75,12 +75,21 @@ func TestDeployOneArchive(t *testing.T) {
 		t.Fatalf("process status = %q, want FINISHED", final.Status)
 	}
 
-	active, found, err := client.ActiveAppVersion(ctx, "svc-api")
-	if err != nil || !found {
-		t.Fatalf("ActiveAppVersion = %v, %v, %v", active, found, err)
+	// The name never comes back on an app-version route — [zerops.AppVersion]
+	// has no field for one, which is the assertion. It comes back in exactly
+	// one place: the service's own environment.
+	detail, err := client.Service(ctx, "svc-api")
+	if err != nil {
+		t.Fatalf("Service: %v", err)
 	}
-	if active.Sha() != "3f9c1b2e" {
-		t.Fatalf("the live sha is %q, want 3f9c1b2e", active.Sha())
+	if detail.DeployedName() != "3f9c1b2e" {
+		t.Fatalf("appVersionName = %q, want the name the deploy sent", detail.DeployedName())
+	}
+	if detail.DeployedSha() != "3f9c1b2e" {
+		t.Fatalf("the live sha is %q, want 3f9c1b2e", detail.DeployedSha())
+	}
+	if detail.ActiveAppVersion == nil || detail.ActiveAppVersion.ID != version.ID {
+		t.Fatalf("activeAppVersion = %+v, want the version just deployed", detail.ActiveAppVersion)
 	}
 
 	recorded := f.AppVersions("svc-api")
@@ -133,8 +142,12 @@ func TestFailedBuildIsReportedNotHidden(t *testing.T) {
 	if final.Status != zerops.ProcessFailed {
 		t.Fatalf("process status = %q, want FAILED", final.Status)
 	}
-	if _, found, _ := client.ActiveAppVersion(ctx, "svc-api"); found {
-		t.Fatal("a failed build left an ACTIVE version behind")
+	detail, err := client.Service(ctx, "svc-api")
+	if err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+	if detail.DeployedSha() != "" || detail.ActiveAppVersion != nil {
+		t.Fatalf("a failed build left %+v live", detail.ActiveAppVersion)
 	}
 }
 
@@ -179,12 +192,12 @@ func TestPromoteReadsAppCodeAndUploadsItElsewhere(t *testing.T) {
 	if _, err := client.BuildAndDeploy(ctx, prod.ID, "zerops: []", "api"); err != nil {
 		t.Fatalf("BuildAndDeploy: %v", err)
 	}
-	active, found, err := client.ActiveAppVersion(ctx, "svc-api-prod")
-	if err != nil || !found {
-		t.Fatalf("ActiveAppVersion = %v %v %v", active, found, err)
+	live, err := client.Service(ctx, "svc-api-prod")
+	if err != nil {
+		t.Fatalf("Service: %v", err)
 	}
-	if active.Sha() != "3f9c" || active.Name != "3f9c v1.0.0 u-abc" {
-		t.Fatalf("production's version is %q", active.Name)
+	if live.DeployedSha() != "3f9c" || live.DeployedName() != "3f9c v1.0.0 u-abc" {
+		t.Fatalf("production's version is %q", live.DeployedName())
 	}
 }
 
@@ -222,7 +235,7 @@ func TestEnableSubdomainAccessIsAPostDeployCall(t *testing.T) {
 func TestAwaitProcessStopsWithTheContext(t *testing.T) {
 	t.Parallel()
 	f, client := deployFake(t)
-	f.AddAppVersion(zerops.AppVersion{ID: "ver-stuck", Name: "3f9c", ServiceStackID: "svc-api", Status: "DEPLOYING"})
+	f.AddAppVersion(zerops.AppVersion{ID: "ver-stuck", ServiceStackID: "svc-api", Status: "DEPLOYING"}, "3f9c")
 	f.AddProcess(zerops.Process{ID: "proc-stuck", Status: "RUNNING", ServiceStackID: "svc-api"})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
@@ -250,5 +263,66 @@ func TestServiceHTTP(t *testing.T) {
 				t.Fatalf("HTTP() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestOnlyTheActiveVersionsNameSurvives is the shape the catch-up pass depends
+// on: the platform keeps the name a deploy sent in the service's own
+// environment, for the ACTIVE version alone. When a newer version takes over,
+// the older one flips to BACKUP and its name is gone for good — which is why
+// a promotion can only ever take what a stage is running now.
+func TestOnlyTheActiveVersionsNameSurvives(t *testing.T) {
+	t.Parallel()
+	_, client := deployFake(t)
+	ctx := context.Background()
+
+	deployOne := func(name string) {
+		t.Helper()
+		version, err := client.CreateAppVersion(ctx, "svc-api", name)
+		if err != nil {
+			t.Fatalf("CreateAppVersion: %v", err)
+		}
+		if err := client.UploadAppVersion(ctx, version.ID, []byte(name)); err != nil {
+			t.Fatalf("UploadAppVersion: %v", err)
+		}
+		if _, err := client.BuildAndDeploy(ctx, version.ID, "zerops: []", "api"); err != nil {
+			t.Fatalf("BuildAndDeploy: %v", err)
+		}
+	}
+
+	deployOne("1111111111111111111111111111111111111111")
+	deployOne("2222222222222222222222222222222222222222")
+
+	detail, err := client.Service(ctx, "svc-api")
+	if err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+	if detail.DeployedSha() != "2222222222222222222222222222222222222222" {
+		t.Fatalf("the service reports %q, want the newest deploy", detail.DeployedSha())
+	}
+	// One entry, not a history.
+	names := 0
+	for _, entry := range detail.UserData {
+		if entry.Key == zerops.AppVersionNameKey {
+			names++
+		}
+	}
+	if names != 1 {
+		t.Fatalf("the service's environment carries %d appVersionName entries, want one", names)
+	}
+}
+
+func TestAServiceThatNeverDeployedRunsNothing(t *testing.T) {
+	t.Parallel()
+	_, client := deployFake(t)
+	detail, err := client.Service(context.Background(), "svc-db")
+	if err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+	if detail.DeployedName() != "" || detail.DeployedSha() != "" || detail.ActiveAppVersion != nil {
+		t.Fatalf("a service with no deploy reports %+v", detail)
+	}
+	if detail.Name != "db" {
+		t.Fatalf("the detail is not the service: %+v", detail.Service)
 	}
 }

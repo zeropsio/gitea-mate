@@ -15,14 +15,18 @@ import (
 // App versions
 // ---------------------------------------------------------------------------
 
-// AppVersion is one deploy of one service. Name is what the broker writes the
-// commit into (docs/group-repo.md, "What is deployed"): the full sha, and for
-// production "{sha} {tag} {tagger}". The sha is always the first token, which
-// is what lets the catch-up pass compare a desired head with what is live —
-// an app version carries no source ref of its own.
+// AppVersion is one deploy of one service.
+//
+// It carries no name. The name a create sends is never echoed and never
+// returned by any read — measured live 2026-09-16: POST
+// /service-stack/{id}/app-version does not echo it, the items of GET
+// /service-stack/{id}/app-version have no name key, GET /app-version/{id} has
+// none either, and POST /app-version/search is 404. The one place it survives
+// is the service's own environment, as [AppVersionNameKey] — for the ACTIVE
+// version alone. So a version list is good for statuses and nothing else, and
+// what is deployed is read from [ServiceDetail.DeployedSha].
 type AppVersion struct {
 	ID             string    `json:"id"`
-	Name           string    `json:"name"`
 	ServiceStackID string    `json:"serviceStackId"`
 	ProjectID      string    `json:"projectId"`
 	Status         string    `json:"status"`
@@ -34,22 +38,24 @@ type AppVersion struct {
 }
 
 // App version statuses the broker reasons about. The platform's enum is
-// longer; these are the three ends of a deploy.
+// longer; these are the three ends of a deploy. There is no `active` flag: an
+// older version's status flips to BACKUP when a newer one takes over.
 const (
 	AppVersionActive      = "ACTIVE"
+	AppVersionBackup      = "BACKUP"
 	AppVersionBuildFailed = "BUILD_FAILED"
 	AppVersionDeployFail  = "DEPLOY_FAILED"
 )
 
-// Sha is the commit an app version was built from: the first token of its
-// name. An app version the broker did not create has no sha.
-func (v AppVersion) Sha() string {
-	for i := 0; i < len(v.Name); i++ {
-		if v.Name[i] == ' ' {
-			return v.Name[:i]
+// VersionSha is the commit an app version's name was built from: its first
+// token (docs/group-repo.md — production's name is "{sha} {tag} {tagger}").
+func VersionSha(name string) string {
+	for i := 0; i < len(name); i++ {
+		if name[i] == ' ' {
+			return name[:i]
 		}
 	}
-	return v.Name
+	return name
 }
 
 // CreateAppVersion is POST /service-stack/{id}/app-version. The name is the
@@ -80,41 +86,50 @@ func (c *Client) BuildAndDeploy(ctx context.Context, versionID, zeropsYaml, setu
 	return out, err
 }
 
-// AppVersions is GET /service-stack/{id}/app-version — the direct list, not
-// the Elasticsearch search, so a version that has just settled is already
-// there. Newest first by sequence.
-func (c *Client) AppVersions(ctx context.Context, serviceID string) ([]AppVersion, error) {
-	var page struct {
-		List []AppVersion `json:"list"`
-	}
-	if _, err := c.do(ctx, "GET", "/service-stack/"+url.PathEscape(serviceID)+"/app-version", nil, &page); err != nil {
-		return nil, err
-	}
-	out := page.List
-	for i := 0; i < len(out); i++ {
-		for j := i + 1; j < len(out); j++ {
-			if out[j].Sequence > out[i].Sequence {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
-	}
-	return out, nil
+// ServiceUserData is one entry of a service's own environment, as the platform
+// holds it.
+type ServiceUserData struct {
+	Key     string `json:"key"`
+	Content string `json:"content"`
 }
 
-// ActiveAppVersion is the service's ACTIVE version, if it has one. A service
-// that has never deployed has none, which is not an error — it is what "the
-// first deploy" means.
-func (c *Client) ActiveAppVersion(ctx context.Context, serviceID string) (AppVersion, bool, error) {
-	versions, err := c.AppVersions(ctx, serviceID)
-	if err != nil {
-		return AppVersion{}, false, err
-	}
-	for _, v := range versions {
-		if v.Status == AppVersionActive {
-			return v, true, nil
+// AppVersionNameKey is the userData entry that carries the name of the version
+// a service is running — the only place the name a deploy sent survives, and
+// only while that version is ACTIVE (measured 2026-09-16).
+const AppVersionNameKey = "appVersionName"
+
+// ServiceDetail is GET /service-stack/{id}: one service with its own
+// environment and the version it is running. It is the direct read, not the
+// Elasticsearch search, so a service that has just settled is already right —
+// which matters, because a stale sha here would make the catch-up pass deploy
+// a commit that is already live.
+type ServiceDetail struct {
+	Service
+	UserData         []ServiceUserData `json:"userData"`
+	ActiveAppVersion *AppVersion       `json:"activeAppVersion"`
+}
+
+// DeployedName is the name of the version the service is running, or empty
+// when it has never deployed.
+func (d ServiceDetail) DeployedName() string {
+	for _, entry := range d.UserData {
+		if entry.Key == AppVersionNameKey {
+			return entry.Content
 		}
 	}
-	return AppVersion{}, false, nil
+	return ""
+}
+
+// DeployedSha is the commit the service is running: the first token of
+// [ServiceDetail.DeployedName]. A service that has never deployed, or one
+// deployed by something other than the broker, has none.
+func (d ServiceDetail) DeployedSha() string { return VersionSha(d.DeployedName()) }
+
+// Service is GET /service-stack/{id}.
+func (c *Client) Service(ctx context.Context, serviceID string) (ServiceDetail, error) {
+	var out ServiceDetail
+	_, err := c.do(ctx, "GET", "/service-stack/"+url.PathEscape(serviceID), nil, &out)
+	return out, err
 }
 
 // AppCodeURL is GET /app-version/{id}/app-code: a pre-signed URL to the bytes

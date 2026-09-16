@@ -147,26 +147,30 @@ func (e *Executor) Run(ctx context.Context, job Job) {
 			e.fail(ctx, job, target, "the environment's project has no service "+target.Service)
 			continue
 		}
-		e.one(ctx, job, target, service)
+		e.one(ctx, job, target, service.ID)
 	}
 }
 
-// one deploys a single service.
-func (e *Executor) one(ctx context.Context, job Job, target Target, service zerops.Service) {
+// one deploys a single service. It reads the service directly rather than
+// trusting the search's copy: what is deployed lives in the service's own
+// environment, and a stale read there would redeploy a commit already live.
+func (e *Executor) one(ctx context.Context, job Job, target Target, serviceID string) {
 	log := e.log().With("environment", job.Environment.Name, "service", target.Service, "sha", target.Sha)
 
-	active, live, err := e.Zerops.ActiveAppVersion(ctx, service.ID)
+	service, err := e.Zerops.Service(ctx, serviceID)
 	if err != nil {
-		e.fail(ctx, job, target, fmt.Sprintf("the service's app versions could not be read: %v", err))
+		e.fail(ctx, job, target, fmt.Sprintf("the service could not be read: %v", err))
 		return
 	}
-	if live && active.Sha() == target.Sha {
+	if service.DeployedSha() == target.Sha {
 		// Nothing to do. The catch-up pass reaches here on every environment
 		// that is already where it should be, which is almost every pass.
 		log.Debug("the service already runs this commit")
 		e.Records.UpdateAll(job.Records, func(r *Record) {
 			r.Status = StatusActive
-			r.VersionID = active.ID
+			if service.ActiveAppVersion != nil {
+				r.VersionID = service.ActiveAppVersion.ID
+			}
 			r.Message = "already live"
 		})
 		return
@@ -276,11 +280,11 @@ func (e *Executor) gate(ctx context.Context, target Target) (bool, string) {
 		if s.Name != target.Service {
 			continue
 		}
-		active, live, err := e.Zerops.ActiveAppVersion(ctx, s.ID)
+		staged, err := e.Zerops.Service(ctx, s.ID)
 		if err != nil {
 			return false, fmt.Sprintf("the gate %s could not be read: %v", target.Gate.Environment, err)
 		}
-		if live && active.Sha() == target.Sha {
+		if staged.DeployedSha() == target.Sha {
 			return true, ""
 		}
 		return false, fmt.Sprintf("%s is not live on %s, which this environment gates on", target.Sha, target.Gate.Environment)
@@ -328,21 +332,19 @@ func (e *Executor) promoteOption(ctx context.Context, target Target, tier enviro
 		return option
 	}
 
-	versions, err := e.Zerops.AppVersions(ctx, stageID)
+	// Only the stage's ACTIVE version has a knowable commit: the platform keeps
+	// the name in the service's environment, and an older version's name is
+	// gone the moment a newer one takes over. So a promotion is "production
+	// takes what stage is running", and anything else is a rebuild.
+	staged, err := e.Zerops.Service(ctx, stageID)
 	if err != nil {
-		e.log().Warn("the stage's app versions could not be read, so the commit is rebuilt", "err", err.Error())
+		e.log().Warn("the stage could not be read, so the commit is rebuilt", "err", err.Error())
 		return option
 	}
-	for _, v := range versions {
-		// A version that failed to build is not an artifact.
-		if v.Sha() == target.Sha && (v.Status == zerops.AppVersionActive || v.Status == "BACKUP") {
-			option.StageVersionID = v.ID
-			break
-		}
-	}
-	if option.StageVersionID == "" {
+	if staged.ActiveAppVersion == nil || staged.DeployedSha() != target.Sha {
 		return option
 	}
+	option.StageVersionID = staged.ActiveAppVersion.ID
 
 	same, err := SameBuild(zeropsYaml, target.PromoteFrom.Setup, target.Setup)
 	if err != nil {

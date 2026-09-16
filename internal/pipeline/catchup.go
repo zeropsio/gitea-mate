@@ -117,7 +117,12 @@ func (p *Pipeline) catchUp(ctx context.Context, plan deploy.Plan, env environmen
 }
 
 // liveShas is the commit each service of a project is running: the first token
-// of its active app version's name.
+// of the appVersionName entry in the service's own environment.
+//
+// It is read service by service through the direct GET, never from the app
+// version list — the list carries no name at all (measured 2026-09-16), and
+// never from the Elasticsearch search either, whose copy lags a deploy that has
+// just settled and would make this pass deploy the same commit twice.
 func (p *Pipeline) liveShas(ctx context.Context, projectID string) (map[string]string, error) {
 	services, err := p.Zerops.Services(ctx, p.ClientID, projectID)
 	if err != nil {
@@ -125,12 +130,12 @@ func (p *Pipeline) liveShas(ctx context.Context, projectID string) (map[string]s
 	}
 	out := map[string]string{}
 	for _, service := range services {
-		active, live, err := p.Zerops.ActiveAppVersion(ctx, service.ID)
+		detail, err := p.Zerops.Service(ctx, service.ID)
 		if err != nil {
-			return nil, fmt.Errorf("%s: the app versions: %w", service.Name, err)
+			return nil, fmt.Errorf("%s: %w", service.Name, err)
 		}
-		if live {
-			out[service.Name] = active.Sha()
+		if sha := detail.DeployedSha(); sha != "" {
+			out[service.Name] = sha
 		}
 	}
 	return out, nil

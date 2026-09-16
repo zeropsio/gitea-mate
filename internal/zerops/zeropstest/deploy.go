@@ -17,9 +17,14 @@ import (
 //   - a build the test marked as doomed ends its process FAILED and leaves the
 //     app version BUILD_FAILED, which is what a broken repository looks like.
 
-// AppVersionRecord is one app version the fake holds.
+// AppVersionRecord is one app version the fake holds. Name is kept here and
+// never served on an app-version route: the platform echoes it nowhere, and
+// the fake would be lying if it did. It reaches a client exactly where the
+// platform puts it — the service's own userData, while the version is ACTIVE.
 type AppVersionRecord struct {
 	zerops.AppVersion
+	// Name is what the create was called with.
+	Name string
 	// Archive is what was uploaded (or promoted) into this version.
 	Archive []byte
 	// Yaml and Setup are what build-and-deploy was called with.
@@ -29,16 +34,13 @@ type AppVersionRecord struct {
 
 // AddAppVersion seeds an existing app version on a service — what a service
 // that has already deployed looks like.
-func (f *Fake) AddAppVersion(v zerops.AppVersion) {
+func (f *Fake) AddAppVersion(v zerops.AppVersion, name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.versions == nil {
-		f.versions = map[string]*AppVersionRecord{}
-	}
 	if v.ID == "" {
-		v.ID = "ver-" + v.Name
+		v.ID = "ver-" + name
 	}
-	f.versions[v.ID] = &AppVersionRecord{AppVersion: v, Archive: []byte("seeded " + v.Name)}
+	f.versions[v.ID] = &AppVersionRecord{AppVersion: v, Name: name, Archive: []byte("seeded " + name)}
 	if v.Status == zerops.AppVersionActive {
 		f.deployed[v.ServiceStackID] = true
 	}
@@ -87,8 +89,8 @@ func (f *Fake) serveDeploy(w http.ResponseWriter, r *http.Request, path, key str
 	switch {
 	case r.Method == "POST" && strings.HasPrefix(path, "/service-stack/") && strings.HasSuffix(path, "/app-version"):
 		f.createAppVersion(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/service-stack/"), "/app-version"))
-	case r.Method == "GET" && strings.HasPrefix(path, "/service-stack/") && strings.HasSuffix(path, "/app-version"):
-		f.listAppVersions(w, strings.TrimSuffix(strings.TrimPrefix(path, "/service-stack/"), "/app-version"))
+	case r.Method == "GET" && strings.HasPrefix(path, "/service-stack/") && !strings.Contains(strings.TrimPrefix(path, "/service-stack/"), "/"):
+		f.service(w, strings.TrimPrefix(path, "/service-stack/"))
 	case r.Method == "PUT" && strings.HasSuffix(path, "/enable-subdomain-access"):
 		f.enableSubdomain(w, strings.TrimSuffix(strings.TrimPrefix(path, "/service-stack/"), "/enable-subdomain-access"))
 	case r.Method == "PUT" && strings.HasPrefix(path, "/app-version/") && strings.HasSuffix(path, "/upload"):
@@ -117,26 +119,50 @@ func (f *Fake) createAppVersion(w http.ResponseWriter, r *http.Request, serviceI
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sequence++
-	v := &AppVersionRecord{AppVersion: zerops.AppVersion{
-		ID:             "ver-" + itoa(f.sequence),
-		Name:           in.Name,
-		ServiceStackID: serviceID,
-		Status:         "UPLOADING",
-		Sequence:       f.sequence,
-	}}
+	v := &AppVersionRecord{
+		AppVersion: zerops.AppVersion{
+			ID:             "ver-" + itoa(f.sequence),
+			ServiceStackID: serviceID,
+			Status:         "UPLOADING",
+			Sequence:       f.sequence,
+		},
+		Name: in.Name,
+	}
 	f.versions[v.ID] = v
+	// The create does not echo the name.
 	writeJSON(w, 200, v.AppVersion)
 }
 
-func (f *Fake) listAppVersions(w http.ResponseWriter, serviceID string) {
+// service is GET /service-stack/{id}: the service, its own environment and the
+// version it runs. appVersionName is served for the ACTIVE version alone,
+// exactly as the platform does — an older version flips to BACKUP and its name
+// is gone for good.
+func (f *Fake) service(w http.ResponseWriter, serviceID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	records := f.versionsOf(serviceID)
-	list := make([]zerops.AppVersion, 0, len(records))
-	for _, rec := range records {
-		list = append(list, rec.AppVersion)
+	for _, list := range f.services {
+		for _, s := range list {
+			if s.ID != serviceID {
+				continue
+			}
+			detail := zerops.ServiceDetail{Service: s}
+			for _, record := range f.versionsOf(serviceID) {
+				if record.Status != zerops.AppVersionActive {
+					continue
+				}
+				active := record.AppVersion
+				detail.ActiveAppVersion = &active
+				detail.UserData = []zerops.ServiceUserData{
+					{Key: "hostname", Content: s.Name},
+					{Key: zerops.AppVersionNameKey, Content: record.Name},
+				}
+				break
+			}
+			writeJSON(w, 200, detail)
+			return
+		}
 	}
-	writeJSON(w, 200, map[string]any{"list": list})
+	writeErr(w, 400, "serviceStackNotFound", "no such service")
 }
 
 func (f *Fake) upload(w http.ResponseWriter, r *http.Request, versionID string) {
@@ -197,7 +223,7 @@ func (f *Fake) buildAndDeploy(w http.ResponseWriter, r *http.Request, versionID 
 		v.Status = zerops.AppVersionActive
 		for _, other := range f.versions {
 			if other.ServiceStackID == v.ServiceStackID && other.ID != v.ID && other.Status == zerops.AppVersionActive {
-				other.Status = "BACKUP"
+				other.Status = zerops.AppVersionBackup
 			}
 		}
 		f.deployed[v.ServiceStackID] = true
@@ -299,7 +325,7 @@ func (f *Fake) deleteService(w http.ResponseWriter, serviceID string) {
 			return
 		}
 	}
-	writeErr(w, 404, "serviceStackNotFound", "no such service")
+	writeErr(w, 400, "serviceStackNotFound", "no such service")
 }
 
 // Services reads back one project's services.
