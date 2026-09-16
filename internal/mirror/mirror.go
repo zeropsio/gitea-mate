@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zeropsio/gitea-mate/internal/gitea"
@@ -37,6 +38,9 @@ type Mirror struct {
 
 	// AdminLogin is the site admin the broker is.
 	AdminLogin string
+	// AppOrigins is every origin the Mate app runs from. The app's public
+	// OAuth2 client is registered for the callback of each.
+	AppOrigins []string
 	// HookURL is where Gitea posts this account's webhooks.
 	HookURL string
 	// Cap is the most destructive actions one pass may apply.
@@ -50,6 +54,11 @@ type Mirror struct {
 	// It is unexported and write-only (SetHookSecret) so no call site can pass
 	// it by accident into something that logs.
 	hookSecret string
+
+	// mu guards appClient, which a pass writes and the /gitea/oauth-client
+	// route reads.
+	mu        sync.Mutex
+	appClient *AppClient
 }
 
 func (m *Mirror) now() time.Time {
@@ -95,6 +104,15 @@ func (r Result) LogValue() slog.Value {
 
 // Pass reads the org, plans and applies. It is the whole loop.
 func (m *Mirror) Pass(ctx context.Context) (Result, error) {
+	// The Mate app's OAuth2 client depends on nothing the org says, so it is
+	// made true first: a Zerops that cannot be read must not leave the app
+	// without the client id it signs people in with.
+	var appFailure string
+	if err := m.EnsureAppClient(ctx); err != nil {
+		appFailure = "the Mate app's OAuth2 client: " + err.Error()
+		m.log().Warn("the Mate app's OAuth2 client could not be registered", "err", err.Error())
+	}
+
 	state, err := m.Gather(ctx)
 	if err != nil {
 		return Result{}, err
@@ -124,6 +142,9 @@ func (m *Mirror) Pass(ctx context.Context) (Result, error) {
 	applied, failures := m.Apply(ctx, plan)
 	result.Applied = applied
 	result.Failures = failures
+	if appFailure != "" {
+		result.Failures = append(result.Failures, appFailure)
+	}
 	return result, nil
 }
 
