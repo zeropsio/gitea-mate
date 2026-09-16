@@ -210,3 +210,90 @@ func (c *Client) Archive(ctx context.Context, owner, repo, sha string) ([]byte, 
 	}
 	return raw, nil
 }
+
+// ---------------------------------------------------------------------------
+// Peeling a tag to its commit
+// ---------------------------------------------------------------------------
+
+// GitObject is what a ref or a tag object points at.
+type GitObject struct {
+	Type string `json:"type"`
+	SHA  string `json:"sha"`
+	URL  string `json:"url"`
+}
+
+// Reference is one row of GET /repos/{o}/{r}/git/refs/{ref}.
+type Reference struct {
+	Ref    string    `json:"ref"`
+	Object GitObject `json:"object"`
+}
+
+// TagRef reads `refs/tags/{tag}`. Gitea answers a list for a prefix and a bare
+// object for an exact ref depending on the version, so both are accepted.
+func (c *Client) TagRef(ctx context.Context, owner, repo, tag string) (Reference, error) {
+	path := "/repos/" + esc(owner) + "/" + esc(repo) + "/git/refs/tags/" + esc(tag)
+	var raw json.RawMessage
+	if err := c.do(ctx, http.MethodGet, path, nil, &raw, authToken); err != nil {
+		return Reference{}, err
+	}
+	var list []Reference
+	if err := json.Unmarshal(raw, &list); err == nil {
+		for _, ref := range list {
+			if ref.Ref == "refs/tags/"+tag {
+				return ref, nil
+			}
+		}
+		if len(list) == 1 {
+			return list[0], nil
+		}
+		return Reference{}, &APIError{Status: http.StatusNotFound, Message: "no ref refs/tags/" + tag, Path: "GET " + path}
+	}
+	var single Reference
+	if err := json.Unmarshal(raw, &single); err != nil {
+		return Reference{}, fmt.Errorf("gitea: GET %s: decode: %w", path, err)
+	}
+	return single, nil
+}
+
+// maxPeel bounds the walk from a ref to a commit. A tag of a tag of a tag is
+// legal git and vanishingly rare; a cycle is not legal at all, and this is what
+// stops one becoming a loop.
+const maxPeel = 8
+
+// PeelToCommit walks an object until it is a commit. An annotated tag's object
+// is the commit; a tag of a tag takes one more hop.
+func (c *Client) PeelToCommit(ctx context.Context, owner, repo string, object GitObject) (string, error) {
+	for hop := 0; hop < maxPeel; hop++ {
+		switch object.Type {
+		case "commit":
+			return object.SHA, nil
+		case "tag":
+			annotated, err := c.AnnotatedTag(ctx, owner, repo, object.SHA)
+			if err != nil {
+				return "", err
+			}
+			if annotated.Object.SHA == "" {
+				return "", fmt.Errorf("gitea: the tag object %s points at nothing", object.SHA)
+			}
+			object = GitObject{Type: annotated.Object.Type, SHA: annotated.Object.SHA}
+		default:
+			return "", fmt.Errorf("gitea: %s/%s: a %s is not a commit or a tag", owner, repo, object.Type)
+		}
+	}
+	return "", fmt.Errorf("gitea: %s/%s: a tag %d objects deep is not peeled", owner, repo, maxPeel)
+}
+
+// TagCommit is the commit a tag names, however the tag was made.
+//
+// Gitea 1.27.2's `create` webhook carries the peeled commit for a tag created
+// through POST /repos/{o}/{r}/tags, and the tag object's sha for one pushed by
+// git (measured 2026-09-16) — so the payload's sha is not a commit and cannot
+// be treated as one. The ref is resolved and peeled instead, which answers the
+// same commit either way.
+func (c *Client) TagCommit(ctx context.Context, owner, repo, tag string) (string, error) {
+	ref, err := c.TagRef(ctx, owner, repo, tag)
+	if err != nil {
+		return "", err
+	}
+	return c.PeelToCommit(ctx, owner, repo, ref.Object)
+}

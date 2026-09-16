@@ -28,7 +28,13 @@ type pushPayload struct {
 	} `json:"repository"`
 }
 
-// createPayload is a branch or tag creation.
+// createPayload is a branch or tag creation. Gitea sends only these five keys.
+//
+// SHA is deliberately not used to address the commit: for an annotated tag it
+// is the peeled commit when the tag was created through
+// POST /repos/{o}/{r}/tags, and the tag object's sha when the tag was pushed by
+// git (measured on 1.27.2, 2026-09-16). The broker resolves the ref instead,
+// which answers the same commit either way.
 type createPayload struct {
 	Ref     string `json:"ref"`
 	RefType string `json:"ref_type"`
@@ -141,13 +147,16 @@ func (p *Pipeline) Create(ctx context.Context, org string, payload []byte) error
 	if repo != registry.GroupRepo {
 		return nil
 	}
-	if body.SHA == "" {
-		return fmt.Errorf("the tag %s names no commit", body.Ref)
+	// The verdict has to land on the commit, and a payload's sha is one of two
+	// things depending on how the tag was made, so the ref is peeled instead.
+	commit, err := p.tagCommit(ctx, owner, repo, body)
+	if err != nil {
+		return err
 	}
 
 	// A re-delivered webhook for a tag that already has a verdict changes
 	// nothing: a refused tag stays refused, for ever.
-	if _, judged, err := deploy.Judged(ctx, p.Gitea, owner, repo, body.SHA, body.Ref); err != nil {
+	if _, judged, err := deploy.Judged(ctx, p.Gitea, owner, repo, commit, body.Ref); err != nil {
 		return err
 	} else if judged {
 		p.log().Info("a release was already judged", "group", org, "tag", body.Ref)
@@ -168,7 +177,7 @@ func (p *Pipeline) Create(ctx context.Context, org string, payload []byte) error
 	if approved {
 		verdict = deploy.ReleaseApproved
 	}
-	if _, err := p.Gitea.CreateStatus(ctx, owner, repo, body.SHA, gitea.NewStatus{
+	if _, err := p.Gitea.CreateStatus(ctx, owner, repo, commit, gitea.NewStatus{
 		Context: deploy.ReleaseContext(body.Ref), State: verdict, Description: why,
 	}); err != nil {
 		return fmt.Errorf("the verdict on %s could not be written: %w", body.Ref, err)
@@ -189,6 +198,32 @@ func (p *Pipeline) Create(ctx context.Context, org string, payload []byte) error
 		}
 	}
 	return nil
+}
+
+// tagCommit peels the tag to the commit the verdict belongs on. The ref is the
+// authority; the payload's sha is only the fallback for a tag whose ref has
+// already moved or gone, and it is peeled too — it may itself be a tag object.
+func (p *Pipeline) tagCommit(ctx context.Context, owner, repo string, body createPayload) (string, error) {
+	tag := strings.TrimPrefix(body.Ref, "refs/tags/")
+	commit, err := p.Gitea.TagCommit(ctx, owner, repo, tag)
+	if err == nil {
+		return commit, nil
+	}
+	if body.SHA == "" {
+		return "", fmt.Errorf("the tag %s could not be resolved and names no commit: %w", body.Ref, err)
+	}
+	p.log().Warn("a release tag's ref could not be read, so its payload sha is peeled instead",
+		"group", owner, "tag", body.Ref, "err", err.Error())
+
+	peeled, peelErr := p.Gitea.PeelToCommit(ctx, owner, repo, gitea.GitObject{Type: "tag", SHA: body.SHA})
+	if peelErr == nil {
+		return peeled, nil
+	}
+	if gitea.IsNotFound(peelErr) {
+		// No tag object behind it, so the payload's sha is the commit.
+		return body.SHA, nil
+	}
+	return "", peelErr
 }
 
 // MayRelease re-checks a tag's pusher in Zerops — the mirror lags a role

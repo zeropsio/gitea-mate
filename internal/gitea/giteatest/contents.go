@@ -31,12 +31,27 @@ func (f *Fake) SetBranch(fullName, branch, sha string) {
 	f.branches[fullName+"@"+branch] = sha
 }
 
-// AddTag registers a tag and the annotated tag object behind it.
+// AddTag registers a tag and the annotated tag object behind it. The tag
+// object points at the tag's commit unless the fixture said otherwise, which is
+// what `refs/tags/{name}` then peels through.
 func (f *Fake) AddTag(fullName string, tag gitea.Tag, annotated gitea.AnnotatedTag) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if annotated.Object.SHA == "" {
+		annotated.Object.Type, annotated.Object.SHA = "commit", tag.Commit.SHA
+	}
 	f.tags[fullName] = append(f.tags[fullName], tag)
 	f.annotated[fullName+"@"+tag.ID] = annotated
+}
+
+// AddLightweightTag registers a tag with no object behind it: `refs/tags/{name}`
+// points straight at the commit.
+func (f *Fake) AddLightweightTag(fullName, name, commit string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	tag := gitea.Tag{Name: name, ID: commit}
+	tag.Commit.SHA = commit
+	f.tags[fullName] = append(f.tags[fullName], tag)
 }
 
 // SetArchive gives a commit its archive bytes.
@@ -69,6 +84,8 @@ func (f *Fake) serveContents(w http.ResponseWriter, r *http.Request, full, rest 
 			out = []gitea.Tag{}
 		}
 		writeJSON(w, 200, out)
+	case r.Method == http.MethodGet && strings.HasPrefix(rest, "/git/refs/tags/"):
+		f.tagRef(w, full, strings.TrimPrefix(rest, "/git/refs/tags/"))
 	case r.Method == http.MethodGet && strings.HasPrefix(rest, "/git/tags/"):
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -191,4 +208,24 @@ func (f *Fake) AddRepo(fullName, defaultBranch string) {
 func blobSha(body string) string {
 	sum := sha1.Sum([]byte(body))
 	return hex.EncodeToString(sum[:])
+}
+
+// tagRef is GET /repos/{o}/{r}/git/refs/tags/{name}. An annotated tag's ref
+// points at the tag object; a lightweight one's points at the commit. Gitea
+// answers a list, and so does this.
+func (f *Fake) tagRef(w http.ResponseWriter, full, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, tag := range f.tags[full] {
+		if tag.Name != name {
+			continue
+		}
+		object := gitea.GitObject{Type: "commit", SHA: tag.Commit.SHA}
+		if _, annotated := f.annotated[full+"@"+tag.ID]; annotated {
+			object = gitea.GitObject{Type: "tag", SHA: tag.ID}
+		}
+		writeJSON(w, 200, []gitea.Reference{{Ref: "refs/tags/" + name, Object: object}})
+		return
+	}
+	fail(w, http.StatusNotFound, "no such ref")
 }

@@ -3,6 +3,7 @@ package gitea_test
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,5 +146,74 @@ func TestAnnotatedTagCarriesItsTagger(t *testing.T) {
 	}
 	if !got.Tagger.Date.Equal(when) || got.Tagger.Name != "u-abc" {
 		t.Fatalf("tagger = %+v", got.Tagger)
+	}
+}
+
+// TestTagCommitPeelsBothKindsOfTag is the shape the release verdict depends on.
+// Gitea's `create` webhook carries the peeled commit for a tag made through the
+// API and the tag object's sha for one pushed by git, so the broker resolves the
+// ref and peels it instead of trusting either.
+func TestTagCommitPeelsBothKindsOfTag(t *testing.T) {
+	t.Parallel()
+	f, client := readFake(t)
+	ctx := context.Background()
+
+	annotated := gitea.Tag{Name: "v1.0.0", ID: "tagobject-1"}
+	annotated.Commit.SHA = "commit-1"
+	f.AddTag("acme/group", annotated, gitea.AnnotatedTag{
+		Tag: "v1.0.0", SHA: "tagobject-1", Message: "api 3f9c\n",
+	})
+	f.AddLightweightTag("acme/group", "v2.0.0", "commit-2")
+
+	for _, tc := range []struct {
+		name string
+		tag  string
+		want string
+	}{
+		{"an annotated tag peels through its object", "v1.0.0", "commit-1"},
+		{"a lightweight tag's ref is the commit", "v2.0.0", "commit-2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := client.TagCommit(ctx, "acme", "group", tc.tag)
+			if err != nil {
+				t.Fatalf("TagCommit(%s): %v", tc.tag, err)
+			}
+			if got != tc.want {
+				t.Fatalf("TagCommit(%s) = %q, want %q", tc.tag, got, tc.want)
+			}
+		})
+	}
+
+	if _, err := client.TagCommit(ctx, "acme", "group", "v9.9.9"); !gitea.IsNotFound(err) {
+		t.Fatalf("a tag that does not exist = %v, want a 404", err)
+	}
+}
+
+func TestPeelToCommitRefusesWhatItCannotPeel(t *testing.T) {
+	t.Parallel()
+	_, client := readFake(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name   string
+		object gitea.GitObject
+		want   string
+	}{
+		{"a commit is already peeled", gitea.GitObject{Type: "commit", SHA: "commit-1"}, ""},
+		{"a tree is not a commit", gitea.GitObject{Type: "tree", SHA: "tree-1"}, "is not a commit or a tag"},
+		{"a blob is not either", gitea.GitObject{Type: "blob", SHA: "blob-1"}, "is not a commit or a tag"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := client.PeelToCommit(ctx, "acme", "group", tc.object)
+			if tc.want == "" {
+				if err != nil || got != tc.object.SHA {
+					t.Fatalf("PeelToCommit = %q, %v", got, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("PeelToCommit = %v, want it to mention %q", err, tc.want)
+			}
+		})
 	}
 }

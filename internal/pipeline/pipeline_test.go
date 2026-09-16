@@ -276,3 +276,89 @@ func TestOnlyATagOnTheGroupRepoIsARelease(t *testing.T) {
 		t.Fatal("something that is not a release was judged as one")
 	}
 }
+
+// TestAReleaseIsJudgedOnThePeeledCommit is the two paths a tag reaches Gitea
+// by. Its `create` webhook carries the peeled commit for a tag created through
+// POST /repos/{o}/{r}/tags, and the tag object's sha for one pushed by git
+// (measured on 1.27.2, 2026-09-16) — and the verdict, and the commits the tag
+// lists, must land on the commit either way.
+func TestAReleaseIsJudgedOnThePeeledCommit(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		payloadSha string
+	}{
+		{"a tag created through the API carries the peeled commit", "commit-1"},
+		{"a tag pushed by git carries the tag object", "obj-v1.0.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			w.tag(t, "v1.0.0", "commit-1", "api "+first+"\n", time.Now())
+
+			raw, _ := json.Marshal(map[string]any{
+				"ref": "v1.0.0", "ref_type": "tag", "sha": tc.payloadSha,
+				"repository": map[string]any{"full_name": "acme/group"},
+				"sender":     map[string]any{"login": roles.Login(ownerUser)},
+			})
+			if err := w.pipe.Create(context.Background(), "acme", raw); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			w.queue.Wait()
+
+			// The verdict is on the commit, not on whatever the payload said.
+			if got := w.statuses(t, "acme/group", "commit-1")[deploy.ReleaseContext("v1.0.0")]; got != deploy.ReleaseApproved {
+				t.Fatalf("mate/release/v1.0.0 on the commit = %q, want approved", got)
+			}
+			if len(w.gitea.Statuses("acme/group", "obj-v1.0.0")) != 0 {
+				t.Fatal("a verdict landed on the tag object instead of the commit")
+			}
+			// And the tag's commits deployed.
+			if len(w.zerops.AppVersions("svc-prod-api")) != 1 {
+				t.Fatal("the approved release did not deploy")
+			}
+		})
+	}
+}
+
+// TestARefusedTagStaysRefusedAcrossBothPaths: the re-delivery Gitea sends for a
+// git-pushed tag names the tag object, and must still find the verdict that was
+// written on the commit.
+func TestARefusedTagStaysRefusedAcrossBothPaths(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	ctx := context.Background()
+	w.tag(t, "v1.0.0", "commit-1", "api "+first+"\n", time.Now())
+
+	deliver := func(sha, pusher string) {
+		t.Helper()
+		raw, _ := json.Marshal(map[string]any{
+			"ref": "v1.0.0", "ref_type": "tag", "sha": sha,
+			"repository": map[string]any{"full_name": "acme/group"},
+			"sender":     map[string]any{"login": pusher},
+		})
+		if err := w.pipe.Create(ctx, "acme", raw); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	deliver("commit-1", roles.Login(plainUser))
+	deliver("obj-v1.0.0", roles.Login(ownerUser))
+	w.queue.Wait()
+
+	verdicts := 0
+	for _, s := range w.gitea.Statuses("acme/group", "commit-1") {
+		if s.Context == deploy.ReleaseContext("v1.0.0") {
+			verdicts++
+			if s.State != deploy.ReleaseRefused {
+				t.Fatalf("the verdict changed to %q on the other path's redelivery", s.State)
+			}
+		}
+	}
+	if verdicts != 1 {
+		t.Fatalf("%d verdicts were written, want one", verdicts)
+	}
+	if len(w.zerops.AppVersions("svc-prod-api")) != 0 {
+		t.Fatal("a refused tag deployed")
+	}
+}
