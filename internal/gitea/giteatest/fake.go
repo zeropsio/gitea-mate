@@ -56,6 +56,14 @@ type Fake struct {
 	statuses      map[string][]gitea.CommitStatus
 	jobs          map[string]gitea.Job // "org/repo/jobID"
 
+	// The read side (contents.go): a repository's files at a ref, its branch
+	// heads, its tags and the archives of its commits.
+	files     map[string]string // "org/repo@ref:path"
+	branches  map[string]string // "org/repo@branch" -> sha
+	tags      map[string][]gitea.Tag
+	annotated map[string]gitea.AnnotatedTag // "org/repo@tagObjectSha"
+	archives  map[string][]byte             // "org/repo@sha"
+
 	// Calls is every "METHOD /path" the fake served.
 	Calls []string
 	// Fail forces a status for one "METHOD /path".
@@ -77,6 +85,11 @@ func New(t *testing.T) *Fake {
 		hooks:         map[string][]gitea.Hook{},
 		statuses:      map[string][]gitea.CommitStatus{},
 		jobs:          map[string]gitea.Job{},
+		files:         map[string]string{},
+		branches:      map[string]string{},
+		tags:          map[string][]gitea.Tag{},
+		annotated:     map[string]gitea.AnnotatedTag{},
+		archives:      map[string][]byte{},
 		Fail:          map[string]int{},
 		nextID:        1,
 	}
@@ -710,6 +723,7 @@ func (f *Fake) repoRoutes(w http.ResponseWriter, r *http.Request, path string) {
 			out = []gitea.CommitStatus{}
 		}
 		writeJSON(w, 200, out)
+	case f.serveContents(w, r, full, rest):
 	case strings.HasPrefix(rest, "/actions/jobs/"):
 		f.mu.Lock()
 		defer f.mu.Unlock()
