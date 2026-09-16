@@ -17,7 +17,11 @@
 #   __ZEROPS_CLIENT_ID__   the org id.
 #   __ZEROPS_PROJECT_ID__  this project's id — where the registry tags live.
 #   __MATE_APP_URL__       the web app's origin; the sign-in consent page.
-#   __REGION__             the region's app host, e.g. `app-prg1`.
+#   __REGION__             the region's name, e.g. `prg1` — what the app reads
+#                          off the new project's `publicZone`. Both shapes are
+#                          derived from it here: `api.app-{region}.zerops.io`
+#                          for the API and `{host}.{region}.zerops.app` for a
+#                          subdomain.
 #   __CORS__               every origin the Mate app runs from, comma-separated,
 #                          port included: ALLOW_DOMAIN matches a string, so
 #                          localhost does not cover 127.0.0.1 (measured
@@ -72,7 +76,7 @@ services:
       ZEROPS_TOKEN:
         value: __ZEROPS_TOKEN__
         sensitive: true
-      ZEROPS_API_URL: https://api.__REGION__.zerops.io
+      ZEROPS_API_URL: https://api.app-__REGION__.zerops.io
       ZEROPS_CLIENT_ID: __ZEROPS_CLIENT_ID__
       ZEROPS_PROJECT_ID: __ZEROPS_PROJECT_ID__
       GITEA_URL: http://web:3000
