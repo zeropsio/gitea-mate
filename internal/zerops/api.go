@@ -394,9 +394,15 @@ type ServicePort struct {
 
 // HTTP reports whether the service serves HTTP, which is what makes
 // enable-subdomain-access anything but a 400 serviceStackIsNotHttp.
+//
+// Two shapes answer this, and only one of them carries the routing flags:
+// POST /service-stack/search returns `httpRouting` and `portRouting`, while
+// GET /service-stack/{id} — the read the executor makes before it publishes a
+// service — returns the port's `scheme` and no flags at all (measured
+// 2026-09-16). So the scheme decides when the flag is absent.
 func (s Service) HTTP() bool {
 	for _, p := range s.Ports {
-		if p.HTTPRouting {
+		if p.HTTPRouting || p.Scheme == "http" || p.Scheme == "https" {
 			return true
 		}
 	}

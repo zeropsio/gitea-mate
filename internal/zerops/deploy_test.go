@@ -254,9 +254,18 @@ func TestServiceHTTP(t *testing.T) {
 		service zerops.Service
 		want    bool
 	}{
-		{"a web service routes http", zerops.Service{Ports: []zerops.ServicePort{{Port: 3000, HTTPRouting: true}}}, true},
-		{"a database does not", zerops.Service{Ports: []zerops.ServicePort{{Port: 5432}}}, false},
+		{"a web service routes http", zerops.Service{Ports: []zerops.ServicePort{{Port: 3000, HTTPRouting: true, Scheme: "http"}}}, true},
+		{"a database does not", zerops.Service{Ports: []zerops.ServicePort{{Port: 5432, Scheme: "postgresql"}}}, false},
 		{"a service with no ports does not", zerops.Service{}, false},
+		// GET /service-stack/{id} — the read the executor makes before it
+		// turns public access on — carries `scheme` and no routing flags at
+		// all; only POST /service-stack/search carries `httpRouting`
+		// (measured 2026-09-16). Read through the GET, every service looked
+		// like a service that serves no HTTP, and a stage that deployed
+		// perfectly was never published.
+		{"the GET's shape, an http service", zerops.Service{Ports: []zerops.ServicePort{{Port: 80, Protocol: "tcp", Scheme: "http"}}}, true},
+		{"the GET's shape, https", zerops.Service{Ports: []zerops.ServicePort{{Port: 443, Protocol: "tcp", Scheme: "https"}}}, true},
+		{"the GET's shape, a database", zerops.Service{Ports: []zerops.ServicePort{{Port: 5432, Protocol: "tcp", Scheme: "postgresql"}}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.service.HTTP(); got != tc.want {
