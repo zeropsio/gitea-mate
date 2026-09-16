@@ -128,3 +128,32 @@ func TestARunnerOfAGroupThatLeftTheRegistryIsDeleted(t *testing.T) {
 		t.Fatalf("the pass removed something it should not have: %v", names)
 	}
 }
+
+// TestADeletionThatFailsIsReportedNotAssumed: the platform answers a process,
+// not a finished deletion, so a pass that did not wait would report a runner
+// gone that is still there.
+func TestADeletionThatFailsIsReportedNotAssumed(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.zerops.FailDeletes = true
+	w.zerops.SetServices(giteaPrj,
+		zerops.Service{ID: "svc-web", ProjectID: giteaPrj, Name: "web"},
+		zerops.Service{ID: "svc-runner-gone", ProjectID: giteaPrj, Name: registry.RunnerHostname("departed")},
+	)
+
+	result, err := w.pipe.Pass(context.Background())
+	if err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	w.queue.Wait()
+
+	found := false
+	for _, problem := range result.Problems {
+		if strings.Contains(problem, registry.RunnerHostname("departed")) && strings.Contains(problem, "FAILED") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the failed deletion was not reported: %v", result.Problems)
+	}
+}

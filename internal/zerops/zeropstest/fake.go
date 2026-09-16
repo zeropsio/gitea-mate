@@ -71,6 +71,9 @@ type Fake struct {
 	Deleted []string
 	// DeletedServices collects every service id deleted.
 	DeletedServices []string
+	// FailDeletes makes the process a deletion answers end FAILED — what a
+	// service the platform would not remove looks like.
+	FailDeletes bool
 
 	// The deploy half (deploy.go): app versions by id, processes by id, which
 	// services have ever deployed, whose subdomain is on, and which version

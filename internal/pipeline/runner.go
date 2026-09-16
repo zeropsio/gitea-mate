@@ -38,11 +38,23 @@ func (p *Pipeline) reconcileRunners(ctx context.Context, reg registry.Registry) 
 	}
 	sort.Slice(stale, func(i, j int) bool { return stale[i].Name < stale[j].Name })
 	for _, service := range stale {
-		if err := p.Zerops.DeleteService(ctx, service.ID); err != nil {
+		// The platform answers a process, not a finished deletion: the service
+		// is gone only once it has FINISHED, and a pass that did not wait would
+		// report a deletion that had not happened yet.
+		process, err := p.Zerops.DeleteService(ctx, service.ID)
+		if err != nil {
 			problems = append(problems, "the runner "+service.Name+" could not be deleted: "+err.Error())
 			continue
 		}
-		p.log().Info("a runner of a group that left the registry was deleted", "hostname", service.Name)
+		final, err := p.Zerops.AwaitProcess(ctx, process.ID, p.PollInterval)
+		switch {
+		case err != nil:
+			problems = append(problems, "the deletion of the runner "+service.Name+" could not be followed: "+err.Error())
+		case final.Status != zerops.ProcessFinished:
+			problems = append(problems, "the deletion of the runner "+service.Name+" ended as "+final.Status)
+		default:
+			p.log().Info("a runner of a group that left the registry was deleted", "hostname", service.Name)
+		}
 	}
 	return problems
 }

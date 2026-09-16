@@ -321,7 +321,14 @@ func (f *Fake) deleteService(w http.ResponseWriter, serviceID string) {
 			}
 			f.services[projectID] = append(append([]zerops.Service{}, list[:i]...), list[i+1:]...)
 			f.DeletedServices = append(f.DeletedServices, serviceID)
-			writeJSON(w, 200, map[string]any{"id": "proc-delete"})
+			f.sequence++
+			status := zerops.ProcessFinished
+			if f.FailDeletes {
+				status = zerops.ProcessFailed
+			}
+			proc := zerops.Process{ID: "proc-" + itoa(f.sequence), Status: status, ActionName: "stack.delete"}
+			f.processes[proc.ID] = proc
+			writeJSON(w, 200, proc)
 			return
 		}
 	}

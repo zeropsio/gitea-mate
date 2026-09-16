@@ -301,7 +301,12 @@ func (c *Client) doRaw(ctx context.Context, method, path, contentType string, bo
 // DeleteService is DELETE /service-stack/{id}. The broker calls it for one
 // thing only: the Actions runner of a group that left the registry, which is
 // the one service it created by itself.
-func (c *Client) DeleteService(ctx context.Context, serviceID string) error {
-	_, err := c.do(ctx, "DELETE", "/service-stack/"+url.PathEscape(serviceID), nil, nil)
-	return err
+//
+// It answers a process, not a finished deletion (measured at BASIC_USER,
+// 2026-09-16): the caller polls it, and only afterwards is GET
+// /service-stack/{id} a 400 serviceStackNotFound.
+func (c *Client) DeleteService(ctx context.Context, serviceID string) (Process, error) {
+	var out Process
+	_, err := c.do(ctx, "DELETE", "/service-stack/"+url.PathEscape(serviceID), nil, &out)
+	return out, err
 }

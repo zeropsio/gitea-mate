@@ -326,3 +326,28 @@ func TestAServiceThatNeverDeployedRunsNothing(t *testing.T) {
 		t.Fatalf("the detail is not the service: %+v", detail.Service)
 	}
 }
+
+func TestDeleteServiceIsAProcess(t *testing.T) {
+	t.Parallel()
+	f, client := deployFake(t)
+	ctx := context.Background()
+
+	process, err := client.DeleteService(ctx, "svc-db")
+	if err != nil {
+		t.Fatalf("DeleteService: %v", err)
+	}
+	if process.ID == "" {
+		t.Fatal("DeleteService answered no process to wait on")
+	}
+	final, err := client.AwaitProcess(ctx, process.ID, time.Millisecond)
+	if err != nil || final.Status != zerops.ProcessFinished {
+		t.Fatalf("AwaitProcess = %+v, %v", final, err)
+	}
+	// Afterwards the service is a 400 serviceStackNotFound, not a 404.
+	if _, err := client.Service(ctx, "svc-db"); zerops.Status(err) != 400 || zerops.Code(err) != "serviceStackNotFound" {
+		t.Fatalf("reading a deleted service = %v, want 400 serviceStackNotFound", err)
+	}
+	if len(f.DeletedServices) != 1 || f.DeletedServices[0] != "svc-db" {
+		t.Fatalf("the platform recorded %v", f.DeletedServices)
+	}
+}

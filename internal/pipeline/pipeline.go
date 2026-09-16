@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/environments"
@@ -43,6 +44,10 @@ type Pipeline struct {
 	// RunnerImport is the text of import/runner.yaml, with its two
 	// placeholders still in it.
 	RunnerImport string
+
+	// PollInterval is how often a platform process the pass started is asked
+	// where it is. Zero means the client's default.
+	PollInterval time.Duration
 
 	// seenRecipe is the blob sha of each tier's import.yaml the last pass saw,
 	// keyed "{slug}/{tier}". It is the only thing this package remembers, and
