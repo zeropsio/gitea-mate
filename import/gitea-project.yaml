@@ -92,7 +92,7 @@ services:
       # needs the password as well as the token: Gitea's token routes answer
       # 401 "auth required" to an API token, however privileged (measured on
       # 1.27.2), so minting a Mate bot's credential takes basic auth. A
-      # reference resolves in the broker's container and nowhere else.
+      # reference resolves in the broker's container and nowhere else — but not necessarily before the first boot: a container can start holding the literal `${…}`, so every reader treats that shape as not arrived yet (measured 2026-09-16).
       GITEA_ADMIN_TOKEN:
         value: ${web_GITEA_ADMIN_TOKEN}
         sensitive: true

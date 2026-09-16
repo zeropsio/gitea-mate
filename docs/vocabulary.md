@@ -40,7 +40,7 @@ app at registration — on a collision the app numbers it (`acme-2`, `acme-3`) �
 | a person's login | `u-` + the Zerops user id, lower-cased, every character outside `[a-z0-9]` dropped (deterministic, valid for Gitea, never an e-mail's local part); full name from Zerops |
 | the site admin | `admin` (never `mate`) |
 | the OIDC source | `zerops` (callback `{ROOT_URL}/user/oauth2/zerops/callback`) |
-| protected branches | `main` on every repository: no direct push for anyone, merge by the `write` team; `env/*` on the group repo: the broker only; tags `v*` on the group repo: the `release` team |
+| protected branches | `main` on every repository: no direct push for anyone, merge by the `write` team; `env/*` on the group repo: the broker only; tags `v*` on the group repo: the `release` team. `main` is born with an initial commit, so a Mate's branch must descend from it (zcp fetches `main` before it branches) — an unrelated history merges only by rebase (measured 2026-09-16). The API merge is refused to the site admin when a merge whitelist is set; only a member of the whitelisted team merges |
 | commit statuses the broker writes | `mate/release/{tag}` on the tagged group-repo commit (`success` = approved, `failure` = refused — per tag, since several tags may point at one commit), `mate/deploy/{environment}/{service}` on the service repo's commit (`pending` / `success` / `failure`, description = the Zerops app version id) |
 | the group repo's files | `environments.yaml` and the tier directories — `docs/group-repo.md` |
 | runner per group | registered at org scope, labels `ubuntu-latest:host,ubuntu-26.04:host`, named after its container hostname |
