@@ -122,6 +122,14 @@ func (f *Fake) AddMember(m zerops.Member) {
 	f.members = append(f.members, m)
 }
 
+// ClearMembers empties the member list — what a read that comes back with
+// nothing looks like.
+func (f *Fake) ClearMembers() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.members = nil
+}
+
 // SetProjects replaces the org's projects.
 func (f *Fake) SetProjects(p ...zerops.Project) {
 	f.mu.Lock()

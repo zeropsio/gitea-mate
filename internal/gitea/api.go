@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -143,13 +144,18 @@ func (c *Client) WhoAmI(ctx context.Context) (User, error) {
 // Tokens — basic auth only
 // ---------------------------------------------------------------------------
 
-// AccessToken is one of a user's API tokens. Value is set only by Mint.
+// AccessToken is one of a user's API tokens. Value is set only by MintToken.
+//
+// CreatedAt is real on the list route and zero on the create response
+// (measured on 1.27.2), which is why the rights loop reads a generation's age
+// from a list and never from the answer that minted it.
 type AccessToken struct {
-	ID             int64    `json:"id"`
-	Name           string   `json:"name"`
-	Scopes         []string `json:"scopes"`
-	TokenLastEight string   `json:"token_last_eight"`
-	Value          string   `json:"sha1"`
+	ID             int64     `json:"id"`
+	Name           string    `json:"name"`
+	Scopes         []string  `json:"scopes"`
+	TokenLastEight string    `json:"token_last_eight"`
+	CreatedAt      time.Time `json:"created_at"`
+	Value          string    `json:"sha1"`
 }
 
 // MintToken is POST /users/{login}/tokens: the site admin mints a token for
