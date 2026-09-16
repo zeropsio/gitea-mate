@@ -73,7 +73,11 @@ type Result struct {
 	Destructive int
 	Problems    []string
 	Failures    []string
-	Plan        Plan
+	// AwaitingSignIn is how many people hold rights and have no Gitea account
+	// yet. It is information, not a problem: the account is made at the first
+	// sign-in.
+	AwaitingSignIn int
+	Plan           Plan
 }
 
 // LogValue is what the loop logs: counts and nothing that identifies a
@@ -85,6 +89,7 @@ func (r Result) LogValue() slog.Value {
 		slog.Int("destructive", r.Destructive),
 		slog.Int("problems", len(r.Problems)),
 		slog.Int("failures", len(r.Failures)),
+		slog.Int("awaiting_sign_in", r.AwaitingSignIn),
 	)
 }
 
@@ -102,10 +107,11 @@ func (m *Mirror) Pass(ctx context.Context) (Result, error) {
 	})
 
 	result := Result{
-		Planned:     len(plan.Actions),
-		Destructive: plan.Destructive(),
-		Problems:    plan.Problems,
-		Plan:        plan,
+		Planned:        len(plan.Actions),
+		Destructive:    plan.Destructive(),
+		Problems:       plan.Problems,
+		AwaitingSignIn: len(plan.AwaitingSignIn),
+		Plan:           plan,
 	}
 	cap := m.Cap
 	if cap <= 0 {
@@ -456,5 +462,11 @@ func Describe(p Plan) string {
 	}
 	sort.Strings(p.Problems)
 	lines = append(lines, p.Problems...)
+	if len(p.AwaitingSignIn) > 0 {
+		awaiting := append([]string(nil), p.AwaitingSignIn...)
+		sort.Strings(awaiting)
+		lines = append(lines, fmt.Sprintf("%d with rights and no Gitea account yet, which the first sign-in makes: %s",
+			len(awaiting), strings.Join(awaiting, ", ")))
+	}
 	return strings.Join(lines, "\n")
 }

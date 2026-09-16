@@ -387,7 +387,7 @@ func TestIntegrationTokensAreNotPeople(t *testing.T) {
 			t.Errorf("the plan acts on an integration token: %s", a)
 		}
 	}
-	for _, p := range plan.Problems {
+	for _, p := range append(plan.Problems, plan.AwaitingSignIn...) {
 		if strings.Contains(p, "tok-1") {
 			t.Errorf("an integration token was reported as a person: %s", p)
 		}

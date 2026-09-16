@@ -209,9 +209,16 @@ func (a Action) String() string {
 // Plan is a pass's intent.
 type Plan struct {
 	Actions []Action
-	// Problems are things the pass noticed and will not act on: a malformed
-	// registry tag, a person with no Gitea account yet.
+	// Problems are things the pass noticed and will not act on, and that a
+	// person has to put right: a malformed registry tag, a group whose org
+	// could not be made.
 	Problems []string
+	// AwaitingSignIn are the people who hold rights and have no Gitea account
+	// yet. Gitea makes an account at a person's first sign-in, so this is the
+	// ordinary state of everyone who has not signed in: the pass counts them
+	// and stays problem-free. Somebody who has an account and is missing from
+	// a team is a diff, and lands in Actions.
+	AwaitingSignIn []string
 }
 
 // Destructive counts the actions the cap governs.
@@ -248,7 +255,7 @@ func Compute(state State, opts Options) Plan {
 	}
 	p := &planner{state: state, opts: opts}
 	p.plan()
-	return Plan{Actions: p.actions, Problems: p.problems}
+	return Plan{Actions: p.actions, Problems: p.problems, AwaitingSignIn: p.awaiting}
 }
 
 type planner struct {
@@ -256,6 +263,7 @@ type planner struct {
 	opts     Options
 	actions  []Action
 	problems []string
+	awaiting []string
 }
 
 func (p *planner) do(a Action)             { p.actions = append(p.actions, a) }
@@ -381,10 +389,11 @@ func (p *planner) planPeople() {
 		if !known {
 			// A person who has never signed in has no Gitea account: the OIDC
 			// source makes one at their first sign-in, and the pass a few
-			// seconds later puts them in their teams. Nothing to do, and it is
-			// not a problem worth a line for an inactive person.
+			// seconds later puts them in their teams. Nothing to do, and
+			// nothing wrong — waiting for a sign-in is counted, never
+			// reported, and an inactive person is not even that.
 			if rights.Active && len(rights.Claims) > 0 {
-				p.note("%s has rights but no Gitea account yet; the first sign-in makes one", login)
+				p.awaiting = append(p.awaiting, login)
 			}
 			continue
 		}

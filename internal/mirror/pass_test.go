@@ -275,10 +275,54 @@ func TestResultLogsCountsOnly(t *testing.T) {
 	}
 	for _, attr := range v.Group() {
 		switch attr.Key {
-		case "planned", "applied", "destructive", "problems", "failures":
+		case "planned", "applied", "destructive", "problems", "failures", "awaiting_sign_in":
 		default:
 			t.Errorf("the log carries %q, which is not a count", attr.Key)
 		}
+	}
+}
+
+// A Gitea account is made at a person's first sign-in, so "has rights, has no
+// account" is the ordinary state of everyone who has not signed in yet — the
+// summary counts them. A person who has signed in and is missing from a team
+// is a real diff, and the pass plans it.
+func TestAPersonWithoutAnAccountIsCountedNotReported(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+
+	first, err := r.mirror.Pass(ctx)
+	if err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	if len(first.Problems) != 0 {
+		t.Errorf("the pass reported %v", first.Problems)
+	}
+	// Olga and Jan both hold rights and neither has signed in.
+	if first.AwaitingSignIn != 2 {
+		t.Errorf("awaiting = %d, want the two people with rights and no account", first.AwaitingSignIn)
+	}
+
+	// They sign in; the next pass has accounts to put in teams.
+	r.gitea.AddUser(giteaUser(roles.Login("u-owner")))
+	r.gitea.AddUser(giteaUser(roles.Login("u-jan")))
+
+	second, err := r.mirror.Pass(ctx)
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if second.AwaitingSignIn != 0 {
+		t.Errorf("awaiting = %d once everyone has an account", second.AwaitingSignIn)
+	}
+	if len(second.Problems) != 0 {
+		t.Errorf("the pass reported %v", second.Problems)
+	}
+	// Missing from a team is a diff, not a note: the pass planned and applied
+	// the memberships.
+	if second.Planned == 0 || second.Applied != second.Planned {
+		t.Fatalf("the pass planned %d and applied %d; failures: %v", second.Planned, second.Applied, second.Failures)
+	}
+	if got := r.gitea.TeamMembers("acme", "write"); !contains(got, roles.Login("u-jan")) {
+		t.Errorf("write team = %v", got)
 	}
 }
 
