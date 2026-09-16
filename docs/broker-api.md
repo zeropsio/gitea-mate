@@ -15,7 +15,7 @@ otherwise:
 
 1. `GET /user/info` as the token answers — its `id` is the token's own id (`token_dead` otherwise).
 2. `GET /client/{org}/integration-token/{id}` as the token answers `200`, where `org` is **the
-   receiver's own org** — the broker's `ZEROPS_CLIENT_ID`, a Mate's project read with its own key —
+   receiver's own org** — the broker's `MATE_ZEROPS_CLIENT_ID`, a Mate's project read with its own key —
    never anything the presented token said about itself (`wrong_org` otherwise — a token from
    another org cannot read this org's tokens).
 3. `roleCode == NO_ACCESS`, `projects` empty, and every flag false: `canCreateProjects`,

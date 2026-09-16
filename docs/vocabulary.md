@@ -69,12 +69,16 @@ app at registration — on a collision the app numbers it (`acme-2`, `acme-3`) �
 
 ## The broker's environment (its own service, sensitive unless noted)
 
+The platform refuses any imported variable whose name starts with `ZEROPS_`, case-insensitively
+(`400 userDataZeropsPrefixForbidden`, measured 2026-09-16) — hence the `MATE_` prefix on the four
+Zerops ones.
+
 | Variable | Set by | Holds |
 |---|---|---|
-| `ZEROPS_TOKEN` | the app, at import | the broker's Zerops token |
-| `ZEROPS_API_URL` | import (plain) | `https://api.app-prg1.zerops.io` (the region's API) |
-| `ZEROPS_CLIENT_ID` | the app, at import (plain) | the org id |
-| `ZEROPS_PROJECT_ID` | the app, at import (plain) | the Gitea project's id — where the registry lives |
+| `MATE_ZEROPS_TOKEN` | the app, at import | the broker's Zerops token |
+| `MATE_ZEROPS_API_URL` | import (plain) | `https://api.app-prg1.zerops.io` (the region's API) |
+| `MATE_ZEROPS_CLIENT_ID` | the app, at import (plain) | the org id |
+| `MATE_ZEROPS_PROJECT_ID` | the app, at import (plain) | the Gitea project's id — where the registry lives |
 | `GITEA_URL` | import (plain) | `http://web:3000` |
 | `GITEA_PUBLIC_URL` | import (plain) | `https://{GITEA_DOMAIN}` |
 | `GITEA_ADMIN_TOKEN` | reference `${web_GITEA_ADMIN_TOKEN}` | Gitea's site-admin API token |
