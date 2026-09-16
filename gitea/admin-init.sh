@@ -110,6 +110,20 @@ add_oidc_source() {
     return 0
   fi
 
+  # add-oauth reads the discovery document as it runs. Both services are
+  # imported at once, so on a fresh account the broker is usually still
+  # building — and a source added then is written with no provider behind it
+  # ("Failed to create OpenID Connect Provider ... Non-success code for
+  # Discovery URL: 502", measured 2026-09-16): the sign-in page offers no
+  # Zerops link and, since the guard above then sees the source, no later boot
+  # ever repairs it. So wait, and on a broker that never answers leave the
+  # source for a boot that can add it properly.
+  echo "admin-init.sh: waiting for the broker's discovery URL ..."
+  if ! ./gitea/wait-for-url.sh "$BROKER_PUBLIC_URL/.well-known/openid-configuration" 900; then
+    echo "admin-init.sh: the broker never answered, leaving the zerops login source for a later boot"
+    return 0
+  fi
+
   echo "admin-init.sh: adding the zerops login source ..."
   # --secret is argv-only: `admin auth add-oauth` offers no file or stdin form
   # for it. The value comes from this service's sensitive environment and is
