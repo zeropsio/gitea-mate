@@ -134,6 +134,16 @@ func (p *Pipeline) Deploy(ctx context.Context, plan deploy.Plan, env environment
 		return nil
 	}
 
+	// The records carry the sha the resolver decided before the job is queued,
+	// so the 202 answers with the commit a caller could not have named.
+	p.Records.UpdateAll(records, func(r *deploy.Record) {
+		for _, target := range targets {
+			if r.Service == "" || r.Service == target.Service {
+				r.Sha = target.Sha
+				break
+			}
+		}
+	})
 	p.Queue.Submit(ctx, deploy.Job{
 		Slug: plan.Slug, Environment: env, Targets: targets, Records: records,
 	})

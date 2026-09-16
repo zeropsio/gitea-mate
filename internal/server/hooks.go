@@ -17,11 +17,13 @@ import (
 	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
 
-// Hooks is everything a Gitea webhook asks for that this brief does not build:
+// Hooks is everything a Gitea webhook asks for that is not the routes' own:
 // deploys, release approval and recipe deltas. The broker answers 204 as soon
 // as the signature checks out and hands the payload here, after the response.
 //
-// [NoopHooks] is the implementation until the next brief fills it in.
+// [pipeline.Pipeline] implements it. [NoopHooks] is the null object a server
+// built without a deploy side gets, so a broker that only mirrors rights still
+// answers a webhook correctly.
 type Hooks interface {
 	// Push is a push to any branch of any repository of a group's org.
 	Push(ctx context.Context, org string, payload []byte) error
@@ -168,17 +170,21 @@ type runnerPool struct {
 	projectID string
 	quiet     time.Duration
 
+	// importRunner makes a group's runner service the first time one of its
+	// workflows queues a job.
+	importRunner func(context.Context, string) error
+
 	mu     sync.Mutex
 	timers map[string]*time.Timer
 }
 
-func newRunnerPool(z *zerops.Client, log *slog.Logger, clientID, projectID string, quiet time.Duration) *runnerPool {
+func newRunnerPool(z *zerops.Client, log *slog.Logger, clientID, projectID string, quiet time.Duration, importRunner func(context.Context, string) error) *runnerPool {
 	if quiet <= 0 {
 		quiet = 15 * time.Minute
 	}
 	return &runnerPool{
 		zerops: z, log: log, clientID: clientID, projectID: projectID,
-		quiet: quiet, timers: map[string]*time.Timer{},
+		quiet: quiet, timers: map[string]*time.Timer{}, importRunner: importRunner,
 	}
 }
 
@@ -206,6 +212,18 @@ func (p *runnerPool) wake(ctx context.Context, org string) {
 
 	service, ok := p.service(ctx, org)
 	if !ok {
+		// A group whose first workflow has not run yet has no runner service.
+		// Importing it is what makes this job the group's first.
+		if p.importRunner == nil {
+			return
+		}
+		if err := p.importRunner(ctx, org); err != nil {
+			p.log.Error("the group's runner could not be imported", "org", org, "err", err.Error())
+			return
+		}
+		// The import starts the service itself; a job that queued with no
+		// runner online waits, and one registered afterwards takes it within a
+		// second of starting (ledger 2026-09-16).
 		return
 	}
 	if service.Status == "ACTIVE" || service.Status == "STARTING" {
@@ -269,8 +287,6 @@ func (p *runnerPool) service(ctx context.Context, org string) (zerops.Service, b
 			return s, true
 		}
 	}
-	// A group whose first workflow has not run yet has no runner service; the
-	// next brief imports one here.
 	p.log.Info("the group has no runner service yet", "org", org, "hostname", hostname)
 	return zerops.Service{}, false
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/environments"
@@ -147,4 +148,60 @@ func (p *Pipeline) catchUpAll(ctx context.Context, plan deploy.Plan) error {
 		}
 	}
 	return nil
+}
+
+// Loop runs passes on a timer, as the rights loop does. The two are separate
+// goroutines on purpose: a deploy that takes a minute must not hold up a
+// permission change, and a permission read that fails must not stop a deploy.
+type Loop struct {
+	Pipeline *Pipeline
+	Log      *slog.Logger
+	Interval time.Duration
+}
+
+// DefaultInterval is how often the deploy pass runs. It is the safety net
+// under the webhooks, not the usual path, so it is slower than the rights
+// loop's.
+const DefaultInterval = 5 * time.Minute
+
+// Run passes immediately — a fresh container catches up without waiting out an
+// interval — and then on every tick, until ctx is done. One goroutine owns
+// every pass, so two never overlap.
+func (l *Loop) Run(ctx context.Context) {
+	interval := l.Interval
+	if interval <= 0 {
+		interval = DefaultInterval
+	}
+	log := l.Log
+	if log == nil {
+		log = slog.Default()
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	pass := func() {
+		if ctx.Err() != nil {
+			return
+		}
+		result, err := l.Pipeline.Pass(ctx)
+		if err != nil {
+			log.Warn("the deploy pass could not read the account, so it deployed nothing", "err", err.Error())
+			return
+		}
+		for _, problem := range result.Problems {
+			log.Warn("a deploy pass problem", "problem", problem)
+		}
+		log.Info("deploy pass", "result", result)
+	}
+
+	pass()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pass()
+		}
+	}
 }

@@ -5,9 +5,14 @@ the only source of rights inside it.
 
 - **The broker** — a small stateless Go service (`cmd/broker`). It mirrors Zerops permissions into
   Gitea on a timer, signs people in to Gitea as an OIDC provider, hands each Mate its own Gitea bot
-  token, wakes and sleeps a group's Actions runner, and (later) deploys what protected branches and
-  tags allow. It has no database, cache or queue of its own: everything it must know already lives
-  somewhere authoritative, so a restart is always safe.
+  token, imports and wakes a group's Actions runner, and deploys what protected branches and tags
+  allow: a stage follows the head of its source branches, production the commits of the newest
+  release tag whose pusher it approved. It holds the account's only deploy key, and it executes no
+  repository code — it moves a Gitea commit archive to Zerops and Zerops builds. It has no
+  database, cache or queue of its own: everything it must know already lives somewhere
+  authoritative (the registry tags, the group repo's `main`, the commit statuses it writes and the
+  commit sha in each app version's name), so a restart is always safe and the next pass catches up
+  whatever a webhook could not deliver.
 - **Gitea's deployment** — `zerops.yaml` with three setups (`gitea`, `broker`, `runner`), Gitea's
   `app.ini` and init scripts under `gitea/`, and the import files the Mate app and the broker send
   under `import/`.
@@ -34,6 +39,9 @@ internal/throwaway  the six-step check that proves a person
 internal/gitea      the Gitea admin client
 internal/registry   the group registry, parsed from the Gitea project's tags
 internal/mirror     the rights loop: plan Gitea writes, then apply them
+internal/environments the group repo's environments.yaml and its tiers
+internal/deploy     the decision, the per-environment queue and the executor
+internal/pipeline   the webhooks and the catch-up pass that drive them
 internal/oidc       the ES256 OIDC provider Gitea signs people in through
 internal/server     the routes
 gitea/              app.ini and the init scripts that run in the container
@@ -80,7 +88,8 @@ appears. Both document their placeholders at the top. The project keeps the plat
 
 `actions/deploy/action.yml` is the composite action a workflow calls instead of holding a deploy
 credential: it asks the broker, polls, and falls back to the commit status if the broker forgot the
-deploy across a restart.
+deploy across a restart. `import/runner.yaml` is also embedded into the binary (`embed.go`), so the
+broker imports a runner with no file to find at run time and the document keeps one home.
 
 ## Tests
 
@@ -89,6 +98,9 @@ make test      # go test ./...
 make lint      # gofmt -l, go vet
 make build     # go build ./cmd/broker
 ```
+
+The merge of a multi-source stage runs real `git` in a temporary directory; those tests skip
+themselves when `git` is not on the path.
 
 `internal/gitea` also carries an integration test against a real Gitea. It is skipped unless both
 variables are set, and the token reaches it only through the environment — never a file, a fixture

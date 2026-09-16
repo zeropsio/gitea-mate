@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/zeropsio/gitea-mate/internal/config"
+	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/gitea"
 	"github.com/zeropsio/gitea-mate/internal/oidc"
 	"github.com/zeropsio/gitea-mate/internal/throwaway"
@@ -33,9 +34,15 @@ type Deps struct {
 	Gitea     *gitea.Client
 	Throwaway *throwaway.Checker
 	OIDC      *oidc.Provider
-	// Hooks takes every webhook this brief does not handle. NoopHooks until the
-	// next one fills it in.
+	// Hooks takes every webhook the routes do not handle themselves.
 	Hooks Hooks
+	// Deploys is what POST /deploy and GET /deploy/{id} drive, and Records the
+	// broker's memory of its deploys.
+	Deploys Deploys
+	Records *deploy.Records
+	// Runners imports a group's Actions runner the first time one of its
+	// workflows queues a job.
+	Runners RunnerImporter
 }
 
 // Server holds the broker's dependencies and builds its router.
@@ -58,7 +65,7 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 	}
 	s := &Server{cfg: cfg, log: log, deps: deps}
 	if deps.Zerops != nil {
-		s.runners = newRunnerPool(deps.Zerops, log, cfg.ZeropsClientID, cfg.ZeropsProjectID, cfg.RunnerQuietPeriod)
+		s.runners = newRunnerPool(deps.Zerops, log, cfg.ZeropsClientID, cfg.ZeropsProjectID, cfg.RunnerQuietPeriod, s.ensureRunner)
 	}
 	return s
 }
@@ -86,6 +93,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /mate/repository", s.handleRepository)
 	}
 	mux.HandleFunc("POST /hooks/gitea", s.handleGiteaHook)
+	if s.deps.Deploys != nil && s.deps.Records != nil {
+		mux.HandleFunc("POST /deploy", s.handleDeploy)
+		mux.HandleFunc("GET /deploy/{id}", s.handleDeployStatus)
+	}
 	if s.deps.OIDC != nil {
 		s.deps.OIDC.Routes(mux)
 	}

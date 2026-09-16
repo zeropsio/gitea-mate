@@ -11,15 +11,20 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	giteamate "github.com/zeropsio/gitea-mate"
 	"github.com/zeropsio/gitea-mate/internal/config"
+	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/gitea"
 	"github.com/zeropsio/gitea-mate/internal/mirror"
 	"github.com/zeropsio/gitea-mate/internal/oidc"
+	"github.com/zeropsio/gitea-mate/internal/pipeline"
 	"github.com/zeropsio/gitea-mate/internal/roles"
 	"github.com/zeropsio/gitea-mate/internal/server"
 	"github.com/zeropsio/gitea-mate/internal/throwaway"
@@ -100,14 +105,49 @@ func run(log *slog.Logger) error {
 	}
 	log.Info("the signing key is derived", "kid", provider.Key().KeyID())
 
+	records := deploy.NewRecords(0)
+	executor := &deploy.Executor{
+		Zerops:   zeropsClient,
+		Gitea:    giteaClient,
+		Log:      log,
+		ClientID: cfg.ZeropsClientID,
+		Records:  records,
+	}
+	queue := deploy.NewQueue(executor.Run, log)
+	pipe := &pipeline.Pipeline{
+		Zerops:         zeropsClient,
+		Gitea:          giteaClient,
+		Log:            log,
+		ClientID:       cfg.ZeropsClientID,
+		GiteaProjectID: cfg.ZeropsProjectID,
+		Resolver: &deploy.Resolver{
+			Gitea: giteaClient,
+			Log:   log,
+			Merger: &deploy.Merger{
+				Gitea: giteaClient,
+				Log:   log,
+				// The admin token travels in the clone URL and nowhere else:
+				// it is built for each clone and never stored.
+				CloneURL: func(owner, repo string) string {
+					return cloneURL(cfg.GiteaURL, cfg.GiteaAdminUser, cfg.GiteaAdminToken.Reveal(), owner, repo)
+				},
+			},
+		},
+		Queue:        queue,
+		Records:      records,
+		RunnerImport: giteamate.RunnerImport,
+	}
+	deployLoop := &pipeline.Loop{Pipeline: pipe, Log: log}
+
 	srv := server.New(cfg, log, server.Deps{
 		Zerops:    zeropsClient,
 		Gitea:     giteaClient,
 		Throwaway: checker,
 		OIDC:      provider,
-		// The next brief fills these in: deploys, release approval, recipe
-		// deltas.
-		Hooks: server.NoopHooks{},
+		Hooks:     pipe,
+		Deploys:   pipe,
+		Records:   records,
+		Runners:   pipe,
 	})
 	defer srv.Close()
 
@@ -122,6 +162,11 @@ func run(log *slog.Logger) error {
 
 	loopDone := make(chan struct{})
 	go func() { loop.Run(ctx); close(loopDone) }()
+
+	// The deploy pass is a goroutine of its own: a deploy that takes a minute
+	// must not hold up a permission change, and the reverse.
+	deployDone := make(chan struct{})
+	go func() { deployLoop.Run(ctx); close(deployDone) }()
 
 	errs := make(chan error, 1)
 	go func() {
@@ -143,5 +188,25 @@ func run(log *slog.Logger) error {
 	defer cancel()
 	err = httpServer.Shutdown(shutdownCtx)
 	<-loopDone
+	<-deployDone
+	// Let whatever is mid-deploy finish: an app version half uploaded is worse
+	// than a container that took a few seconds longer to go.
+	queue.Wait()
 	return err
+}
+
+// cloneURL builds the URL a throwaway working copy is cloned from. The admin
+// token is in it, so it is built at the moment of the clone and never stored,
+// logged or returned.
+func cloneURL(base, user, token, owner, repo string) string {
+	rest, ok := strings.CutPrefix(base, "http://")
+	scheme := "http://"
+	if !ok {
+		rest, ok = strings.CutPrefix(base, "https://")
+		scheme = "https://"
+	}
+	if !ok {
+		rest, scheme = base, "http://"
+	}
+	return scheme + url.UserPassword(user, token).String() + "@" + strings.TrimSuffix(rest, "/") + "/" + owner + "/" + repo
 }
