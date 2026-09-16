@@ -98,7 +98,8 @@ and gives `run_id`, `head_sha`, `head_branch`. `GET /repos/{repository}` alone p
 The workflow needs default permissions or `actions: read` for that call.
 
 The repository's org names the group; `environment` must be one of that group's environments
-(`unknown_environment`); `service` a service of it (`unknown_service`). **The caller picks the
+(`404 unknown_environment`); `service` a service of it (`404 unknown_service`). `not_a_job` is `401`,
+`wrong_repository` `403`. **The caller picks the
 environment, never a commit or a ref:** a stage deploys the head of its source ref; production the
 commits the newest tag with `mate/release: approved` lists. The request is queued per environment,
 newest wins.
@@ -115,8 +116,10 @@ newest wins.
 { "id": "d_8f2a…", "status": "running", "sha": "3f9c…", "versionId": "…", "message": "" }
 ```
 
-`status` is `queued`, `running`, `active` or `failed`. The broker keeps deploys in memory: after a
-restart an unknown id is `404`, and the action then reads the commit status
+`status` is `queued`, `running`, `active` or `failed`. Both answers are the same record — `environment`
+and `service` are always present, `versionId` appears once there is one. A request superseded by a
+newer one for the same environment keeps its record and follows the newer job's outcome. The broker
+keeps deploys in memory: after a restart an id it no longer holds is `404 unknown_deploy`, and the action then reads the commit status
 `mate/deploy/{environment}/{service}` on the sha instead — the same result, written by the broker
 on every outcome.
 
@@ -129,7 +132,7 @@ Caller: Gitea. `X-Gitea-Signature` is the hex HMAC-SHA256 of the raw body with
 |---|---|
 | `push` to a source branch of an environment | deploys the environment (per 5.3) |
 | `push` to `env/*` | nothing — the broker wrote it |
-| `create` of a tag `v*` on the group repo | re-checks the pusher's production rights in Zerops, writes `mate/release: approved` or `refused` on the tagged commit, deploys an approved tag's commits |
+| `create` of a tag `v*` on the group repo | re-checks the pusher's production rights in Zerops, writes `mate/release/{tag}` `success` (approved) or `failure` (refused) on the tagged commit, deploys an approved tag's commits |
 | `pull_request` merged on the group repo | imports the recipe delta into each environment built from it, re-reads environments |
 | `workflow_job` `queued` | starts the group's runner service if it is stopped |
 | `workflow_job` `completed` | notes the time; a quiet spell (default 15 min) stops the runner |
@@ -161,7 +164,8 @@ A restart forgets requests, codes and access tokens; the person signs in again.
 ## What the broker never does
 
 Takes a Zerops key from a caller · executes repository code (it moves archives from Gitea to
-Zerops; Zerops builds) · reads a sibling's variables from the container (the two Gitea secrets it
+Zerops; Zerops builds; the one `git` it runs merges refs into `env/*` in a throwaway directory with
+`core.hooksPath=/dev/null`) · reads a sibling's variables from the container (the two Gitea secrets it
 needs arrive as explicit `${web_…}` references) · trusts the private network · starts a pass
 because something a job can reach asked it to (there is no poke endpoint; the timer and the signed
 webhooks are the only triggers).

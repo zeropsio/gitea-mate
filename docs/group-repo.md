@@ -48,7 +48,8 @@ environments:
     project: …
     sources: release        # the newest approved v* tag of this repository, nothing else
     gates:
-      requireOnStage: stage # optional: every listed commit must already be live on this stage
+      requireOnStage: stage # optional: every listed commit must already be live on this stage;
+                            # a stage the broker cannot read counts as not met
 ```
 
 Rules the broker enforces (guide 5.1, 5.3):
@@ -76,7 +77,9 @@ api 3f9c1b2e5d7a4c6f8e0b1d2a3c4f5e6d7a8b9c0d
 web 77ab0e1f2d3c4b5a69788796a5b4c3d2e1f0a9b8
 ```
 
-One line per service, `{service hostname} {full sha}`, nothing else. A rollback is a new tag
+One line per service, `{service hostname} {full 40-hex sha}`; blank lines are tolerated, anything
+else — a short sha included, which would never compare equal to a version's name and so redeploy for
+ever — makes the tag unparseable and it is refused. A rollback is a new tag
 listing an earlier tag's commits — a tag name is never reused, and `POST /deploy` takes no ref.
 
 When the tag's webhook arrives the broker re-checks the pusher's production rights in Zerops
@@ -105,5 +108,6 @@ description = the Zerops app version id (or the platform's error).
 When `main` changes a tier's `import.yaml`, the next pass imports into every environment built from
 that tier what is missing — new services, with `buildFromGit` + `zeropsSetup` converted to
 `startWithoutCode: true` (the platform cannot clone a private repository) — before deploying there.
-Changed scaling is applied where the platform allows an update in place; a service that disappeared
-from the recipe is reported, never deleted by the broker.
+Changed scaling on an existing service is reported, not applied — a re-import with `override`
+restarts the service and its semantics are unmeasured; a service that disappeared from the recipe is
+reported, never deleted by the broker. A group removed from the registry loses its runner service.
