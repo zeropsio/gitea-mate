@@ -52,11 +52,13 @@ actions/deploy      the composite action a workflow calls to deploy
 ## Running the broker locally
 
 Every variable in `docs/vocabulary.md` § "The broker's environment" is required; a missing one is
-named in the start-up error and no value is ever logged.
+named in the start-up error and no value is ever logged. The four that name Zerops carry a `MATE_`
+prefix: the platform's import refuses a custom variable beginning with `ZEROPS_`
+(`400 userDataZeropsPrefixForbidden`, measured 2026-09-16).
 
 ```sh
-export ZEROPS_TOKEN=…            ZEROPS_API_URL=https://api.app-prg1.zerops.io
-export ZEROPS_CLIENT_ID=…        ZEROPS_PROJECT_ID=…
+export MATE_ZEROPS_TOKEN=…       MATE_ZEROPS_API_URL=https://api.app-prg1.zerops.io
+export MATE_ZEROPS_CLIENT_ID=…   MATE_ZEROPS_PROJECT_ID=…
 export GITEA_URL=http://127.0.0.1:3301   GITEA_PUBLIC_URL=http://127.0.0.1:3301
 export GITEA_ADMIN_TOKEN=…       GITEA_ADMIN_PASSWORD=…    GITEA_WEBHOOK_SECRET=…
 export OIDC_CLIENT_SECRET=…      OIDC_SEED=…

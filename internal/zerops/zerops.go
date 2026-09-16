@@ -38,7 +38,7 @@ type Client struct {
 	http  *http.Client
 }
 
-// New builds a client. apiURL is ZEROPS_API_URL; hc may be nil.
+// New builds a client. apiURL is MATE_ZEROPS_API_URL; hc may be nil.
 func New(apiURL, token string, hc *http.Client) *Client {
 	if hc == nil {
 		hc = &http.Client{Timeout: DefaultTimeout}

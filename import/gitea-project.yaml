@@ -72,13 +72,17 @@ services:
     verticalAutoscaling:
       minRam: 0.25
     vault:
-      # docs/vocabulary.md § "The broker's environment".
-      ZEROPS_TOKEN:
+      # docs/vocabulary.md § "The broker's environment", with the MATE_ prefix
+      # the platform forces on the four that name Zerops: a custom variable
+      # beginning with `ZEROPS_` is refused by the import itself
+      # (400 userDataZeropsPrefixForbidden, case-insensitive; measured
+      # 2026-09-16).
+      MATE_ZEROPS_TOKEN:
         value: __ZEROPS_TOKEN__
         sensitive: true
-      ZEROPS_API_URL: https://api.app-__REGION__.zerops.io
-      ZEROPS_CLIENT_ID: __ZEROPS_CLIENT_ID__
-      ZEROPS_PROJECT_ID: __ZEROPS_PROJECT_ID__
+      MATE_ZEROPS_API_URL: https://api.app-__REGION__.zerops.io
+      MATE_ZEROPS_CLIENT_ID: __ZEROPS_CLIENT_ID__
+      MATE_ZEROPS_PROJECT_ID: __ZEROPS_PROJECT_ID__
       GITEA_URL: http://web:3000
       GITEA_PUBLIC_URL: https://web-${zeropsSubdomainHost}-3000.__REGION__.zerops.app
       # Gitea publishes both of these itself, on its first boot. The broker

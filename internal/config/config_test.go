@@ -9,19 +9,19 @@ import (
 
 func full() map[string]string {
 	return map[string]string{
-		"ZEROPS_TOKEN":         "zt",
-		"ZEROPS_API_URL":       "https://api.app-prg1.zerops.io",
-		"ZEROPS_CLIENT_ID":     "org-1",
-		"ZEROPS_PROJECT_ID":    "prj-1",
-		"GITEA_URL":            "http://web:3000",
-		"GITEA_PUBLIC_URL":     "https://web-1234-3000.prg1.zerops.app",
-		"GITEA_ADMIN_TOKEN":    "gt",
-		"GITEA_ADMIN_PASSWORD": "gp",
-		"GITEA_WEBHOOK_SECRET": "ws",
-		"OIDC_CLIENT_SECRET":   "cs",
-		"OIDC_SEED":            "seed",
-		"BROKER_PUBLIC_URL":    "https://broker-1234-8080.prg1.zerops.app",
-		"MATE_APP_URL":         "https://app.example",
+		"MATE_ZEROPS_TOKEN":      "zt",
+		"MATE_ZEROPS_API_URL":    "https://api.app-prg1.zerops.io",
+		"MATE_ZEROPS_CLIENT_ID":  "org-1",
+		"MATE_ZEROPS_PROJECT_ID": "prj-1",
+		"GITEA_URL":              "http://web:3000",
+		"GITEA_PUBLIC_URL":       "https://web-1234-3000.prg1.zerops.app",
+		"GITEA_ADMIN_TOKEN":      "gt",
+		"GITEA_ADMIN_PASSWORD":   "gp",
+		"GITEA_WEBHOOK_SECRET":   "ws",
+		"OIDC_CLIENT_SECRET":     "cs",
+		"OIDC_SEED":              "seed",
+		"BROKER_PUBLIC_URL":      "https://broker-1234-8080.prg1.zerops.app",
+		"MATE_APP_URL":           "https://app.example",
 	}
 }
 
@@ -78,16 +78,16 @@ func TestLoad(t *testing.T) {
 		{
 			name: "every missing variable is named at once",
 			mutate: func(m map[string]string) {
-				delete(m, "ZEROPS_TOKEN")
+				delete(m, "MATE_ZEROPS_TOKEN")
 				delete(m, "GITEA_ADMIN_TOKEN")
 				delete(m, "MATE_APP_URL")
 			},
-			wantErr: []string{"ZEROPS_TOKEN", "GITEA_ADMIN_TOKEN", "MATE_APP_URL"},
+			wantErr: []string{"MATE_ZEROPS_TOKEN", "GITEA_ADMIN_TOKEN", "MATE_APP_URL"},
 		},
 		{
 			name:    "a blank variable counts as missing",
-			mutate:  func(m map[string]string) { m["ZEROPS_CLIENT_ID"] = "   " },
-			wantErr: []string{"ZEROPS_CLIENT_ID"},
+			mutate:  func(m map[string]string) { m["MATE_ZEROPS_CLIENT_ID"] = "   " },
+			wantErr: []string{"MATE_ZEROPS_CLIENT_ID"},
 		},
 		{
 			name:    "a URL variable must be absolute",
@@ -167,7 +167,7 @@ func TestLoad(t *testing.T) {
 
 func TestLoadErrorNeverCarriesAValue(t *testing.T) {
 	m := full()
-	m["ZEROPS_TOKEN"] = ""
+	m["MATE_ZEROPS_TOKEN"] = ""
 	m["GITEA_URL"] = "not a url but secret-looking: hunter2"
 	_, err := Load(env(m))
 	if err == nil {
@@ -195,6 +195,19 @@ func TestGiteaHost(t *testing.T) {
 		c := &Config{GiteaPublicURL: tc.in}
 		if got := c.GiteaHost(); got != tc.want {
 			t.Errorf("GiteaHost(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestNoZeropsPrefix pins what the platform measured on 2026-09-16: an import
+// refuses a custom variable whose name begins with `ZEROPS_`, in any case
+// (`userDataZeropsPrefixForbidden`). The broker's four Zerops variables carry
+// the `MATE_` prefix for that reason, and a rename back would stand the
+// project up with a broker that has no configuration at all.
+func TestNoVariableCarriesThePlatformsPrefix(t *testing.T) {
+	for name := range full() {
+		if strings.HasPrefix(strings.ToUpper(name), "ZEROPS_") {
+			t.Errorf("%s: the platform forbids a custom variable with the ZEROPS_ prefix", name)
 		}
 	}
 }

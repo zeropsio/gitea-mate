@@ -1,7 +1,11 @@
 // Package config reads and validates the broker's environment.
 //
 // Every variable is listed in docs/vocabulary.md, section "The broker's
-// environment". A value is read once, at start; a missing one is named in the
+// environment", with one correction the platform forced on 2026-09-16: an
+// import refuses any custom variable whose name begins with `ZEROPS_`
+// (`400 userDataZeropsPrefixForbidden`, case-insensitive), so the four
+// variables that name Zerops are `MATE_ZEROPS_TOKEN`, `MATE_ZEROPS_API_URL`,
+// `MATE_ZEROPS_CLIENT_ID` and `MATE_ZEROPS_PROJECT_ID`. A value is read once, at start; a missing one is named in the
 // error and a secret is never part of it. Secrets carry the [Secret] type,
 // whose String method redacts, so a stray %v or a logged struct cannot leak
 // one.
@@ -129,10 +133,10 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 
 	c := &Config{
-		ZeropsToken:     Secret(req("ZEROPS_TOKEN")),
-		ZeropsAPIURL:    reqURL("ZEROPS_API_URL"),
-		ZeropsClientID:  req("ZEROPS_CLIENT_ID"),
-		ZeropsProjectID: req("ZEROPS_PROJECT_ID"),
+		ZeropsToken:     Secret(req("MATE_ZEROPS_TOKEN")),
+		ZeropsAPIURL:    reqURL("MATE_ZEROPS_API_URL"),
+		ZeropsClientID:  req("MATE_ZEROPS_CLIENT_ID"),
+		ZeropsProjectID: req("MATE_ZEROPS_PROJECT_ID"),
 
 		GiteaURL:           reqURL("GITEA_URL"),
 		GiteaPublicURL:     reqURL("GITEA_PUBLIC_URL"),
