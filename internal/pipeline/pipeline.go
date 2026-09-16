@@ -53,8 +53,12 @@ type Pipeline struct {
 	// keyed "{slug}/{tier}". It is the only thing this package remembers, and
 	// a restart deliberately starts empty: the first pass after one reports
 	// differences and records what it saw, and only a later change imports.
-	mu           sync.Mutex
-	seenRecipe   map[string]string
+	mu         sync.Mutex
+	seenRecipe map[string]string
+	// seenBlocks is each tier's per-service declaration as the last pass read
+	// it, keyed "{slug}/{tier}" then hostname. It is what tells a scaling
+	// change from a reordering, so one can be reported.
+	seenBlocks   map[string]map[string]string
 	reconciled   map[string]bool
 	runnerImport map[string]bool
 }

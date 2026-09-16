@@ -29,14 +29,19 @@ func (p *Pipeline) recipes(ctx context.Context, plan deploy.Plan) (int, []string
 			continue
 		}
 
+		blocks := plan.Recipes[tier].Blocks()
+
 		p.mu.Lock()
 		if p.seenRecipe == nil {
 			p.seenRecipe = map[string]string{}
+			p.seenBlocks = map[string]map[string]string{}
 			p.reconciled = map[string]bool{}
 		}
 		previous, seen := p.seenRecipe[key]
+		previousBlocks := p.seenBlocks[key]
 		first := !p.reconciled[key]
 		p.seenRecipe[key] = sha
+		p.seenBlocks[key] = blocks
 		p.reconciled[key] = true
 		p.mu.Unlock()
 
@@ -54,7 +59,7 @@ func (p *Pipeline) recipes(ctx context.Context, plan deploy.Plan) (int, []string
 		}
 
 		p.log().Info("a tier's recipe changed", "group", plan.Slug, "tier", tier)
-		count, tierProblems := p.importDelta(ctx, plan, tier)
+		count, tierProblems := p.importDelta(ctx, plan, tier, previousBlocks, blocks)
 		imported += count
 		for _, problem := range tierProblems {
 			problems = append(problems, key+": "+problem)
@@ -85,7 +90,7 @@ func (p *Pipeline) recipeSha(ctx context.Context, slug string, tier environments
 // importDelta imports every service a tier declares that an environment of it
 // does not have, converted to startWithoutCode. A service the project has and
 // the recipe no longer does is reported, never deleted.
-func (p *Pipeline) importDelta(ctx context.Context, plan deploy.Plan, tier environments.Tier) (int, []string) {
+func (p *Pipeline) importDelta(ctx context.Context, plan deploy.Plan, tier environments.Tier, before, now map[string]string) (int, []string) {
 	recipe := plan.Recipes[tier]
 	var problems []string
 	imported := 0
@@ -112,6 +117,14 @@ func (p *Pipeline) importDelta(ctx context.Context, plan deploy.Plan, tier envir
 		for _, service := range services {
 			if !declared[service.Name] {
 				problems = append(problems, fmt.Sprintf("%s: %s is in the project and no longer in the recipe; the broker never deletes a service", env.Name, service.Name))
+				continue
+			}
+			// A service the project already has keeps whatever it was created
+			// with: a re-import with `override` restarts it and its semantics
+			// are unmeasured, so a changed declaration is reported and left to
+			// a person (docs/group-repo.md, "Recipe deltas").
+			if was, had := before[service.Name]; had && was != now[service.Name] {
+				problems = append(problems, fmt.Sprintf("%s: the recipe for %s changed — scaling and shape are reported, never applied to a service that exists", env.Name, service.Name))
 			}
 		}
 		if len(missing) == 0 {

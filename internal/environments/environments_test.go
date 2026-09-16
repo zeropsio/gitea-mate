@@ -319,3 +319,52 @@ func TestReadAGroupThatHasDeclaredNothing(t *testing.T) {
 		t.Fatalf("Read = %+v", file)
 	}
 }
+
+func TestRecipeBlocksAreCanonical(t *testing.T) {
+	t.Parallel()
+	const written = `
+services:
+  - hostname: api
+    type: nodejs@22
+    zeropsSetup: api
+    verticalAutoscaling:
+      minRam: 0.5
+      maxRam: 4
+`
+	const reordered = `
+services:
+  - hostname: api
+    verticalAutoscaling:
+      maxRam: 4
+      minRam: 0.5
+    zeropsSetup: api
+    type: nodejs@22
+`
+	const rescaled = `
+services:
+  - hostname: api
+    type: nodejs@22
+    zeropsSetup: api
+    verticalAutoscaling:
+      minRam: 1
+      maxRam: 4
+`
+	blocks := func(body string) map[string]string {
+		t.Helper()
+		recipe, err := environments.ParseRecipe([]byte(body))
+		if err != nil {
+			t.Fatalf("ParseRecipe: %v", err)
+		}
+		return recipe.Blocks()
+	}
+
+	if blocks(written)["api"] != blocks(reordered)["api"] {
+		t.Fatal("a reordering reads as a change")
+	}
+	if blocks(written)["api"] == blocks(rescaled)["api"] {
+		t.Fatal("a scaling change does not read as one")
+	}
+	if !strings.Contains(blocks(written)["api"], "minRam: 0.5") {
+		t.Fatalf("the block lost its scaling: %q", blocks(written)["api"])
+	}
+}

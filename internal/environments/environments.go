@@ -420,3 +420,37 @@ func withoutCode(service RecipeService) (*yaml.Node, error) {
 	)
 	return out, nil
 }
+
+// Block is a service's whole declaration, canonicalised: decoded and
+// re-marshalled, so two recipes that differ only in the order their keys were
+// written compare equal.
+//
+// It is what a pass compares to tell a scaling change from a reordering. The
+// broker never applies one — a re-import with `override` restarts the service
+// and its semantics are unmeasured (docs/group-repo.md) — so this exists to
+// report it.
+func (s RecipeService) Block() (string, error) {
+	if s.Raw == nil {
+		return "", fmt.Errorf("%s has no declaration", s.Hostname)
+	}
+	var value any
+	if err := s.Raw.Decode(&value); err != nil {
+		return "", fmt.Errorf("%s: %w", s.Hostname, err)
+	}
+	raw, err := yaml.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", s.Hostname, err)
+	}
+	return string(raw), nil
+}
+
+// Blocks is every service's canonical declaration, by hostname.
+func (r Recipe) Blocks() map[string]string {
+	out := make(map[string]string, len(r.Services))
+	for _, service := range r.Services {
+		if block, err := service.Block(); err == nil {
+			out[service.Hostname] = block
+		}
+	}
+	return out
+}

@@ -162,3 +162,85 @@ func stageServices() []zerops.Service {
 		{ID: "svc-stage-legacy", ProjectID: stagePrj, Name: "legacy", Status: "ACTIVE"},
 	}
 }
+
+// The api service's scaling changed; nothing else did.
+const stageImportRescaled = `
+services:
+  - hostname: api
+    type: nodejs@22
+    buildFromGit: https://gitea.example/acme/api
+    zeropsSetup: api
+    minContainers: 2
+    verticalAutoscaling:
+      minRam: 1
+`
+
+// The same declaration, written in another order.
+const stageImportReordered = `
+services:
+  - hostname: api
+    zeropsSetup: api
+    buildFromGit: https://gitea.example/acme/api
+    type: nodejs@22
+`
+
+func TestAChangedDeclarationIsReportedNeverApplied(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	ctx := context.Background()
+
+	// The first pass takes the recipe as seen.
+	if _, err := w.pipe.Pass(ctx); err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	w.queue.Wait()
+
+	w.gitea.AddFile("acme/group", "main", "3 — Stage/import.yaml", stageImportRescaled)
+	result, err := w.pipe.Pass(ctx)
+	if err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	w.queue.Wait()
+
+	found := false
+	for _, problem := range result.Problems {
+		if strings.Contains(problem, "the recipe for api changed") && strings.Contains(problem, "never applied") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the changed declaration was not reported: %v", result.Problems)
+	}
+	// Reported, not applied: the service exists, so nothing is imported for it.
+	for _, imported := range w.zerops.Imports {
+		if strings.Contains(imported.Yaml, "hostname: api") {
+			t.Fatalf("an existing service was re-imported:\n%s", imported.Yaml)
+		}
+	}
+}
+
+func TestAReorderedDeclarationIsNotAChange(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	ctx := context.Background()
+
+	if _, err := w.pipe.Pass(ctx); err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	w.queue.Wait()
+
+	// The same declaration with its keys written in another order moves the
+	// file's blob sha, and must not read as a scaling change.
+	w.gitea.AddFile("acme/group", "main", "3 — Stage/import.yaml", stageImportReordered)
+	result, err := w.pipe.Pass(ctx)
+	if err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	w.queue.Wait()
+
+	for _, problem := range result.Problems {
+		if strings.Contains(problem, "the recipe for api changed") {
+			t.Fatalf("a reordering was reported as a change: %v", result.Problems)
+		}
+	}
+}
