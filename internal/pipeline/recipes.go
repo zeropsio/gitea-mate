@@ -7,6 +7,7 @@ import (
 
 	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/environments"
+	"github.com/zeropsio/gitea-mate/internal/registry"
 )
 
 // ---------------------------------------------------------------------------
@@ -65,11 +66,11 @@ func (p *Pipeline) recipes(ctx context.Context, plan deploy.Plan) (int, []string
 // recipeSha is the blob sha of a tier's import.yaml on `main` — what a pass
 // compares against the one it last saw.
 func (p *Pipeline) recipeSha(ctx context.Context, slug string, tier environments.Tier) (string, error) {
-	dir, err := environments.TierDir(ctx, p.Gitea, slug, deploy.GroupRepo, tier)
+	dir, err := environments.TierDir(ctx, p.Gitea, slug, registry.GroupRepo, tier)
 	if err != nil {
 		return "", err
 	}
-	entries, err := p.Gitea.Dir(ctx, slug, deploy.GroupRepo, dir, environments.MainBranch)
+	entries, err := p.Gitea.Dir(ctx, slug, registry.GroupRepo, dir, environments.MainBranch)
 	if err != nil {
 		return "", err
 	}

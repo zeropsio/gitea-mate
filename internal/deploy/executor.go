@@ -292,7 +292,6 @@ func (e *Executor) gate(ctx context.Context, target Target) (bool, string) {
 // promote path send it to build-and-deploy: the platform does not reuse a
 // stored one.
 func (e *Executor) zeropsYaml(ctx context.Context, target Target) ([]byte, error) {
-	var last error
 	for _, name := range ZeropsYamlNames {
 		raw, err := e.Gitea.File(ctx, target.Owner, target.Repo, name, target.Sha)
 		if err == nil {
@@ -301,9 +300,7 @@ func (e *Executor) zeropsYaml(ctx context.Context, target Target) ([]byte, error
 		if !gitea.IsNotFound(err) {
 			return nil, fmt.Errorf("%s/%s@%s: %s: %w", target.Owner, target.Repo, target.Sha, name, err)
 		}
-		last = err
 	}
-	_ = last
 	return nil, fmt.Errorf("%s/%s@%s carries no zerops.yaml", target.Owner, target.Repo, target.Sha)
 }
 

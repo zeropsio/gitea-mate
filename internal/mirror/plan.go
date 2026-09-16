@@ -31,10 +31,6 @@ const (
 	TeamRelease = "release"
 )
 
-// GroupRepo is the name of the repository that holds a group's recipe,
-// environments and release tags.
-const GroupRepo = "group"
-
 // HookEvents are the events the broker's one org hook subscribes to.
 var HookEvents = []string{"push", "create", "delete", "pull_request", "workflow_job", "workflow_run"}
 
@@ -301,9 +297,9 @@ func (p *planner) planStructure() {
 		}
 
 		repos := p.state.Gitea.Repos[g.Slug]
-		repo, hasRepo := repos[GroupRepo]
+		repo, hasRepo := repos[registry.GroupRepo]
 		if !hasRepo {
-			p.do(Action{Kind: CreateRepo, Org: g.Slug, Repo: GroupRepo})
+			p.do(Action{Kind: CreateRepo, Org: g.Slug, Repo: registry.GroupRepo})
 		}
 		for _, want := range p.groupRepoRules() {
 			if hasRepo {
@@ -312,12 +308,12 @@ func (p *planner) planStructure() {
 				}
 			}
 			rule := want
-			p.do(Action{Kind: SetBranchRule, Org: g.Slug, Repo: GroupRepo, BranchRule: &rule})
+			p.do(Action{Kind: SetBranchRule, Org: g.Slug, Repo: registry.GroupRepo, BranchRule: &rule})
 		}
 		wantTag := gitea.TagProtection{NamePattern: "v*", WhitelistTeams: []string{TeamRelease}}
 		if !hasRepo || !sameTagRule(repo.TagRules[wantTag.NamePattern], wantTag) {
 			rule := wantTag
-			p.do(Action{Kind: SetTagRule, Org: g.Slug, Repo: GroupRepo, TagRule: &rule})
+			p.do(Action{Kind: SetTagRule, Org: g.Slug, Repo: registry.GroupRepo, TagRule: &rule})
 		}
 
 		if !p.hasHook(g.Slug) {

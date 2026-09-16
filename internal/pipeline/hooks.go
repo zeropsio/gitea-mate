@@ -84,7 +84,7 @@ func (p *Pipeline) Push(ctx context.Context, org string, payload []byte) error {
 
 	// A push to the group repo changes the recipe or the declarations, not a
 	// service's code.
-	if repo == deploy.GroupRepo {
+	if repo == registry.GroupRepo {
 		if branch == environments.MainBranch {
 			return p.reconcileRecipes(ctx, plan)
 		}
@@ -138,7 +138,7 @@ func (p *Pipeline) Create(ctx context.Context, org string, payload []byte) error
 	if err != nil {
 		return err
 	}
-	if repo != deploy.GroupRepo {
+	if repo != registry.GroupRepo {
 		return nil
 	}
 	if body.SHA == "" {
@@ -258,7 +258,7 @@ func (p *Pipeline) PullRequest(ctx context.Context, org string, payload []byte) 
 	if err != nil {
 		return err
 	}
-	if repo != deploy.GroupRepo {
+	if repo != registry.GroupRepo {
 		return nil
 	}
 

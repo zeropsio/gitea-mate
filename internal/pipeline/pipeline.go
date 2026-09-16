@@ -72,7 +72,7 @@ func (p *Pipeline) State(ctx context.Context) (mirror.State, error) {
 // A group with no group repo, or none that declares environments, answers an
 // empty plan and no error.
 func (p *Pipeline) Plan(ctx context.Context, slug string) (deploy.Plan, error) {
-	file, err := environments.Read(ctx, p.Gitea, slug, deploy.GroupRepo)
+	file, err := environments.Read(ctx, p.Gitea, slug, registry.GroupRepo)
 	if err != nil {
 		if gitea.IsNotFound(err) {
 			return deploy.Plan{Slug: slug}, nil
@@ -89,7 +89,7 @@ func (p *Pipeline) Plan(ctx context.Context, slug string) (deploy.Plan, error) {
 		needed[env.Tier] = true
 	}
 	for tier := range needed {
-		recipe, _, err := environments.ReadRecipe(ctx, p.Gitea, slug, deploy.GroupRepo, tier)
+		recipe, _, err := environments.ReadRecipe(ctx, p.Gitea, slug, registry.GroupRepo, tier)
 		if err != nil {
 			// A tier that cannot be read is reported, and the environments
 			// built from it deploy nothing — never guessed at.
@@ -155,11 +155,6 @@ func summarise(problems []string) string {
 		return "the environment resolved to no service"
 	}
 	return problems[0]
-}
-
-// GroupOfOrg finds the registered group a Gitea org belongs to.
-func GroupOfOrg(reg registry.Registry, org string) (registry.Group, bool) {
-	return reg.Group(org)
 }
 
 // ServiceOfRepository finds the recipe service whose repository is the given

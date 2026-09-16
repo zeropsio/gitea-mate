@@ -276,28 +276,28 @@ func (m *Mirror) gatherGitea(ctx context.Context, reg registry.Registry) (GiteaS
 		}
 
 		out.Repos[g.Slug] = map[string]RepoState{}
-		if _, err := m.Gitea.GetRepo(ctx, g.Slug, GroupRepo); err == nil {
+		if _, err := m.Gitea.GetRepo(ctx, g.Slug, registry.GroupRepo); err == nil {
 			repo := RepoState{
 				BranchRules: map[string]gitea.BranchProtection{},
 				TagRules:    map[string]gitea.TagProtection{},
 			}
-			branchRules, err := m.Gitea.ListBranchProtections(ctx, g.Slug, GroupRepo)
+			branchRules, err := m.Gitea.ListBranchProtections(ctx, g.Slug, registry.GroupRepo)
 			if err != nil {
-				return out, fmt.Errorf("branch rules of %s/%s: %w", g.Slug, GroupRepo, err)
+				return out, fmt.Errorf("branch rules of %s/%s: %w", g.Slug, registry.GroupRepo, err)
 			}
 			for _, r := range branchRules {
 				repo.BranchRules[r.RuleName] = r
 			}
-			tagRules, err := m.Gitea.ListTagProtections(ctx, g.Slug, GroupRepo)
+			tagRules, err := m.Gitea.ListTagProtections(ctx, g.Slug, registry.GroupRepo)
 			if err != nil {
-				return out, fmt.Errorf("tag rules of %s/%s: %w", g.Slug, GroupRepo, err)
+				return out, fmt.Errorf("tag rules of %s/%s: %w", g.Slug, registry.GroupRepo, err)
 			}
 			for _, r := range tagRules {
 				repo.TagRules[r.NamePattern] = r
 			}
-			out.Repos[g.Slug][GroupRepo] = repo
+			out.Repos[g.Slug][registry.GroupRepo] = repo
 		} else if !gitea.IsNotFound(err) {
-			return out, fmt.Errorf("repo %s/%s: %w", g.Slug, GroupRepo, err)
+			return out, fmt.Errorf("repo %s/%s: %w", g.Slug, registry.GroupRepo, err)
 		}
 
 		hooks, err := m.Gitea.ListOrgHooks(ctx, g.Slug)

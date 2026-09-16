@@ -24,6 +24,11 @@ const (
 	prefixRelease = "mate:release:"
 )
 
+// GroupRepo is the repository that holds a group's recipe, its environments
+// and its release tags: `{slug}/group` (docs/vocabulary.md). One name, read by
+// the rights loop that makes it and by the deploy side that reads it.
+const GroupRepo = "group"
+
 // SlugPattern is the Gitea org name a group registers under: lower-case, 2–30
 // characters, starting with a letter (docs/vocabulary.md).
 var SlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,29}$`)

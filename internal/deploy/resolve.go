@@ -8,17 +8,13 @@ import (
 
 	"github.com/zeropsio/gitea-mate/internal/environments"
 	"github.com/zeropsio/gitea-mate/internal/gitea"
+	"github.com/zeropsio/gitea-mate/internal/registry"
 )
 
 // Resolving is where "what is deployed" is decided, and it reads protected
 // state only: a source branch's head, or the commits the newest approved
 // release tag lists. A caller picks an environment and a service; nothing a
 // caller says reaches a sha.
-
-// GroupRepo is the repository that holds a group's recipe, environments and
-// release tags. It is [mirror.GroupRepo] spelled once more here so this
-// package does not depend on the rights loop.
-const GroupRepo = "group"
 
 // Plan is one group's state, read fresh from its group repo.
 type Plan struct {
@@ -112,7 +108,7 @@ func (r *Resolver) stage(ctx context.Context, plan Plan, env environments.Enviro
 // production resolves an environment that follows releases: the commits the
 // newest approved tag lists, and nothing else.
 func (r *Resolver) production(ctx context.Context, plan Plan, env environments.Environment, services []environments.RecipeService) ([]Target, []string, error) {
-	release, found, err := NewestApproved(ctx, r.Gitea, plan.Slug, GroupRepo)
+	release, found, err := NewestApproved(ctx, r.Gitea, plan.Slug, registry.GroupRepo)
 	if err != nil {
 		return nil, nil, err
 	}
