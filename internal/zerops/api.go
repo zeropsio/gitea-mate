@@ -375,6 +375,10 @@ type Service struct {
 	Name      string `json:"name"`
 	Status    string `json:"status"`
 	Type      string `json:"serviceStackTypeId"`
+	// IsSystem marks a stack the platform owns rather than a person: every
+	// project's `core`, and the transient build and prepare stacks a deploy
+	// makes. Nothing that compares a project against a recipe may see one.
+	IsSystem bool `json:"isSystem"`
 	// SubdomainAccess says whether the service already answers on its
 	// zerops.app host. Enabling it is a post-deploy call, so the broker only
 	// makes it when this is false.
@@ -407,6 +411,22 @@ func (s Service) HTTP() bool {
 		}
 	}
 	return false
+}
+
+// WithoutSystem drops the platform's own stacks from a service list. Every
+// reader that compares a project against something a person wrote — a recipe,
+// the registry — starts here: `core` is on every project and a build stack
+// lives for the length of a deploy, so neither is ever a service somebody
+// declared and then removed (ledger 2026-09-16).
+func WithoutSystem(services []Service) []Service {
+	out := make([]Service, 0, len(services))
+	for _, service := range services {
+		if service.IsSystem {
+			continue
+		}
+		out = append(out, service)
+	}
+	return out
 }
 
 type servicePage struct {

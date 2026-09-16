@@ -30,7 +30,7 @@ func (p *Pipeline) reconcileRunners(ctx context.Context, reg registry.Registry) 
 
 	var problems []string
 	var stale []zerops.Service
-	for _, service := range services {
+	for _, service := range zerops.WithoutSystem(services) {
 		if !strings.HasPrefix(service.Name, runnerPrefix) || wanted[service.Name] {
 			continue
 		}

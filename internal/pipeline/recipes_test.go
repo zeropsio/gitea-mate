@@ -244,3 +244,66 @@ func TestAReorderedDeclarationIsNotAChange(t *testing.T) {
 		}
 	}
 }
+
+// `core` is the platform's own stack — every project has one — and the
+// transient build stacks a deploy makes carry the same flag. A pass that
+// compared them against a recipe reported each of them, every three minutes,
+// as a service the recipe no longer declares.
+func TestASystemServiceIsNeverComparedToARecipe(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	ctx := context.Background()
+	w.zerops.SetServices(stagePrj, stageServicesWithSystem()...)
+
+	// The first pass since a restart reports what a delta would do; a later
+	// pass imports it. Neither may say a word about the platform's own stacks.
+	for _, pass := range []struct {
+		name   string
+		before func()
+	}{
+		{name: "the first pass since a restart"},
+		{
+			name: "a pass that imports a delta",
+			before: func() {
+				w.gitea.AddFile("acme/group", "main", "3 — Stage/import.yaml", stageImportWithCache)
+			},
+		},
+	} {
+		if pass.before != nil {
+			pass.before()
+		}
+		result, err := w.pipe.Pass(ctx)
+		if err != nil {
+			t.Fatalf("%s: Pass: %v", pass.name, err)
+		}
+		w.queue.Wait()
+		if len(result.Problems) != 0 {
+			t.Fatalf("%s reported %v", pass.name, result.Problems)
+		}
+	}
+
+	// And the delta pass did its work: the one service the recipe grew.
+	if len(w.zerops.Imports) != 1 || !strings.Contains(w.zerops.Imports[0].Yaml, "hostname: cache") {
+		t.Fatalf("imports = %+v", w.zerops.Imports)
+	}
+}
+
+// stageImportWithCache adds one service to the stage tier and leaves the
+// declaration of `api` exactly as it was.
+const stageImportWithCache = stageImport + `
+  - hostname: cache
+    type: valkey@7.2
+    mode: NON_HA
+`
+
+// stageServicesWithSystem is the stage project as the platform answers for it:
+// the recipe's `api`, the project's `core`, and the build stack of the last
+// deploy.
+func stageServicesWithSystem() []zerops.Service {
+	return []zerops.Service{
+		{ID: "svc-stage-api", ProjectID: stagePrj, Name: "api", Status: "ACTIVE",
+			Ports: []zerops.ServicePort{{Port: 3000, HTTPRouting: true}}},
+		{ID: "svc-stage-core", ProjectID: stagePrj, Name: "core", Status: "ACTIVE", IsSystem: true},
+		{ID: "svc-stage-build", ProjectID: stagePrj, Name: "buildapiv1", Status: "STOPPED", IsSystem: true},
+	}
+}

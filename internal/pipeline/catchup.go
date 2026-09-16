@@ -9,6 +9,7 @@ import (
 
 	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/environments"
+	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
 
 // The catch-up pass.
@@ -129,7 +130,7 @@ func (p *Pipeline) liveShas(ctx context.Context, projectID string) (map[string]s
 		return nil, fmt.Errorf("the project's services: %w", err)
 	}
 	out := map[string]string{}
-	for _, service := range services {
+	for _, service := range zerops.WithoutSystem(services) {
 		detail, err := p.Zerops.Service(ctx, service.ID)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", service.Name, err)

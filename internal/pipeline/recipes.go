@@ -8,6 +8,7 @@ import (
 	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/environments"
 	"github.com/zeropsio/gitea-mate/internal/registry"
+	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
 
 // ---------------------------------------------------------------------------
@@ -101,6 +102,7 @@ func (p *Pipeline) importDelta(ctx context.Context, plan deploy.Plan, tier envir
 			problems = append(problems, env.Name+": the project's services: "+err.Error())
 			continue
 		}
+		services = zerops.WithoutSystem(services)
 		present := map[string]bool{}
 		for _, service := range services {
 			present[service.Name] = true
@@ -158,6 +160,7 @@ func (p *Pipeline) report(ctx context.Context, plan deploy.Plan, tier environmen
 			problems = append(problems, env.Name+": the project's services: "+err.Error())
 			continue
 		}
+		services = zerops.WithoutSystem(services)
 		present := map[string]bool{}
 		for _, service := range services {
 			present[service.Name] = true
