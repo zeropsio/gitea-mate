@@ -57,8 +57,11 @@ type Fake struct {
 	// Requests logs every call, so a test can assert that a refused pass wrote
 	// nothing.
 	Requests []string
-	// Stopped tracks PUT /service-stack/{id}/stop|start.
-	Stopped map[string]bool
+	// stopped and started track PUT /service-stack/{id}/stop|start. They are
+	// read through IsStopped and Started, under the lock: the fake serves
+	// requests on its own goroutines, so a test that indexed the map directly
+	// would race the handler that writes it.
+	stopped map[string]bool
 	started map[string]bool
 	// Imports collects the yaml of every service-stack import.
 	Imports []Import
@@ -96,7 +99,7 @@ func New(t *testing.T, clientID string) *Fake {
 		tokens:     map[string]zerops.Token{},
 		services:   map[string][]zerops.Service{},
 		Fail:       map[string]int{},
-		Stopped:    map[string]bool{},
+		stopped:    map[string]bool{},
 		started:    map[string]bool{},
 		versions:   map[string]*AppVersionRecord{},
 		processes:  map[string]zerops.Process{},
@@ -484,7 +487,7 @@ func (f *Fake) stopStart(w http.ResponseWriter, path string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	stop := parts[1] == "stop"
-	f.Stopped[parts[0]] = stop
+	f.stopped[parts[0]] = stop
 	if !stop {
 		f.started[parts[0]] = true
 	}
@@ -511,6 +514,13 @@ func (f *Fake) projectOfService(serviceID string) string {
 		}
 	}
 	return ""
+}
+
+// IsStopped reports whether the service was last stopped.
+func (f *Fake) IsStopped(serviceID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stopped[serviceID]
 }
 
 // Started reports whether PUT /service-stack/{id}/start was ever called.

@@ -489,14 +489,14 @@ func TestWorkflowJobWakesAndSleepsTheRunner(t *testing.T) {
 	if rr := r.hook(t, "workflow_job", body, ""); rr.Code != http.StatusNoContent {
 		t.Fatalf("queued = %d", rr.Code)
 	}
-	waitFor(t, func() bool { return r.zerops.Stopped["s-runner"] == false && r.zerops.Started("s-runner") })
+	waitFor(t, func() bool { return !r.zerops.IsStopped("s-runner") && r.zerops.Started("s-runner") })
 
 	// A completed job arms the quiet spell; the rig's is 50 ms.
 	done := `{"action":"completed","repository":{"full_name":"acme/api","owner":{"username":"acme"}}}`
 	if rr := r.hook(t, "workflow_job", done, ""); rr.Code != http.StatusNoContent {
 		t.Fatalf("completed = %d", rr.Code)
 	}
-	waitFor(t, func() bool { return r.zerops.Stopped["s-runner"] })
+	waitFor(t, func() bool { return r.zerops.IsStopped("s-runner") })
 }
 
 // A group with no runner service yet is simply noted; nothing is started and

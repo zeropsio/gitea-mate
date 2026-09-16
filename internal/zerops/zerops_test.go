@@ -228,13 +228,13 @@ func TestServicesAndStopStart(t *testing.T) {
 	if err := c.StartService(ctx, "s-runner"); err != nil {
 		t.Fatalf("StartService: %v", err)
 	}
-	if f.Stopped["s-runner"] {
+	if f.IsStopped("s-runner") {
 		t.Error("s-runner is still stopped")
 	}
 	if err := c.StopService(ctx, "s-runner"); err != nil {
 		t.Fatalf("StopService: %v", err)
 	}
-	if !f.Stopped["s-runner"] {
+	if !f.IsStopped("s-runner") {
 		t.Error("s-runner was not stopped")
 	}
 }
