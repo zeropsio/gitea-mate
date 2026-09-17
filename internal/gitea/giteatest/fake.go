@@ -54,6 +54,7 @@ type Fake struct {
 
 	repos         map[string]*gitea.Repo          // "org/name"
 	pulls         map[string][]*gitea.PullRequest // "org/name" -> its pull requests
+	emptyPulls    map[string]bool                 // "org/name#number" -> Gitea calls it empty
 	collaborators map[string]map[string]string    // "org/name" -> login -> permission
 	branchRules   map[string][]gitea.BranchProtection
 	tagRules      map[string][]gitea.TagProtection
@@ -86,6 +87,7 @@ func New(t *testing.T) *Fake {
 		members:       map[int64]map[string]bool{},
 		repos:         map[string]*gitea.Repo{},
 		pulls:         map[string][]*gitea.PullRequest{},
+		emptyPulls:    map[string]bool{},
 		collaborators: map[string]map[string]string{},
 		branchRules:   map[string][]gitea.BranchProtection{},
 		tagRules:      map[string][]gitea.TagProtection{},
@@ -780,6 +782,15 @@ func (f *Fake) AddPullRequest(full string, pr gitea.PullRequest) {
 	f.pulls[full] = append(f.pulls[full], &pr)
 }
 
+// SetPullRequestEmpty makes Gitea call a request empty: its files list is
+// empty and every merge answers 405 "Please try again later", the way Gitea
+// 1.27 answers a branch its base already carries (measured 2026-09-17).
+func (f *Fake) SetPullRequestEmpty(full string, number int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.emptyPulls[full+"#"+strconv.FormatInt(number, 10)] = true
+}
+
 // PullRequest returns one by number.
 func (f *Fake) PullRequest(full string, number int64) (gitea.PullRequest, bool) {
 	f.mu.Lock()
@@ -805,6 +816,37 @@ func (f *Fake) pullRequests(w http.ResponseWriter, r *http.Request, full, rest s
 			}
 		}
 		writeJSON(w, 200, out)
+	case r.Method == http.MethodGet && strings.HasSuffix(rest, "/files"):
+		number := strings.TrimSuffix(strings.TrimPrefix(rest, "/"), "/files")
+		for _, p := range f.pulls[full] {
+			if strconv.FormatInt(p.Number, 10) != number {
+				continue
+			}
+			if f.emptyPulls[full+"#"+number] {
+				writeJSON(w, 200, []gitea.PullRequestFile{})
+				return
+			}
+			writeJSON(w, 200, []gitea.PullRequestFile{{Filename: "3 — Stage/import.yaml"}})
+			return
+		}
+		fail(w, http.StatusNotFound, "no such pull request")
+	case r.Method == http.MethodPatch && rest != "" && !strings.Contains(strings.TrimPrefix(rest, "/"), "/"):
+		number := strings.TrimPrefix(rest, "/")
+		var in struct {
+			State string `json:"state"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		for _, p := range f.pulls[full] {
+			if strconv.FormatInt(p.Number, 10) != number {
+				continue
+			}
+			if in.State != "" {
+				p.State = in.State
+			}
+			writeJSON(w, 201, *p)
+			return
+		}
+		fail(w, http.StatusNotFound, "no such pull request")
 	case r.Method == http.MethodPost && strings.HasSuffix(rest, "/merge"):
 		number := strings.TrimSuffix(strings.TrimPrefix(rest, "/"), "/merge")
 		for _, p := range f.pulls[full] {
@@ -813,6 +855,10 @@ func (f *Fake) pullRequests(w http.ResponseWriter, r *http.Request, full, rest s
 			}
 			if p.State != "open" {
 				fail(w, http.StatusMethodNotAllowed, "pull request is not open")
+				return
+			}
+			if f.emptyPulls[full+"#"+number] {
+				fail(w, http.StatusMethodNotAllowed, "Please try again later")
 				return
 			}
 			p.State, p.Merged = "closed", true

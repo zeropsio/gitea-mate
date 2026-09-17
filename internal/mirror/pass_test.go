@@ -634,6 +634,39 @@ func TestAMatesRecipePullRequestIsMergedByThePass(t *testing.T) {
 	}
 }
 
+// A recipe request main already carries is closed, not retried: Gitea calls
+// it empty and answers every merge 405, and on the owner's org (2026-09-17)
+// the loop failed the same merge every three minutes while the projects page
+// offered the request for review.
+func TestAnEmptyRecipePullRequestIsClosedNotRetried(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	if _, err := r.mirror.Pass(ctx); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	r.gitea.AddPullRequest("acme/group", gitea.PullRequest{
+		Number: 6, Title: "Mate: the group's import files",
+		User: gitea.PullRequestUser{Login: "mate-p-fen"}, Base: gitea.PullRequestBranch{Ref: "main"},
+	})
+	r.gitea.SetPullRequestEmpty("acme/group", 6)
+
+	second, err := r.mirror.Pass(ctx)
+	if err != nil || len(second.Failures) != 0 {
+		t.Fatalf("second pass: %v %v", err, second.Failures)
+	}
+	pr, _ := r.gitea.PullRequest("acme/group", 6)
+	if pr.State != "closed" || pr.Merged {
+		t.Fatalf("the empty request must be closed and not merged, got %+v", pr)
+	}
+	third, err := r.mirror.Pass(ctx)
+	if err != nil {
+		t.Fatalf("third pass: %v", err)
+	}
+	if third.Planned != 0 {
+		t.Errorf("the third pass plans:\n%s", mirror.Describe(third.Plan))
+	}
+}
+
 // A rule that exists is edited into shape, never created again: Gitea answers
 // a duplicate with 403, and the owner's org kept main's release-only merge
 // whitelist through every pass until this was measured (2026-09-17). Here a

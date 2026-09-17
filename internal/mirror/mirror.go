@@ -405,7 +405,20 @@ func (m *Mirror) perform(ctx context.Context, a Action) error {
 		})
 		return err
 	case MergeRecipePullRequest:
-		return m.Gitea.MergePullRequest(ctx, a.Org, a.Repo, a.PullRequest, "")
+		err := m.Gitea.MergePullRequest(ctx, a.Org, a.Repo, a.PullRequest, "")
+		if err == nil || !gitea.IsMethodNotAllowed(err) {
+			return err
+		}
+		// A request Gitea calls empty — its branch carries nothing main
+		// lacks — is never merged and was retried every pass until measured
+		// on the owner's org (2026-09-17: a Mate re-proposed a recipe main
+		// already had). It is closed; a request with changes Gitea refuses
+		// (a conflict) stays open and reported.
+		files, filesErr := m.Gitea.PullRequestFiles(ctx, a.Org, a.Repo, a.PullRequest)
+		if filesErr != nil || len(files) != 0 {
+			return err
+		}
+		return m.Gitea.ClosePullRequest(ctx, a.Org, a.Repo, a.PullRequest)
 	case SetBranchRule:
 		// Look before writing, as for a tag rule: Gitea 1.27.2 answers a
 		// duplicate rule with 403 "Branch protection already exist", not the

@@ -158,6 +158,10 @@ func IsNotFound(err error) bool { return Status(err) == http.StatusNotFound }
 // IsConflict reports whether err is Gitea's 409 — "it already exists".
 func IsConflict(err error) bool { return Status(err) == http.StatusConflict }
 
+// IsMethodNotAllowed is Gitea's answer to a merge it cannot do as the request
+// stands: a conflict, a check still running, or an empty request.
+func IsMethodNotAllowed(err error) bool { return Status(err) == http.StatusMethodNotAllowed }
+
 // auth says which credential a call uses.
 type auth int
 

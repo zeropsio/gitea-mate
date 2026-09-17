@@ -482,6 +482,37 @@ func (c *Client) ListPullRequests(ctx context.Context, owner, repo, state string
 	return all, err
 }
 
+// PullRequestFile is one file a pull request changes.
+type PullRequestFile struct {
+	Filename string `json:"filename"`
+}
+
+// PullRequestFiles is GET /repos/{o}/{r}/pulls/{n}/files, every page. None at
+// all is a request Gitea calls empty: its branch carries nothing the base
+// lacks, and no merge will ever be accepted.
+func (c *Client) PullRequestFiles(ctx context.Context, owner, repo string, number int64) ([]PullRequestFile, error) {
+	var all []PullRequestFile
+	err := paged(func(page int) (int, error) {
+		var out []PullRequestFile
+		path := withPage("/repos/"+esc(owner)+"/"+esc(repo)+"/pulls/"+strconv.FormatInt(number, 10)+"/files", page)
+		if err := c.do(ctx, http.MethodGet, path, nil, &out, authToken); err != nil {
+			return 0, err
+		}
+		all = append(all, out...)
+		return len(out), nil
+	})
+	return all, err
+}
+
+// ClosePullRequest is PATCH /repos/{o}/{r}/pulls/{n} with state closed.
+func (c *Client) ClosePullRequest(ctx context.Context, owner, repo string, number int64) error {
+	in := struct {
+		State string `json:"state"`
+	}{State: "closed"}
+	path := "/repos/" + esc(owner) + "/" + esc(repo) + "/pulls/" + strconv.FormatInt(number, 10)
+	return c.do(ctx, http.MethodPatch, path, in, nil, authToken)
+}
+
 // MergePullRequest is POST /repos/{o}/{r}/pulls/{n}/merge with a merge commit.
 // Gitea answers 405 when the request cannot be merged as it is.
 func (c *Client) MergePullRequest(ctx context.Context, owner, repo string, number int64, message string) error {
