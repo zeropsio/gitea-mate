@@ -29,6 +29,10 @@ Decided elsewhere, read here; none of this repository invents a name or a rule o
 | The role function: Zerops roles → Gitea teams, Mate scopes, OIDC claims | [`docs/roles.md`](docs/roles.md) |
 | Its fixtures, byte-identical with the Mate fork's copy | [`internal/roles/fixtures.json`](internal/roles/fixtures.json) |
 
+Where the whole project stands — the parts and their releases, who holds which credential, every
+slice's state, what is proven live and what is open — is the Mate fork's
+`docs/internals/zerops/primer.md`; the design as landed is its spec, `zcp/docs/spec-mate.md` §10.
+
 ## Layout
 
 ```
