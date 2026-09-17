@@ -245,3 +245,45 @@ func waitUntil(t *testing.T, done func() bool) {
 	}
 	t.Fatal("the condition never held")
 }
+
+func TestRunNowRunsAPassAndNeverOverlapsTheTicker(t *testing.T) {
+	p := &counter{slow: 20 * time.Millisecond}
+	loop := mirror.NewLoop(p, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), 15*time.Millisecond, time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go loop.Run(ctx)
+
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := loop.RunNow(ctx); err != nil {
+				t.Errorf("RunNow: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	cancel()
+
+	runs, overlaps := p.counts()
+	if runs < 4 {
+		t.Errorf("runs = %d, want at least the four RunNow asked for", runs)
+	}
+	if overlaps != 0 {
+		t.Errorf("%d passes overlapped", overlaps)
+	}
+}
+
+func TestRunNowRefusesADeadContext(t *testing.T) {
+	p := &counter{}
+	loop := mirror.NewLoop(p, nil, time.Hour, time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := loop.RunNow(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunNow on a dead context: %v, want context.Canceled", err)
+	}
+	if runs, _ := p.counts(); runs != 0 {
+		t.Errorf("runs = %d, want 0", runs)
+	}
+}

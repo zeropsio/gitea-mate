@@ -5,7 +5,8 @@ the only source of rights inside it.
 
 - **The broker** — a small stateless Go service (`cmd/broker`). It mirrors Zerops permissions into
   Gitea on a timer, signs people in to Gitea as an OIDC provider, hands each Mate its own Gitea bot
-  token, registers the Mate app's public OAuth2 client and hands the app its `client_id`, imports
+  token, hands each person a token that acts as them in Gitea on the same throwaway proof a Mate's
+  door takes, imports
   and wakes a group's Actions runner, and deploys what protected branches and tags allow: a stage
   follows the head of its source branches, production the commits of the newest release tag whose
   pusher it approved. It holds the account's only deploy key, and it executes no
@@ -75,8 +76,8 @@ go run ./cmd/broker
 
 Optional tunables: `LISTEN_ADDR` (`:8080`), `GITEA_ADMIN_USERNAME` (`admin`), `MIRROR_INTERVAL`
 (`3m`), `MIRROR_CAP` (`10`), `RUNNER_QUIET_PERIOD` (`15m`), `MATE_APP_ORIGINS` (`MATE_APP_URL`
-alone — every other origin the app runs from belongs in it, and the rights loop registers the app's
-OAuth2 client for a callback on each).
+alone — every other origin the app runs from belongs in it; the broker answers the app's own calls
+with CORS for each), `GITEA_OIDC_SOURCE_ID` (`1`), `APP_TOKEN_TTL` (`12h`).
 
 `GITEA_ADMIN_PASSWORD` is not in `docs/vocabulary.md`'s table but guide 1.3 names it: Gitea's token
 routes (`/users/{login}/tokens`) answer `401 auth required` to an API token, however privileged

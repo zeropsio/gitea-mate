@@ -152,29 +152,38 @@ Caller: Gitea. `X-Gitea-Signature` is the hex HMAC-SHA256 of the raw body with
 
 Always `204` once the signature is good, whatever the payload; the work runs after the response.
 
-## `GET /gitea/oauth-client` — the Mate app's OAuth2 client (guide 3.7)
+## `POST /person/token` — a person's own Gitea access, for the app (guide 4.4)
 
-Caller: the Mate app, from the browser, **with no credential at all**. A public client's id is not
-a secret; its redirect URIs are what protect it, and the app needs the id before anybody has signed
-in. CORS answers the origins of `MATE_APP_ORIGINS` by name — a runner in this project can reach
-this port, so nothing else is allowed, and `localhost` does not cover `127.0.0.1`.
+Caller: the Mate app, from the browser, as the person — proved by a `gitea-signin` throwaway
+exactly as *Proving a person* above (`Authorization: Bearer <throwaway>`, no body). The app
+drives Gitea as the person; this is how it gets the token to do that without a single Gitea
+screen: the same proof it makes at a Mate's door.
+
+What the broker does, in order: checks the throwaway (`401 throwaway_invalid` with a `reason`
+otherwise); reads the person's rights live and refuses anyone who is not an active member
+(`403 not_a_member`); makes sure the person's Gitea account exists — `u-{id}` per
+`docs/vocabulary.md`, bound to the OIDC source (`source_id` = `GITEA_OIDC_SOURCE_ID`,
+`login_name` = the Zerops user id, no password), so a later *Sign in with Zerops* on Gitea's own
+pages lands on the same account; when it had to create the account, runs one pass of the rights
+loop before answering, so the person is in their teams by the app's first read; mints a token for
+them with the site admin's basic auth (Gitea's token routes take nothing else — measured), named
+`mate-app/{unix nanoseconds}`, scopes `read:user read:organization write:repository write:issue`.
 
 ```json
-{ "clientId": "…", "redirectUris": ["https://app.example/gitea/callback"],
-  "authorizeUrl": "https://web-1234-3000.prg1.zerops.app/login/oauth/authorize",
-  "tokenUrl": "https://web-1234-3000.prg1.zerops.app/login/oauth/access_token" }
+{ "token": "…", "login": "u-…", "expiresIn": 43200 }
 ```
 
-The client itself is registered by the rights loop, not by this route: the broker is Gitea's site
-admin, so a pass ensures one OAuth2 application named `Zerops Mate`, `confidential_client: false`,
-whose `redirect_uris` are `{origin}/gitea/callback` for every origin in `MATE_APP_ORIGINS`, sorted.
-The app cannot do this for itself — `POST /user/applications/oauth2` wants the person's Gitea
-session cookie, which `ALLOW_CREDENTIALS = false` refuses on purpose. Measured on 1.27.2: an
-application the site admin registers as a public client lets **any other person** complete the PKCE
-code flow, and the token it issues is that person's.
+The token is the person's: Gitea enforces the mirrored rights on every call, and the app can widen
+nothing by holding it. Gitea gives a token no expiry, so the rights loop retires every `mate-app/*`
+token older than `APP_TOKEN_TTL` (12 h); the app keeps the value in memory for the tab's life and
+mints again on the first `401`. `502 upstream` when Zerops cannot be reached, `502 gitea` when
+Gitea cannot. CORS: the `POST` and its preflight are answered for `MATE_APP_ORIGINS` by name.
 
-`503 not_registered_yet` until a pass has run — the app waits and asks again rather than start a
-flow with a client id it invented.
+Measured on Gitea 1.27.2 (2026-09-17, the lab): an account with no source needs a password
+(`400 PasswordIsRequired`); one created with `source_id` and `login_name` needs none and is active;
+the site admin's basic auth mints it a token; that token answers `GET /user` as the person and sees
+only what the person may; a token name a user already holds is refused (`400`), and a token is
+deleted by name.
 
 ## OIDC provider — Gitea's *Sign in with Zerops* (guide 3.6)
 

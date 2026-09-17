@@ -18,6 +18,7 @@ type User struct {
 	ID         int64  `json:"id"`
 	Login      string `json:"login"`
 	LoginName  string `json:"login_name"`
+	SourceID   int64  `json:"source_id"`
 	FullName   string `json:"full_name"`
 	Email      string `json:"email"`
 	IsAdmin    bool   `json:"is_admin"`
@@ -37,36 +38,55 @@ type NewUser struct {
 	// Mate's bot gets.
 	Restricted bool
 	Visibility string
+	// SourceID binds the account to a login source — the OIDC source, for a
+	// person — and LoginName is the identity that source knows them by (the
+	// OIDC `sub`). Gitea's *Sign in with Zerops* looks an account up by exactly
+	// this pair before it tries to register or link one, so a person the broker
+	// created signs in to Gitea's own pages as the same account. Zero means a
+	// local account, which needs a password.
+	SourceID  int64
+	LoginName string
 }
 
 type createUserOption struct {
 	Username           string `json:"username"`
 	Email              string `json:"email"`
 	FullName           string `json:"full_name,omitempty"`
-	Password           string `json:"password"`
+	Password           string `json:"password,omitempty"`
 	MustChangePassword bool   `json:"must_change_password"`
 	Restricted         bool   `json:"restricted"`
 	Visibility         string `json:"visibility,omitempty"`
 	SendNotify         bool   `json:"send_notify"`
+	SourceID           int64  `json:"source_id,omitempty"`
+	LoginName          string `json:"login_name,omitempty"`
 }
 
 // CreateUser is POST /admin/users.
+//
+// Measured on Gitea 1.27.2 (2026-09-17): an account with no source needs a
+// password (`400 PasswordIsRequired`); one bound to an OAuth2 source with a
+// `login_name` is created without one, active, and the site admin's basic
+// auth mints it tokens like any other user's.
 func (c *Client) CreateUser(ctx context.Context, u NewUser) (User, error) {
-	password, err := randomPassword()
-	if err != nil {
-		return User{}, err
-	}
 	in := createUserOption{
 		Username:           u.Login,
 		Email:              u.Email,
 		FullName:           u.FullName,
-		Password:           password,
 		MustChangePassword: false,
 		Restricted:         u.Restricted,
 		Visibility:         u.Visibility,
+		SourceID:           u.SourceID,
+		LoginName:          u.LoginName,
+	}
+	if u.SourceID == 0 {
+		password, err := randomPassword()
+		if err != nil {
+			return User{}, err
+		}
+		in.Password = password
 	}
 	var out User
-	err = c.do(ctx, http.MethodPost, "/admin/users", in, &out, authToken)
+	err := c.do(ctx, http.MethodPost, "/admin/users", in, &out, authToken)
 	return out, err
 }
 
@@ -641,64 +661,3 @@ func (c *Client) RunnerRegistrationToken(ctx context.Context, org string) (strin
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
-
-// ---------------------------------------------------------------------------
-// OAuth2 applications
-// ---------------------------------------------------------------------------
-
-// OAuth2App is an OAuth2 application of the account this client acts as. The
-// Mate app's own client is one of these, registered by the site admin: a
-// browser cannot create it for itself (Gitea's own /user routes need a session
-// cookie, which ALLOW_CREDENTIALS deliberately does not permit).
-//
-// Gitea answers a client_secret on creation. It is not decoded here on
-// purpose: the app's client is public (confidential_client false, PKCE), the
-// broker has no use for a secret, and a field that is never read cannot be
-// logged.
-type OAuth2App struct {
-	ID                 int64    `json:"id"`
-	Name               string   `json:"name"`
-	ClientID           string   `json:"client_id"`
-	ConfidentialClient bool     `json:"confidential_client"`
-	RedirectURIs       []string `json:"redirect_uris"`
-}
-
-// NewOAuth2App is the body of both the create and the edit call
-// (CreateOAuth2ApplicationOptions).
-type NewOAuth2App struct {
-	Name               string   `json:"name"`
-	ConfidentialClient bool     `json:"confidential_client"`
-	RedirectURIs       []string `json:"redirect_uris"`
-}
-
-// ListOAuth2Apps is GET /user/applications/oauth2 — the applications of the
-// account whose token this client holds, which for the broker is the site
-// admin's. Measured on 1.27.2: an API token is enough here, unlike the token
-// routes.
-func (c *Client) ListOAuth2Apps(ctx context.Context) ([]OAuth2App, error) {
-	var all []OAuth2App
-	err := paged(func(page int) (int, error) {
-		var out []OAuth2App
-		if err := c.do(ctx, http.MethodGet, withPage("/user/applications/oauth2", page), nil, &out, authToken); err != nil {
-			return 0, err
-		}
-		all = append(all, out...)
-		return len(out), nil
-	})
-	return all, err
-}
-
-// CreateOAuth2App is POST /user/applications/oauth2.
-func (c *Client) CreateOAuth2App(ctx context.Context, app NewOAuth2App) (OAuth2App, error) {
-	var out OAuth2App
-	err := c.do(ctx, http.MethodPost, "/user/applications/oauth2", app, &out, authToken)
-	return out, err
-}
-
-// EditOAuth2App is PATCH /user/applications/oauth2/{id}. The whole option
-// object is sent: the redirect list is replaced, never merged.
-func (c *Client) EditOAuth2App(ctx context.Context, id int64, app NewOAuth2App) (OAuth2App, error) {
-	var out OAuth2App
-	err := c.do(ctx, http.MethodPatch, "/user/applications/oauth2/"+itoa(id), app, &out, authToken)
-	return out, err
-}

@@ -38,6 +38,8 @@ app at registration — on a collision the app numbers it (`acme-2`, `acme-3`) �
 | a Mate's bot user | `mate-{projectId}` (login), full name the Mate's name; restricted, `max_repo_creation 0`, no org creation |
 | a bot's token | `mate/{bot}/{generation}`, generation from 1; scopes `write:repository,read:user` |
 | a person's login | `u-` + the Zerops user id, lower-cased, every character outside `[a-z0-9]` dropped (deterministic, valid for Gitea, never an e-mail's local part); full name from Zerops |
+| a person's account | made by the broker at the person's first sign-in through the app (`POST /person/token`), bound to the OIDC source with `login_name` = the Zerops user id — or by Gitea at a first *Sign in with Zerops* on its own pages; the same account either way, since Gitea looks the source's `login_name` up before it registers or links |
+| a person's app token | `mate-app/{unix nanoseconds}`, scopes `read:user read:organization write:repository write:issue`; minted by `POST /person/token`, retired by the rights loop after `APP_TOKEN_TTL` (12 h), never counted against the cap |
 | the site admin | `admin` (never `mate`) |
 | the OIDC source | `zerops` (callback `{ROOT_URL}/user/oauth2/zerops/callback`) |
 | protected branches | `main` on every repository: no direct push for anyone, merge by the `write` team; `env/*` on the group repo: the broker only; tags `v*` on the group repo: the `release` team. `main` is born with an initial commit, so a Mate's branch must descend from it (zcp fetches `main` before it branches) — an unrelated history merges only by rebase (measured 2026-09-16). The API merge is refused to the site admin when a merge whitelist is set; only a member of the whitelisted team merges |
@@ -87,8 +89,10 @@ Zerops ones.
 | `OIDC_SEED` | import preprocessor | 64 random characters; the ES256 signing key is derived from it deterministically |
 | `BROKER_PUBLIC_URL` | import (plain) | `https://{BROKER_DOMAIN}` — the OIDC issuer |
 | `MATE_APP_URL` | the app, at import (plain) | the web app's origin; the sign-in consent page lives there |
-| `MATE_APP_ORIGINS` | the app, at import (plain) | every origin the app runs from, comma-separated — the same list `web` gets as `GITEA_CORS_ALLOW_DOMAIN`. The app's OAuth2 client is registered for `{origin}/gitea/callback` of each, and `GET /gitea/oauth-client` answers them CORS. `MATE_APP_URL` is one of them whether or not the value names it, so an unset variable is that origin alone |
+| `MATE_APP_ORIGINS` | the app, at import (plain) | every origin the app runs from, comma-separated — the same list `web` gets as `GITEA_CORS_ALLOW_DOMAIN`. `POST /person/token` answers them CORS, by name. `MATE_APP_URL` is one of them whether or not the value names it, so an unset variable is that origin alone |
 | `LISTEN_ADDR` | import (plain) | `:8080` |
+| `GITEA_OIDC_SOURCE_ID` | — (plain, optional) | the id of Gitea's `zerops` login source, `1` unless set: the recipe adds it once at first boot as the only source, and Gitea 1.27 has no API that lists sources. A person the broker creates is bound to it |
+| `APP_TOKEN_TTL` | — (plain, optional) | how long a person's app token lives before the rights loop retires it, `12h` unless set |
 
 `GITEA_ADMIN_TOKEN` and `GITEA_ADMIN_PASSWORD` (the reference `${web_GITEA_ADMIN_PASSWORD}`, needed
 because Gitea's token routes take basic auth alone) are hints the broker checks, not values it

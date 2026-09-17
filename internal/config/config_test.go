@@ -153,7 +153,7 @@ func TestLoad(t *testing.T) {
 			wantErr: []string{"MIRROR_CAP is not a positive integer"},
 		},
 		{
-			name: "MATE_APP_ORIGINS is the list the app's OAuth2 client is registered for",
+			name: "MATE_APP_ORIGINS is the list the broker answers CORS for",
 			mutate: func(m map[string]string) {
 				m["MATE_APP_ORIGINS"] = "https://app.example, http://localhost:5173 ,http://127.0.0.1:5173/"
 			},

@@ -2,9 +2,7 @@ package gitea_test
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/zeropsio/gitea-mate/internal/gitea"
@@ -371,50 +369,24 @@ func TestAllRepoUnits(t *testing.T) {
 	}
 }
 
-// The Mate app's browser client is a public one the site admin registers: the
-// broker lists, creates and replaces it, and never reads a client secret.
-func TestOAuth2Applications(t *testing.T) {
+func TestCreateUserBoundToASourceNeedsNoPassword(t *testing.T) {
 	f := giteatest.New(t)
-	c := f.Client()
 	ctx := context.Background()
-
-	apps, err := c.ListOAuth2Apps(ctx)
-	if err != nil {
-		t.Fatalf("ListOAuth2Apps: %v", err)
-	}
-	if len(apps) != 0 {
-		t.Fatalf("a fresh instance has %d applications", len(apps))
-	}
-
-	created, err := c.CreateOAuth2App(ctx, gitea.NewOAuth2App{
-		Name: "Zerops Mate", ConfidentialClient: false,
-		RedirectURIs: []string{"https://app.example/gitea/callback"},
+	person, err := f.Client().CreateUser(ctx, gitea.NewUser{
+		Login: "u-abc", Email: "abc@example", FullName: "A B C", SourceID: 1, LoginName: "zerops-user-abc",
 	})
 	if err != nil {
-		t.Fatalf("CreateOAuth2App: %v", err)
+		t.Fatalf("CreateUser bound to a source: %v", err)
 	}
-	if created.ClientID == "" || created.ConfidentialClient {
-		t.Errorf("created = %+v; want a client id and a public client", created)
+	if person.SourceID != 1 || person.LoginName != "zerops-user-abc" || !person.Active {
+		t.Errorf("person = %+v, want source 1, login_name zerops-user-abc, active", person)
 	}
-	// gitea.OAuth2App has no secret field at all: the broker holds none, so it
-	// can leak none.
-	if raw, _ := json.Marshal(created); strings.Contains(string(raw), "secret") {
-		t.Errorf("the decoded application carries a secret: %s", raw)
-	}
-
-	edited, err := c.EditOAuth2App(ctx, created.ID, gitea.NewOAuth2App{
-		Name: "Zerops Mate", ConfidentialClient: false,
-		RedirectURIs: []string{"http://localhost:5173/gitea/callback", "https://app.example/gitea/callback"},
-	})
+	// A local account still gets the generated password Gitea insists on.
+	local, err := f.Client().CreateUser(ctx, gitea.NewUser{Login: "mate-p9", Email: "p9@bots.invalid"})
 	if err != nil {
-		t.Fatalf("EditOAuth2App: %v", err)
+		t.Fatalf("CreateUser local: %v", err)
 	}
-	if len(edited.RedirectURIs) != 2 || edited.ClientID != created.ClientID {
-		t.Errorf("edited = %+v; the list is replaced and the client id kept", edited)
-	}
-
-	apps, err = c.ListOAuth2Apps(ctx)
-	if err != nil || len(apps) != 1 || apps[0].Name != "Zerops Mate" {
-		t.Fatalf("ListOAuth2Apps after the edit: %+v %v", apps, err)
+	if local.SourceID != 0 {
+		t.Errorf("a local account carries a source: %+v", local)
 	}
 }

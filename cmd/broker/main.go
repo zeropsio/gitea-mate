@@ -82,15 +82,29 @@ func run(log *slog.Logger) error {
 		ClientID:       cfg.ZeropsClientID,
 		GiteaProjectID: cfg.ZeropsProjectID,
 		AdminLogin:     cfg.GiteaAdminUser,
-		AppOrigins:     cfg.MateAppOrigins,
 		HookURL:        cfg.BrokerPublicURL + "/hooks/gitea",
 		// Every registered Mate's container is given these two, and a token.
 		GiteaPublicURL:  cfg.GiteaPublicURL,
 		BrokerPublicURL: cfg.BrokerPublicURL,
 		Cap:             cfg.MirrorCap,
+		AppTokenTTL:     cfg.AppTokenTTL,
 	}
 	rights.SetHookSecret(cfg.GiteaWebhookSecret.Reveal())
 	loop := mirror.NewLoop(rights, log, cfg.MirrorInterval, mirror.DefaultNudgeDelay)
+
+	// What a proven person may do, read live: the OIDC consent and the app's
+	// own sign-in (POST /person/token) ask the same question.
+	rightsFor := oidc.RightsFunc(func(ctx context.Context, caller throwaway.Caller) (roles.Rights, error) {
+		org, err := mirror.ReadOrg(ctx, zeropsClient, cfg.ZeropsClientID, cfg.ZeropsProjectID)
+		if err != nil {
+			return roles.Rights{}, err
+		}
+		computed, found := org.RightsFor(caller.UserID)
+		if !found {
+			return roles.Rights{}, fmt.Errorf("the org's member list does not carry %s", caller.UserID)
+		}
+		return computed, nil
+	})
 
 	provider, err := oidc.New(oidc.Config{
 		Issuer:       cfg.BrokerPublicURL,
@@ -99,18 +113,8 @@ func run(log *slog.Logger) error {
 		MateAppURL:   cfg.MateAppURL,
 		Seed:         cfg.OIDCSeed.Reveal(),
 		Throwaway:    checker,
-		Rights: oidc.RightsFunc(func(ctx context.Context, caller throwaway.Caller) (roles.Rights, error) {
-			org, err := mirror.ReadOrg(ctx, zeropsClient, cfg.ZeropsClientID, cfg.ZeropsProjectID)
-			if err != nil {
-				return roles.Rights{}, err
-			}
-			computed, found := org.RightsFor(caller.UserID)
-			if !found {
-				return roles.Rights{}, fmt.Errorf("the org's member list does not carry %s", caller.UserID)
-			}
-			return computed, nil
-		}),
-		Log: log,
+		Rights:       rightsFor,
+		Log:          log,
 		// Every token issued asks for a pass a few seconds later, so a person
 		// is in the right teams by the time they have looked at the page.
 		OnIssue: loop.Nudge,
@@ -171,13 +175,13 @@ func run(log *slog.Logger) error {
 		Deploys: pipe,
 		Records: records,
 		Runners: pipe,
-		// The app's public OAuth2 client is whatever the last pass registered.
-		OAuthClient: func() (server.OAuthClient, bool) {
-			client, ok := rights.AppClient()
-			if !ok {
-				return server.OAuthClient{}, false
-			}
-			return server.OAuthClient{ClientID: client.ClientID, RedirectURIs: client.RedirectURIs}, true
+		// A person's own Gitea access: proved the way the OIDC consent is,
+		// placed by a pass before the answer.
+		Throwaway: checker,
+		Rights:    rightsFor,
+		Pass: func(ctx context.Context) error {
+			_, err := loop.RunNow(ctx)
+			return err
 		},
 	})
 	defer srv.Close()

@@ -47,7 +47,6 @@ func resolvingRig(t *testing.T) *rig {
 		Log: slog.New(slog.DiscardHandler),
 	})
 	r.mirror.Gitea = gitea.New(gitea.Config{BaseURL: r.gitea.URL(), AdminUser: giteatest.AdminUser, Admin: resolver})
-	r.mirror.AppOrigins = []string{"https://app.example"}
 	return r
 }
 
@@ -63,7 +62,7 @@ func webReads(z *zeropstest.Fake) int {
 
 // The measured failure: the broker holds a pair Gitea refuses. The pass's
 // first Gitea call answers 401, the pair is read from web, and the pass goes
-// on to build everything — the app's OAuth2 client included.
+// on to build everything.
 func TestAPassRefusedByGiteaReadsThePairFromWebAndSucceeds(t *testing.T) {
 	r := resolvingRig(t)
 	publish(r.zerops)
@@ -74,9 +73,6 @@ func TestAPassRefusedByGiteaReadsThePairFromWebAndSucceeds(t *testing.T) {
 	}
 	if result.Applied == 0 || result.Applied != result.Planned || len(result.Failures) != 0 {
 		t.Fatalf("applied %d of %d; failures: %v", result.Applied, result.Planned, result.Failures)
-	}
-	if _, ok := r.mirror.AppClient(); !ok {
-		t.Error("the app's OAuth2 client was not registered")
 	}
 	if got := r.gitea.TeamMembers("acme", "read"); !contains(got, "mate-p-fen") {
 		t.Errorf("read team = %v", got)

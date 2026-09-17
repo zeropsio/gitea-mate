@@ -1,0 +1,259 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/zeropsio/gitea-mate/internal/config"
+	"github.com/zeropsio/gitea-mate/internal/gitea"
+	"github.com/zeropsio/gitea-mate/internal/mirror"
+	"github.com/zeropsio/gitea-mate/internal/roles"
+	"github.com/zeropsio/gitea-mate/internal/throwaway"
+	"github.com/zeropsio/gitea-mate/internal/zerops"
+	"github.com/zeropsio/gitea-mate/internal/zerops/zeropstest"
+)
+
+// peopleRig is the rig with the three dependencies POST /person/token needs:
+// a throwaway checker over the fake Zerops, the rights read live from it, and
+// a pass that counts how often the route asked for one.
+type peopleRig struct {
+	*rig
+	passes atomic.Int32
+}
+
+func newPeopleRig(t *testing.T) *peopleRig {
+	t.Helper()
+	r := newRig(t)
+	z := r.zerops
+	// Jan's throwaway: no rights, no flags, named for this Gitea, thirty
+	// seconds old, made by Jan. Gone's: the same shape, made by somebody the
+	// org only invited.
+	z.AddIdentity("throwaway-jan", zeropstest.Identity{UserInfoID: "tok-jan", TokenID: "tok-jan", ClientID: clientID})
+	z.AddToken(zerops.Token{
+		ID: "tok-jan", Name: "gitea-signin:" + giteaHost + ":n1",
+		RoleCode: "NO_ACCESS", CreatedByUser: "u-jan", Created: now.Add(-30 * time.Second),
+	})
+	z.AddMember(zerops.Member{
+		ID: "cu-gone", UserID: "u-gone", Status: "INVITED", RoleCode: "READ_ONLY",
+		User: zerops.UserLight{ID: "u-gone", Email: "gone@example", FullName: "Gone"},
+	})
+	z.AddIdentity("throwaway-gone", zeropstest.Identity{UserInfoID: "tok-gone", TokenID: "tok-gone", ClientID: clientID})
+	z.AddToken(zerops.Token{
+		ID: "tok-gone", Name: "gitea-signin:" + giteaHost + ":n2",
+		RoleCode: "NO_ACCESS", CreatedByUser: "u-gone", Created: now.Add(-30 * time.Second),
+	})
+
+	p := &peopleRig{rig: r}
+	cfg := &config.Config{
+		ZeropsClientID: clientID, ZeropsProjectID: giteaPrj,
+		GiteaURL: r.gitea.URL(), GiteaPublicURL: "https://" + giteaHost,
+		GiteaWebhookSecret: "the-webhook-secret",
+		BrokerPublicURL:    "https://broker.example",
+		MateAppURL:         "https://app.example",
+		MateAppOrigins:     []string{"https://app.example", "http://localhost:5734"},
+		GiteaOIDCSourceID:  1,
+		AppTokenTTL:        12 * time.Hour,
+		RunnerQuietPeriod:  50 * time.Millisecond,
+	}
+	broker := z.Client("broker")
+	s := New(cfg, slog.New(slog.DiscardHandler), Deps{
+		Zerops: broker,
+		Gitea:  r.gitea.Client(),
+		Throwaway: &throwaway.Checker{
+			Broker: broker, AsCaller: z.Client, ClientID: clientID, GiteaHost: giteaHost,
+		},
+		Rights: rightsFromTheFake(broker),
+		Pass: func(ctx context.Context) error {
+			p.passes.Add(1)
+			return nil
+		},
+	})
+	t.Cleanup(s.Close)
+	p.server, p.handler = s, s.Handler()
+	return p
+}
+
+type rightsFunc func(ctx context.Context, caller throwaway.Caller) (roles.Rights, error)
+
+func (f rightsFunc) For(ctx context.Context, caller throwaway.Caller) (roles.Rights, error) {
+	return f(ctx, caller)
+}
+
+// rightsFromTheFake is what main wires: the org read live, the role function
+// on the caller.
+func rightsFromTheFake(z *zerops.Client) RightsReader {
+	return rightsFunc(func(ctx context.Context, caller throwaway.Caller) (roles.Rights, error) {
+		org, err := mirror.ReadOrg(ctx, z, clientID, giteaPrj)
+		if err != nil {
+			return roles.Rights{}, err
+		}
+		rights, _ := org.RightsFor(caller.UserID)
+		return rights, nil
+	})
+}
+
+func (p *peopleRig) personToken(bearer, origin string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/person/token", nil)
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	return p.do(req)
+}
+
+func TestAPersonGetsATokenThatActsAsThemAndAnAccountBoundToTheSource(t *testing.T) {
+	r := newPeopleRig(t)
+
+	rr := r.personToken("throwaway-jan", "https://app.example")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /person/token = %d %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Token     string `json:"token"`
+		Login     string `json:"login"`
+		ExpiresIn int    `json:"expiresIn"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	login := roles.Login("u-jan")
+	if body.Login != login || body.Token == "" || body.ExpiresIn != 12*60*60 {
+		t.Fatalf("body = %+v, want login %s, a token and expiresIn 43200", body, login)
+	}
+
+	// The account: bound to the OIDC source under Jan's Zerops id, so a later
+	// *Sign in with Zerops* on Gitea's own pages is the same account.
+	user, ok := r.gitea.User(login)
+	if !ok {
+		t.Fatalf("Gitea has no account %s", login)
+	}
+	if user.SourceID != 1 || user.LoginName != "u-jan" || user.Email != "jan@example" || user.FullName != "Jan" {
+		t.Errorf("account = %+v, want source 1, login_name u-jan, Jan's email and name", user)
+	}
+	if user.Restricted {
+		t.Errorf("a person is not restricted")
+	}
+
+	// The token acts as Jan and is named as the loop will retire it.
+	who, err := r.gitea.TokenOnly(body.Token).WhoAmI(context.Background())
+	if err != nil || who.Login != login {
+		t.Fatalf("WhoAmI with the minted token = %+v, %v; want %s", who, err, login)
+	}
+	names := r.gitea.Tokens(login)
+	if len(names) != 1 || !strings.HasPrefix(names[0], mirror.AppTokenPrefix) {
+		t.Errorf("Jan's tokens = %v, want one named %s…", names, mirror.AppTokenPrefix)
+	}
+
+	// A pass ran once the account existed, so Jan is in the teams before the
+	// app's first read.
+	if got := r.passes.Load(); got != 1 {
+		t.Errorf("passes = %d, want 1", got)
+	}
+
+	// CORS: the app's origin is answered by name.
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example" {
+		t.Errorf("Access-Control-Allow-Origin = %q", got)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(got, "Authorization") {
+		t.Errorf("Access-Control-Allow-Headers = %q, want Authorization allowed", got)
+	}
+}
+
+func TestASecondSignInReusesTheAccountAndMintsAnotherToken(t *testing.T) {
+	r := newPeopleRig(t)
+	first := r.personToken("throwaway-jan", "")
+	second := r.personToken("throwaway-jan", "")
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("codes = %d, %d", first.Code, second.Code)
+	}
+	login := roles.Login("u-jan")
+	if names := r.gitea.Tokens(login); len(names) != 2 || names[0] == names[1] {
+		t.Errorf("Jan's tokens = %v, want two distinct", names)
+	}
+	// The account existed the second time, so no pass was asked for.
+	if got := r.passes.Load(); got != 1 {
+		t.Errorf("passes = %d, want 1", got)
+	}
+}
+
+func TestATokenThatProvesNobodyIsRefused(t *testing.T) {
+	r := newPeopleRig(t)
+	for _, bearer := range []string{"", "nonsense", "broker"} {
+		rr := r.personToken(bearer, "")
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("bearer %q: code = %d, want 401: %s", bearer, rr.Code, rr.Body.String())
+			continue
+		}
+		var body struct{ Error string }
+		_ = json.Unmarshal(rr.Body.Bytes(), &body)
+		if body.Error != throwaway.ErrorCode {
+			t.Errorf("bearer %q: error = %q, want %s", bearer, body.Error, throwaway.ErrorCode)
+		}
+	}
+	if len(r.gitea.Tokens(roles.Login("u-jan"))) != 0 {
+		t.Errorf("a refused call minted a token")
+	}
+}
+
+func TestAPersonWhoIsNotAnActiveMemberGetsNothing(t *testing.T) {
+	r := newPeopleRig(t)
+	// Gone's throwaway passes the shape checks but its creator is only
+	// invited: the checker refuses at its last step.
+	rr := r.personToken("throwaway-gone", "")
+	if rr.Code == http.StatusOK {
+		t.Fatalf("an invited person got a token: %s", rr.Body.String())
+	}
+	if _, ok := r.gitea.User(roles.Login("u-gone")); ok {
+		t.Errorf("an account was made for an invited person")
+	}
+	if got := r.passes.Load(); got != 0 {
+		t.Errorf("passes = %d, want 0", got)
+	}
+}
+
+func TestPersonTokenAnswersCORSForTheAppsOriginsOnly(t *testing.T) {
+	r := newPeopleRig(t)
+	for _, tc := range []struct {
+		origin string
+		want   string
+	}{
+		{"https://app.example", "https://app.example"},
+		{"http://localhost:5734", "http://localhost:5734"},
+		{"http://127.0.0.1:5734", ""},
+		{"https://evil.example", ""},
+	} {
+		req := httptest.NewRequest(http.MethodOptions, "/person/token", nil)
+		req.Header.Set("Origin", tc.origin)
+		rr := r.do(req)
+		if rr.Code != http.StatusNoContent {
+			t.Errorf("OPTIONS from %s = %d", tc.origin, rr.Code)
+		}
+		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != tc.want {
+			t.Errorf("origin %s: Access-Control-Allow-Origin = %q, want %q", tc.origin, got, tc.want)
+		}
+		if tc.want != "" {
+			if got := rr.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "POST") {
+				t.Errorf("origin %s: methods = %q, want POST", tc.origin, got)
+			}
+		}
+	}
+}
+
+func TestPersonTokenIsNotServedWithoutAProver(t *testing.T) {
+	r := newRig(t)
+	rr := r.do(httptest.NewRequest(http.MethodPost, "/person/token", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("POST /person/token with no prover = %d, want 404", rr.Code)
+	}
+	var out gitea.User
+	_ = out
+}

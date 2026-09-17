@@ -712,3 +712,40 @@ func mentions(problems []string, needle string) bool {
 	}
 	return false
 }
+
+func TestStaleAppTokensAreRetiredAndNeverCounted(t *testing.T) {
+	reg, problems := oneGroup(t)
+	g := applied(t)
+	g.PersonTokens = map[string][]gitea.AccessToken{
+		"u-jan": {
+			{Name: mirror.AppTokenPrefix + "1", CreatedAt: now.Add(-13 * time.Hour)},
+			{Name: mirror.AppTokenPrefix + "2", CreatedAt: now.Add(-11 * time.Hour)},
+			{Name: mirror.AppTokenPrefix + "3", CreatedAt: now.Add(-time.Minute)},
+			{Name: "hand-made", CreatedAt: now.Add(-40 * time.Hour)},
+			{Name: mirror.AppTokenPrefix + "no-clock"},
+		},
+	}
+	state := mirror.State{
+		Registry: reg, Problems: problems,
+		Mates:        map[string]string{"p-fen": "Fen"},
+		Members:      settled(),
+		Gitea:        g,
+		MateServices: served("tok-33333333"),
+	}
+	plan := mirror.Compute(state, opts())
+
+	var retired []string
+	for _, a := range plan.Actions {
+		if a.Kind == mirror.DeletePersonToken {
+			retired = append(retired, a.Login+"/"+a.TokenName)
+			if a.Destructive() {
+				t.Errorf("%s counts against the cap; a retirement by age takes nothing from anybody", a)
+			}
+		}
+	}
+	sort.Strings(retired)
+	want := []string{"u-jan/" + mirror.AppTokenPrefix + "1"}
+	if strings.Join(retired, ",") != strings.Join(want, ",") {
+		t.Errorf("retired = %v, want %v: only an app token past the TTL goes; a hand-made one and one with no clock stay", retired, want)
+	}
+}

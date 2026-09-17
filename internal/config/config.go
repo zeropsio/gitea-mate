@@ -62,11 +62,9 @@ type Config struct {
 	BrokerPublicURL  string
 	MateAppURL       string
 	// MateAppOrigins is every origin the Mate app runs from — the web shell,
-	// the desktop and mobile ones — and it is the same list the app writes
-	// into `web`'s GITEA_CORS_ALLOW_DOMAIN. The broker registers the app's
-	// public OAuth2 client for `{origin}/gitea/callback` of each, and answers
-	// GET /gitea/oauth-client with CORS for each. MateAppURL is always one of
-	// them, whether or not the variable names it.
+	// the desktop and mobile shells, a dev server — matched literally. The
+	// broker answers the app's own calls (POST /person/token) with CORS for
+	// each and nothing else. MateAppURL is always one of them.
 	MateAppOrigins []string
 
 	ListenAddr string
@@ -76,6 +74,15 @@ type Config struct {
 	// MirrorCap is the most people, tokens or memberships one pass may
 	// disable, remove or delete before it stops and reports instead.
 	MirrorCap int
+	// GiteaOIDCSourceID is the id of Gitea's `zerops` login source, which the
+	// recipe adds once at first boot: the first and only source, so 1. A
+	// person the broker creates is bound to it, so their sign-in to Gitea's
+	// own pages lands on the same account. Gitea 1.27 has no API that lists
+	// sources, hence a variable rather than a lookup.
+	GiteaOIDCSourceID int64
+	// AppTokenTTL is how long a person's app token (POST /person/token) lives
+	// before the rights loop retires it.
+	AppTokenTTL time.Duration
 	// RunnerQuietPeriod is how long a group's runner stays up after its last
 	// job finished.
 	RunnerQuietPeriod time.Duration
@@ -93,6 +100,8 @@ const (
 	defaultMirrorInterval    = 3 * time.Minute
 	defaultMirrorCap         = 10
 	defaultRunnerQuietPeriod = 15 * time.Minute
+	defaultGiteaOIDCSourceID = 1
+	defaultAppTokenTTL       = 12 * time.Hour
 )
 
 // Load reads the configuration with getenv, which is os.Getenv in production
@@ -192,6 +201,8 @@ func Load(getenv func(string) string) (*Config, error) {
 		MirrorInterval:    optDuration("MIRROR_INTERVAL", defaultMirrorInterval),
 		MirrorCap:         optInt("MIRROR_CAP", defaultMirrorCap),
 		RunnerQuietPeriod: optDuration("RUNNER_QUIET_PERIOD", defaultRunnerQuietPeriod),
+		GiteaOIDCSourceID: int64(optInt("GITEA_OIDC_SOURCE_ID", defaultGiteaOIDCSourceID)),
+		AppTokenTTL:       optDuration("APP_TOKEN_TTL", defaultAppTokenTTL),
 	}
 	if c.ListenAddr == "" {
 		c.ListenAddr = defaultListenAddr

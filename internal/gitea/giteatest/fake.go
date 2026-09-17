@@ -55,7 +55,6 @@ type Fake struct {
 	hooks         map[string][]gitea.Hook // org -> hooks
 	statuses      map[string][]gitea.CommitStatus
 	jobs          map[string]gitea.Job // "org/repo/jobID"
-	oauthApps     []gitea.OAuth2App    // the site admin's OAuth2 applications
 
 	// The read side (contents.go): a repository's files at a ref, its branch
 	// heads, its tags and the archives of its commits.
@@ -197,73 +196,6 @@ func (f *Fake) Tokens(login string) []string {
 	return out
 }
 
-// OAuthApps reads back the site admin's OAuth2 applications.
-func (f *Fake) OAuthApps() []gitea.OAuth2App {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return slices.Clone(f.oauthApps)
-}
-
-// AddOAuthApp registers an application that is already there.
-func (f *Fake) AddOAuthApp(app gitea.OAuth2App) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if app.ID == 0 {
-		app.ID = f.id()
-	}
-	if app.ClientID == "" {
-		app.ClientID = "fake-client-" + strconv.FormatInt(app.ID, 10)
-	}
-	f.oauthApps = append(f.oauthApps, app)
-}
-
-func (f *Fake) listOAuthApps(w http.ResponseWriter) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := f.oauthApps
-	if out == nil {
-		out = []gitea.OAuth2App{}
-	}
-	writeJSON(w, 200, out)
-}
-
-func (f *Fake) createOAuthApp(w http.ResponseWriter, r *http.Request) {
-	var in gitea.NewOAuth2App
-	_ = json.NewDecoder(r.Body).Decode(&in)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	app := gitea.OAuth2App{
-		ID: f.id(), Name: in.Name,
-		ConfidentialClient: in.ConfidentialClient, RedirectURIs: in.RedirectURIs,
-	}
-	app.ClientID = "fake-client-" + strconv.FormatInt(app.ID, 10)
-	f.oauthApps = append(f.oauthApps, app)
-	// Gitea answers a client_secret here; the fake sends one too, so a client
-	// that decoded it would be caught by the test that says it must not.
-	writeJSON(w, http.StatusCreated, struct {
-		gitea.OAuth2App
-		ClientSecret string `json:"client_secret"`
-	}{app, "fake-client-secret"})
-}
-
-func (f *Fake) editOAuthApp(w http.ResponseWriter, r *http.Request, id string) {
-	var in gitea.NewOAuth2App
-	_ = json.NewDecoder(r.Body).Decode(&in)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for i := range f.oauthApps {
-		if strconv.FormatInt(f.oauthApps[i].ID, 10) != id {
-			continue
-		}
-		f.oauthApps[i].Name = in.Name
-		f.oauthApps[i].ConfidentialClient = in.ConfidentialClient
-		f.oauthApps[i].RedirectURIs = in.RedirectURIs
-		writeJSON(w, 200, f.oauthApps[i])
-		return
-	}
-	fail(w, http.StatusNotFound, "no such application")
-}
-
 // Repos reads back an org's repository names, sorted.
 func (f *Fake) Repos(org string) []string {
 	f.mu.Lock()
@@ -350,12 +282,6 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
-	case key == "GET /user/applications/oauth2":
-		f.listOAuthApps(w)
-	case key == "POST /user/applications/oauth2":
-		f.createOAuthApp(w, r)
-	case r.Method == "PATCH" && strings.HasPrefix(path, "/user/applications/oauth2/"):
-		f.editOAuthApp(w, r, seg(path, 4))
 	case key == "GET /user":
 		if !hasScope(scopes, "read:user") {
 			fail(w, http.StatusForbidden, "token does not have at least one of required scope(s), required=[read:user]")
@@ -504,6 +430,8 @@ func (f *Fake) createUser(w http.ResponseWriter, r *http.Request) {
 		Password   string `json:"password"`
 		Restricted bool   `json:"restricted"`
 		Visibility string `json:"visibility"`
+		SourceID   int64  `json:"source_id"`
+		LoginName  string `json:"login_name"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	f.mu.Lock()
@@ -512,13 +440,16 @@ func (f *Fake) createUser(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnprocessableEntity, "user already exists")
 		return
 	}
-	if in.Password == "" {
-		fail(w, http.StatusUnprocessableEntity, "a password is required")
+	// As 1.27.2 behaves: a local account needs a password, one bound to a
+	// login source does not (400 PasswordIsRequired otherwise).
+	if in.Password == "" && in.SourceID == 0 {
+		fail(w, http.StatusBadRequest, "PasswordIsRequired")
 		return
 	}
 	u := &gitea.User{
 		ID: f.id(), Login: in.Username, Email: in.Email, FullName: in.FullName,
 		Restricted: in.Restricted, Active: true, Visibility: in.Visibility,
+		SourceID: in.SourceID, LoginName: in.LoginName,
 	}
 	f.users[in.Username] = u
 	writeJSON(w, http.StatusCreated, u)

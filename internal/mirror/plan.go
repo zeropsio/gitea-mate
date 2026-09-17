@@ -38,6 +38,15 @@ var HookEvents = []string{"push", "create", "delete", "pull_request", "workflow_
 // write:repository alone is 403 (measured on Gitea 1.27.2).
 var BotScopes = []string{"write:repository", "read:user"}
 
+// AppTokenPrefix names the tokens the broker mints for a person's app
+// session (POST /person/token): mate-app/{unix nanoseconds}. Gitea refuses a
+// name a user already holds, so the stamp keeps every mint distinct.
+const AppTokenPrefix = "mate-app/"
+
+// DefaultAppTokenTTL is how long a person's app token lives. A tab rarely
+// outlives it, and a copied value dies with it.
+const DefaultAppTokenTTL = 12 * time.Hour
+
 // DefaultTokenGrace is how long the newest generation of a bot's token must
 // have existed before the loop revokes the older ones. A crash between mint
 // and write then leaves two live tokens for a while, never a dead Mate.
@@ -124,6 +133,9 @@ type GiteaState struct {
 	Hooks map[string][]gitea.Hook
 	// BotTokens is bot login -> its tokens.
 	BotTokens map[string][]gitea.AccessToken
+	// PersonTokens is person login -> its tokens, read for every account the
+	// broker made a person's app token for (AppTokenPrefix).
+	PersonTokens map[string][]gitea.AccessToken
 }
 
 // TeamState is one team and who is in it.
@@ -161,7 +173,11 @@ const (
 	DeactivatePerson   Kind = "deactivate_person"
 	DeletePersonTokens Kind = "delete_person_tokens"
 	DeleteBotToken     Kind = "delete_bot_token"
-	DeliverMateAccess  Kind = "deliver_mate_access"
+	// DeletePersonToken retires one of a person's app tokens by age. The
+	// app re-mints silently on the 401 that follows, so this takes nothing
+	// from anybody and the cap does not count it.
+	DeletePersonToken Kind = "delete_person_token"
+	DeliverMateAccess Kind = "deliver_mate_access"
 )
 
 // Action is one Gitea write. Only the fields its Kind needs are set.
@@ -263,6 +279,9 @@ type Options struct {
 	Now time.Time
 	// TokenGrace defaults to DefaultTokenGrace.
 	TokenGrace time.Duration
+	// AppTokenTTL is how long a person's app token lives before a pass
+	// retires it; defaults to DefaultAppTokenTTL.
+	AppTokenTTL time.Duration
 }
 
 // Compute works out every Gitea write the current state asks for, in an order
@@ -272,6 +291,9 @@ type Options struct {
 func Compute(state State, opts Options) Plan {
 	if opts.TokenGrace <= 0 {
 		opts.TokenGrace = DefaultTokenGrace
+	}
+	if opts.AppTokenTTL <= 0 {
+		opts.AppTokenTTL = DefaultAppTokenTTL
 	}
 	p := &planner{state: state, opts: opts}
 	p.plan()
@@ -304,6 +326,7 @@ func (p *planner) plan() {
 	p.planDepartures()
 	minting := p.planMateAccess()
 	p.planBotTokens(minting)
+	p.planAppTokens()
 }
 
 // planStructure: an org, its three teams, its group repository and its
@@ -553,6 +576,24 @@ func (p *planner) planBotTokens(minting map[string]bool) {
 		}
 		for _, older := range gens[1:] {
 			p.do(Action{Kind: DeleteBotToken, Login: bot, TokenName: older.token.Name})
+		}
+	}
+}
+
+// planAppTokens: a person's app tokens (AppTokenPrefix, minted by
+// POST /person/token) carry no expiry of their own — Gitea has none — so the
+// pass retires every one older than the TTL. The app holds the value in
+// memory for a tab's life and re-mints on the first 401, so a retirement is
+// never noticed; it only bounds how long a copied value stays good.
+func (p *planner) planAppTokens() {
+	for _, login := range sortedTokenKeys(p.state.Gitea.PersonTokens) {
+		for _, t := range p.state.Gitea.PersonTokens[login] {
+			if !strings.HasPrefix(t.Name, AppTokenPrefix) || t.CreatedAt.IsZero() {
+				continue
+			}
+			if p.opts.Now.Sub(t.CreatedAt) >= p.opts.AppTokenTTL {
+				p.do(Action{Kind: DeletePersonToken, Login: login, TokenName: t.Name})
+			}
 		}
 	}
 }

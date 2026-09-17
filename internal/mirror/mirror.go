@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/zeropsio/gitea-mate/internal/gitea"
@@ -38,9 +37,6 @@ type Mirror struct {
 
 	// AdminLogin is the site admin the broker is.
 	AdminLogin string
-	// AppOrigins is every origin the Mate app runs from. The app's public
-	// OAuth2 client is registered for the callback of each.
-	AppOrigins []string
 	// HookURL is where Gitea posts this account's webhooks.
 	HookURL string
 	// GiteaPublicURL and BrokerPublicURL are what every Mate's container is
@@ -51,6 +47,8 @@ type Mirror struct {
 	Cap int
 	// TokenGrace overrides DefaultTokenGrace.
 	TokenGrace time.Duration
+	// AppTokenTTL overrides DefaultAppTokenTTL.
+	AppTokenTTL time.Duration
 	// Now is injectable for tests; nil means time.Now.
 	Now func() time.Time
 
@@ -58,11 +56,6 @@ type Mirror struct {
 	// It is unexported and write-only (SetHookSecret) so no call site can pass
 	// it by accident into something that logs.
 	hookSecret string
-
-	// mu guards appClient, which a pass writes and the /gitea/oauth-client
-	// route reads.
-	mu        sync.Mutex
-	appClient *AppClient
 }
 
 func (m *Mirror) now() time.Time {
@@ -108,15 +101,6 @@ func (r Result) LogValue() slog.Value {
 
 // Pass reads the org, plans and applies. It is the whole loop.
 func (m *Mirror) Pass(ctx context.Context) (Result, error) {
-	// The Mate app's OAuth2 client depends on nothing the org says, so it is
-	// made true first: a Zerops that cannot be read must not leave the app
-	// without the client id it signs people in with.
-	var appFailure string
-	if err := m.EnsureAppClient(ctx); err != nil {
-		appFailure = "the Mate app's OAuth2 client: " + err.Error()
-		m.log().Warn("the Mate app's OAuth2 client could not be registered", "err", err.Error())
-	}
-
 	state, err := m.Gather(ctx)
 	if err != nil {
 		return Result{}, err
@@ -128,6 +112,7 @@ func (m *Mirror) Pass(ctx context.Context) (Result, error) {
 		BrokerPublicURL: m.BrokerPublicURL,
 		Now:             m.now(),
 		TokenGrace:      m.TokenGrace,
+		AppTokenTTL:     m.AppTokenTTL,
 	})
 	// What the pass noticed and will not act on is said once per pass, so a
 	// Mate the broker cannot serve yet is in the log by name. Never a token.
@@ -153,9 +138,6 @@ func (m *Mirror) Pass(ctx context.Context) (Result, error) {
 	applied, failures := m.Apply(ctx, plan)
 	result.Applied = applied
 	result.Failures = failures
-	if appFailure != "" {
-		result.Failures = append(result.Failures, appFailure)
-	}
 	return result, nil
 }
 
@@ -274,12 +256,13 @@ func (s State) RightsFor(userID string) (roles.Rights, bool) {
 
 func (m *Mirror) gatherGitea(ctx context.Context, reg registry.Registry) (GiteaState, error) {
 	out := GiteaState{
-		Users:     map[string]gitea.User{},
-		Orgs:      map[string]bool{},
-		Teams:     map[string]map[string]TeamState{},
-		Repos:     map[string]map[string]RepoState{},
-		Hooks:     map[string][]gitea.Hook{},
-		BotTokens: map[string][]gitea.AccessToken{},
+		Users:        map[string]gitea.User{},
+		Orgs:         map[string]bool{},
+		Teams:        map[string]map[string]TeamState{},
+		Repos:        map[string]map[string]RepoState{},
+		Hooks:        map[string][]gitea.Hook{},
+		BotTokens:    map[string][]gitea.AccessToken{},
+		PersonTokens: map[string][]gitea.AccessToken{},
 	}
 
 	users, err := m.Gitea.ListUsers(ctx)
@@ -288,6 +271,20 @@ func (m *Mirror) gatherGitea(ctx context.Context, reg registry.Registry) (GiteaS
 	}
 	for _, u := range users {
 		out.Users[u.Login] = u
+	}
+
+	// A person's app tokens are the broker's to retire (AppTokenPrefix), so
+	// every active person's tokens are read. A departed person's go with the
+	// departure, all of them, and are not read here.
+	for _, u := range users {
+		if !u.Active || !strings.HasPrefix(u.Login, "u-") {
+			continue
+		}
+		tokens, err := m.Gitea.ListTokens(ctx, u.Login)
+		if err != nil {
+			return out, fmt.Errorf("tokens of %s: %w", u.Login, err)
+		}
+		out.PersonTokens[u.Login] = tokens
 	}
 
 	for _, g := range reg.Groups {
@@ -468,7 +465,7 @@ func (m *Mirror) perform(ctx context.Context, a Action) error {
 			}
 		}
 		return nil
-	case DeleteBotToken:
+	case DeleteBotToken, DeletePersonToken:
 		return m.Gitea.DeleteToken(ctx, a.Login, a.TokenName)
 	case DeliverMateAccess:
 		return m.deliverMateAccess(ctx, a)

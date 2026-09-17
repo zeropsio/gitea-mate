@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -35,6 +36,9 @@ type Loop struct {
 	NudgeDelay time.Duration
 
 	nudges chan struct{}
+	// passMu serialises passes: the ticker's, a nudge's and RunNow's never
+	// overlap, whichever goroutine asks.
+	passMu sync.Mutex
 }
 
 // NewLoop builds a loop.
@@ -99,11 +103,26 @@ func (l *Loop) Run(ctx context.Context) {
 }
 
 // pass runs one pass and logs its outcome as counts. Never a name of a token.
+// RunNow runs one pass on the caller's goroutine and returns its outcome. It
+// waits for a pass already under way rather than overlapping it. A route that
+// just made an account true asks for this, so the person is in their teams by
+// the time the route answers, instead of one nudge delay later.
+func (l *Loop) RunNow(ctx context.Context) (Result, error) {
+	l.passMu.Lock()
+	defer l.passMu.Unlock()
+	if ctx.Err() != nil {
+		return Result{}, ctx.Err()
+	}
+	return l.Passer.Pass(ctx)
+}
+
 func (l *Loop) pass(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	l.passMu.Lock()
 	result, err := l.Passer.Pass(ctx)
+	l.passMu.Unlock()
 	switch {
 	case errors.Is(err, ErrCapped):
 		// The plan is in the result for a person to read; the log says how many,
