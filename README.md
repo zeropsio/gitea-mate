@@ -52,10 +52,10 @@ actions/deploy      the composite action a workflow calls to deploy
 
 ## Running the broker locally
 
-Every variable in `docs/vocabulary.md` § "The broker's environment" is required; a missing one is
-named in the start-up error and no value is ever logged. The four that name Zerops carry a `MATE_`
-prefix: the platform's import refuses a custom variable beginning with `ZEROPS_`
-(`400 userDataZeropsPrefixForbidden`, measured 2026-09-16).
+Every variable in `docs/vocabulary.md` § "The broker's environment" but the site admin's pair is
+required; a missing one is named in the start-up error and no value is ever logged. The four that
+name Zerops carry a `MATE_` prefix: the platform's import refuses a custom variable beginning with
+`ZEROPS_` (`400 userDataZeropsPrefixForbidden`, measured 2026-09-16).
 
 ```sh
 export MATE_ZEROPS_TOKEN=…       MATE_ZEROPS_API_URL=https://api.app-prg1.zerops.io
@@ -77,6 +77,12 @@ OAuth2 client for a callback on each).
 `GITEA_ADMIN_PASSWORD` is not in `docs/vocabulary.md`'s table but guide 1.3 names it: Gitea's token
 routes (`/users/{login}/tokens`) answer `401 auth required` to an API token, however privileged
 (measured on 1.27.2), so minting a Mate bot's credential needs the site admin's basic auth.
+
+`GITEA_ADMIN_TOKEN` and `GITEA_ADMIN_PASSWORD` are the two a start does not insist on. On Zerops
+they are references to `web`'s variables, which Gitea's first boot publishes after the broker may
+already be running; a value that is empty or still the `${…}` reference, and a pair Gitea answers
+401 to, is read from `web`'s variables through the Zerops API instead (`internal/siteadmin`). A
+local run sets both and the platform is never asked.
 
 ## Gitea on Zerops
 

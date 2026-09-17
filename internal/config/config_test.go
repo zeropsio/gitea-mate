@@ -67,9 +67,34 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
-			name:    "the site admin's password is required: the token routes refuse an API token",
-			mutate:  func(m map[string]string) { delete(m, "GITEA_ADMIN_PASSWORD") },
-			wantErr: []string{"GITEA_ADMIN_PASSWORD"},
+			// The pair is published by web on Gitea's first boot, which the
+			// broker's start can precede; the broker serves and resolves the
+			// pair from the platform (internal/siteadmin), so a start never
+			// fails for it.
+			name: "the site admin's pair may be absent at start",
+			mutate: func(m map[string]string) {
+				delete(m, "GITEA_ADMIN_TOKEN")
+				delete(m, "GITEA_ADMIN_PASSWORD")
+			},
+			check: func(t *testing.T, c *Config) {
+				if c.GiteaAdminToken.Reveal() != "" || c.GiteaAdminPassword.Reveal() != "" {
+					t.Errorf("the pair = %q/%q, want empty", c.GiteaAdminToken.Reveal(), c.GiteaAdminPassword.Reveal())
+				}
+			},
+		},
+		{
+			name: "the site admin's pair may still be the unresolved reference at start",
+			mutate: func(m map[string]string) {
+				m["GITEA_ADMIN_TOKEN"] = "${web_GITEA_ADMIN_TOKEN}"
+				m["GITEA_ADMIN_PASSWORD"] = "${web_GITEA_ADMIN_PASSWORD}"
+			},
+			check: func(t *testing.T, c *Config) {
+				// Carried as it came: the resolver is what tells a reference
+				// from a value.
+				if c.GiteaAdminToken.Reveal() != "${web_GITEA_ADMIN_TOKEN}" {
+					t.Errorf("GiteaAdminToken = %q", c.GiteaAdminToken.Reveal())
+				}
+			},
 		},
 		{
 			name:    "one missing variable is named",
@@ -80,10 +105,10 @@ func TestLoad(t *testing.T) {
 			name: "every missing variable is named at once",
 			mutate: func(m map[string]string) {
 				delete(m, "MATE_ZEROPS_TOKEN")
-				delete(m, "GITEA_ADMIN_TOKEN")
+				delete(m, "GITEA_WEBHOOK_SECRET")
 				delete(m, "MATE_APP_URL")
 			},
-			wantErr: []string{"MATE_ZEROPS_TOKEN", "GITEA_ADMIN_TOKEN", "MATE_APP_URL"},
+			wantErr: []string{"MATE_ZEROPS_TOKEN", "GITEA_WEBHOOK_SECRET", "MATE_APP_URL"},
 		},
 		{
 			name:    "a blank variable counts as missing",

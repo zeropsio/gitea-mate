@@ -38,8 +38,9 @@ type Merger struct {
 	Log   *slog.Logger
 	// CloneURL builds the URL a working copy is cloned from, credentials
 	// included. It is a function so the value never has to be stored, and so a
-	// test can point it at a directory.
-	CloneURL func(owner, repo string) string
+	// test can point it at a directory. It can fail: the credential in it is
+	// the site admin's, which is resolved from the platform when it must be.
+	CloneURL func(ctx context.Context, owner, repo string) (string, error)
 	// Timeout bounds one merge.
 	Timeout time.Duration
 	// Dir is where throwaway working copies are made; empty means the
@@ -106,7 +107,11 @@ func (m *Merger) merge(ctx context.Context, owner, repo string, env environments
 
 	run := func(args ...string) (string, error) { return git(ctx, dir, args...) }
 
-	if _, err := git(ctx, "", "clone", "--quiet", m.CloneURL(owner, repo), dir); err != nil {
+	cloneURL, err := m.CloneURL(ctx, owner, repo)
+	if err != nil {
+		return previous, fmt.Errorf("%s/%s could not be cloned: %w", owner, repo, err)
+	}
+	if _, err := git(ctx, "", "clone", "--quiet", cloneURL, dir); err != nil {
 		return previous, fmt.Errorf("%s/%s could not be cloned: %w", owner, repo, err)
 	}
 	// The broker is not a person and its merges are not authored by one.

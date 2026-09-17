@@ -27,6 +27,7 @@ import (
 	"github.com/zeropsio/gitea-mate/internal/pipeline"
 	"github.com/zeropsio/gitea-mate/internal/roles"
 	"github.com/zeropsio/gitea-mate/internal/server"
+	"github.com/zeropsio/gitea-mate/internal/siteadmin"
 	"github.com/zeropsio/gitea-mate/internal/throwaway"
 	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
@@ -48,11 +49,21 @@ func run(log *slog.Logger) error {
 	}
 
 	zeropsClient := zerops.New(cfg.ZeropsAPIURL, cfg.ZeropsToken.Reveal(), nil)
+	// The site admin's pair is what the environment says only once it has
+	// arrived; until then, and whenever Gitea refuses it, it is read from
+	// web's variables. A start with the pair still unresolved serves, and the
+	// first pass resolves it.
+	admin := siteadmin.New(siteadmin.Config{
+		Env:       gitea.AdminCredentials{Token: cfg.GiteaAdminToken.Reveal(), Password: cfg.GiteaAdminPassword.Reveal()},
+		Zerops:    zeropsClient,
+		ClientID:  cfg.ZeropsClientID,
+		ProjectID: cfg.ZeropsProjectID,
+		Log:       log,
+	})
 	giteaClient := gitea.New(gitea.Config{
-		BaseURL:       cfg.GiteaURL,
-		AdminToken:    cfg.GiteaAdminToken.Reveal(),
-		AdminUser:     cfg.GiteaAdminUser,
-		AdminPassword: cfg.GiteaAdminPassword.Reveal(),
+		BaseURL:   cfg.GiteaURL,
+		Admin:     admin,
+		AdminUser: cfg.GiteaAdminUser,
 	})
 
 	checker := &throwaway.Checker{
@@ -137,8 +148,12 @@ func run(log *slog.Logger) error {
 				Log:   log,
 				// The admin token travels in the clone URL and nowhere else:
 				// it is built for each clone and never stored.
-				CloneURL: func(owner, repo string) string {
-					return cloneURL(cfg.GiteaURL, cfg.GiteaAdminUser, cfg.GiteaAdminToken.Reveal(), owner, repo)
+				CloneURL: func(ctx context.Context, owner, repo string) (string, error) {
+					creds, err := admin.Admin(ctx)
+					if err != nil {
+						return "", fmt.Errorf("the site admin's credentials: %w", err)
+					}
+					return cloneURL(cfg.GiteaURL, cfg.GiteaAdminUser, creds.Token, owner, repo), nil
 				},
 			},
 		},

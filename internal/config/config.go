@@ -38,15 +38,21 @@ type Config struct {
 	ZeropsClientID  string
 	ZeropsProjectID string
 
-	GiteaURL        string
-	GiteaPublicURL  string
-	GiteaAdminToken Secret
-	// GiteaAdminUser and GiteaAdminPassword are the site admin's basic-auth
-	// credentials. They exist because Gitea's token routes
+	GiteaURL       string
+	GiteaPublicURL string
+	// GiteaAdminToken and GiteaAdminPassword are the site admin's pair as the
+	// environment handed it — a hint, not the truth. Both are references to
+	// web's variables, which Gitea's first boot publishes, and the broker can
+	// start before that: the value is then empty or the `${…}` reference
+	// verbatim. Neither is required here; internal/siteadmin tells a value
+	// from a reference and reads the pair from the platform when it must.
+	//
+	// The password exists because Gitea's token routes
 	// (/users/{login}/tokens) answer 401 "auth required" to an API token,
 	// however privileged — measured on 1.27.2 — so minting a Mate bot's
 	// credential has no other path. docs/vocabulary.md lists only
 	// GITEA_ADMIN_TOKEN; guide 1.3 names both.
+	GiteaAdminToken    Secret
 	GiteaAdminUser     string
 	GiteaAdminPassword Secret
 	GiteaWebhookSecret Secret
@@ -91,7 +97,8 @@ const (
 
 // Load reads the configuration with getenv, which is os.Getenv in production
 // and a map in tests. Every problem is collected, so one start names every
-// missing variable rather than one per restart.
+// missing variable rather than one per restart. The site admin's pair is the
+// one thing a start does not insist on: it is resolved from the platform.
 func Load(getenv func(string) string) (*Config, error) {
 	var missing []string
 	var bad []string
@@ -169,9 +176,9 @@ func Load(getenv func(string) string) (*Config, error) {
 
 		GiteaURL:           reqURL("GITEA_URL"),
 		GiteaPublicURL:     reqURL("GITEA_PUBLIC_URL"),
-		GiteaAdminToken:    Secret(req("GITEA_ADMIN_TOKEN")),
+		GiteaAdminToken:    Secret(strings.TrimSpace(getenv("GITEA_ADMIN_TOKEN"))),
 		GiteaAdminUser:     strings.TrimSpace(getenv("GITEA_ADMIN_USERNAME")),
-		GiteaAdminPassword: Secret(req("GITEA_ADMIN_PASSWORD")),
+		GiteaAdminPassword: Secret(strings.TrimSpace(getenv("GITEA_ADMIN_PASSWORD"))),
 		GiteaWebhookSecret: Secret(req("GITEA_WEBHOOK_SECRET")),
 
 		OIDCClientSecret: Secret(req("OIDC_CLIENT_SECRET")),

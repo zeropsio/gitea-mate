@@ -288,7 +288,7 @@ func TestMergeSeveralSourcesIntoTheEnvironmentBranch(t *testing.T) {
 	g.AddRepo("acme/api", "main")
 	merger := &deploy.Merger{
 		Gitea:    g.Client(),
-		CloneURL: func(owner, name string) string { return repo },
+		CloneURL: func(context.Context, string, string) (string, error) { return repo, nil },
 		Timeout:  30 * time.Second,
 	}
 
@@ -326,7 +326,7 @@ func TestAConflictKeepsTheLastGoodMerge(t *testing.T) {
 	g.SetBranch("acme/api", "env/stage-client-x", oldSha)
 	g.SetBranch("acme/api", "main", apiSha)
 	client := g.Client()
-	merger := &deploy.Merger{Gitea: client, CloneURL: func(string, string) string { return repo }, Timeout: 30 * time.Second}
+	merger := &deploy.Merger{Gitea: client, CloneURL: func(context.Context, string, string) (string, error) { return repo, nil }, Timeout: 30 * time.Second}
 
 	head, err := merger.Head(context.Background(), "acme", "api", env)
 	if !errors.Is(err, deploy.ErrConflict) {

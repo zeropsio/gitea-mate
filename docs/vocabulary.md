@@ -90,6 +90,15 @@ Zerops ones.
 | `MATE_APP_ORIGINS` | the app, at import (plain) | every origin the app runs from, comma-separated — the same list `web` gets as `GITEA_CORS_ALLOW_DOMAIN`. The app's OAuth2 client is registered for `{origin}/gitea/callback` of each, and `GET /gitea/oauth-client` answers them CORS. `MATE_APP_URL` is one of them whether or not the value names it, so an unset variable is that origin alone |
 | `LISTEN_ADDR` | import (plain) | `:8080` |
 
+`GITEA_ADMIN_TOKEN` and `GITEA_ADMIN_PASSWORD` (the reference `${web_GITEA_ADMIN_PASSWORD}`, needed
+because Gitea's token routes take basic auth alone) are hints the broker checks, not values it
+trusts. `web` publishes both on Gitea's first boot, and the broker's container can start before
+that: the reference then reaches it verbatim, or the variable is empty (measured 2026-09-16 and
+2026-09-17). A value that has not arrived — empty, or still `${…}` — is read from `web`'s own
+variables through the Zerops API with the broker's token, and so is one Gitea answers 401 to (a
+first boot on a reset volume mints anew). The pair is held in memory once it is good, a read that
+fails is that pass's reported problem and the next pass's retry, and a start never fails for it.
+
 ## A Mate's environment (service `zcp`, written by the broker's rights loop)
 
 `GITEA_URL` (plain, Gitea's public origin), `MATE_BROKER_URL` (plain, the broker's public origin —
