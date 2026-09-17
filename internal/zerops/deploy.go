@@ -87,10 +87,13 @@ func (c *Client) BuildAndDeploy(ctx context.Context, versionID, zeropsYaml, setu
 }
 
 // ServiceUserData is one entry of a service's own environment, as the platform
-// holds it.
+// holds it. ID is what an update names; GET /service-stack/{id} carries the
+// entries without it, the user-data list with it.
 type ServiceUserData struct {
-	Key     string `json:"key"`
-	Content string `json:"content"`
+	ID        string `json:"id,omitempty"`
+	Key       string `json:"key"`
+	Content   string `json:"content"`
+	Sensitive bool   `json:"sensitive"`
 }
 
 // AppVersionNameKey is the userData entry that carries the name of the version

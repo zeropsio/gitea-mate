@@ -74,6 +74,12 @@ type Fake struct {
 	// FailDeletes makes the process a deletion answers end FAILED — what a
 	// service the platform would not remove looks like.
 	FailDeletes bool
+	// Ungranted is the projects this API's tokens were never granted: a
+	// service search on one, and the user data of its services, answer 403 —
+	// what a Mate project the app has not yet granted the broker looks like.
+	Ungranted map[string]bool
+	// userData is each service's own variables, by service id.
+	userData map[string][]zerops.ServiceUserData
 
 	// The deploy half (deploy.go): app versions by id, processes by id, which
 	// services have ever deployed, whose subdomain is on, and which version
@@ -102,6 +108,8 @@ func New(t *testing.T, clientID string) *Fake {
 		tokens:     map[string]zerops.Token{},
 		services:   map[string][]zerops.Service{},
 		Fail:       map[string]int{},
+		Ungranted:  map[string]bool{},
+		userData:   map[string][]zerops.ServiceUserData{},
 		stopped:    map[string]bool{},
 		started:    map[string]bool{},
 		versions:   map[string]*AppVersionRecord{},
@@ -167,6 +175,30 @@ func (f *Fake) SetServices(projectID string, s ...zerops.Service) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.services[projectID] = s
+}
+
+// SetUserData replaces one service's own variables. An entry without an id
+// gets one.
+func (f *Fake) SetUserData(serviceID string, entries ...zerops.ServiceUserData) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	list := make([]zerops.ServiceUserData, 0, len(entries))
+	for _, e := range entries {
+		if e.ID == "" {
+			f.sequence++
+			e.ID = serviceID + "-ud-" + itoa(f.sequence)
+		}
+		list = append(list, e)
+	}
+	f.userData[serviceID] = list
+}
+
+// UserData reads back one service's own variables, in the order they were
+// written.
+func (f *Fake) UserData(serviceID string) []zerops.ServiceUserData {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]zerops.ServiceUserData(nil), f.userData[serviceID]...)
 }
 
 // Project returns the recorded project, so a test can read back a tag write.
@@ -245,6 +277,12 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		f.updateProject(w, r, path)
 	case key == "POST /service-stack/search":
 		f.serviceSearch(w, r)
+	case r.Method == "GET" && strings.HasPrefix(path, "/service-stack/") && strings.HasSuffix(path, "/user-data"):
+		f.listUserData(w, strings.TrimSuffix(strings.TrimPrefix(path, "/service-stack/"), "/user-data"))
+	case r.Method == "POST" && strings.HasPrefix(path, "/service-stack/") && strings.HasSuffix(path, "/user-data"):
+		f.createUserData(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/service-stack/"), "/user-data"))
+	case r.Method == "PUT" && strings.HasPrefix(path, "/user-data/"):
+		f.updateUserData(w, r, lastSegment(path))
 	case r.Method == "POST" && strings.HasSuffix(path, "/service-stack/import"):
 		f.importServices(w, r, path)
 	case r.Method == "PUT" && (strings.HasSuffix(path, "/stop") || strings.HasSuffix(path, "/start")):
@@ -465,11 +503,104 @@ func (f *Fake) serviceSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.Ungranted[projectID] {
+		writeErr(w, http.StatusForbidden, "insufficientPermissions", "the token does not hold that project")
+		return
+	}
 	items := f.services[projectID]
 	if items == nil {
 		items = []zerops.Service{}
 	}
 	writeJSON(w, 200, map[string]any{"items": items, "totalHits": len(items)})
+}
+
+// listUserData is GET /service-stack/{id}/user-data. Sensitive values come
+// back in clear, as they do to a BASIC_USER token on the project.
+func (f *Fake) listUserData(w http.ResponseWriter, serviceID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.userDataReachable(w, serviceID) {
+		return
+	}
+	list := f.userData[serviceID]
+	if list == nil {
+		list = []zerops.ServiceUserData{}
+	}
+	writeJSON(w, 200, map[string]any{"list": list})
+}
+
+// createUserData is POST /service-stack/{id}/user-data: 200 with a process. A
+// write onto a service that has not deployed yet is accepted, as measured.
+func (f *Fake) createUserData(w http.ResponseWriter, r *http.Request, serviceID string) {
+	var spec zerops.UserDataSpec
+	_ = json.NewDecoder(r.Body).Decode(&spec)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.userDataReachable(w, serviceID) {
+		return
+	}
+	if spec.Key == "" {
+		writeErr(w, http.StatusBadRequest, "invalidUserInput", "a variable has a key")
+		return
+	}
+	for _, e := range f.userData[serviceID] {
+		if e.Key == spec.Key {
+			writeErr(w, http.StatusBadRequest, "userDataKeyAlreadyExists", "that key exists; update it")
+			return
+		}
+	}
+	f.sequence++
+	f.userData[serviceID] = append(f.userData[serviceID], zerops.ServiceUserData{
+		ID: serviceID + "-ud-" + itoa(f.sequence), Key: spec.Key, Content: spec.Content, Sensitive: spec.Sensitive,
+	})
+	f.sequence++
+	proc := zerops.Process{ID: "proc-" + itoa(f.sequence), ServiceStackID: serviceID, Status: zerops.ProcessFinished, ActionName: "stack.userData.create"}
+	f.processes[proc.ID] = proc
+	writeJSON(w, 200, proc)
+}
+
+// updateUserData is PUT /user-data/{id}. The body must carry the key beside
+// the content; the platform refuses one without it.
+func (f *Fake) updateUserData(w http.ResponseWriter, r *http.Request, id string) {
+	var spec zerops.UserDataSpec
+	_ = json.NewDecoder(r.Body).Decode(&spec)
+	if spec.Key == "" {
+		writeErr(w, http.StatusBadRequest, "invalidUserInput", "the key must be sent beside the content")
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for serviceID, list := range f.userData {
+		for i, e := range list {
+			if e.ID != id {
+				continue
+			}
+			if !f.userDataReachable(w, serviceID) {
+				return
+			}
+			f.userData[serviceID][i].Key = spec.Key
+			f.userData[serviceID][i].Content = spec.Content
+			writeJSON(w, 200, f.userData[serviceID][i])
+			return
+		}
+	}
+	writeErr(w, http.StatusNotFound, "userDataNotFound", "no such variable")
+}
+
+// userDataReachable writes the refusal for a service the token does not reach
+// — 403 on an ungranted project, 404 on no such service — and reports whether
+// the caller may go on. Called with the lock held.
+func (f *Fake) userDataReachable(w http.ResponseWriter, serviceID string) bool {
+	projectID := f.projectOfService(serviceID)
+	if projectID == "" {
+		writeErr(w, http.StatusNotFound, "serviceStackNotFound", "no such service")
+		return false
+	}
+	if f.Ungranted[projectID] {
+		writeErr(w, http.StatusForbidden, "insufficientPermissions", "the token does not hold that project")
+		return false
+	}
+	return true
 }
 
 func (f *Fake) importServices(w http.ResponseWriter, r *http.Request, path string) {

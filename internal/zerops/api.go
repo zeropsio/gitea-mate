@@ -375,6 +375,10 @@ type Service struct {
 	Name      string `json:"name"`
 	Status    string `json:"status"`
 	Type      string `json:"serviceStackTypeId"`
+	// TypeInfo names the type and version the service runs, as the search
+	// carries it. A Mate's container is the service whose version name starts
+	// with zcp@.
+	TypeInfo ServiceTypeInfo `json:"serviceStackTypeInfo"`
 	// IsSystem marks a stack the platform owns rather than a person: every
 	// project's `core`, and the transient build and prepare stacks a deploy
 	// makes. Nothing that compares a project against a recipe may see one.
@@ -386,6 +390,12 @@ type Service struct {
 	// Ports is what the service listens on; one with HTTPRouting is what makes
 	// a subdomain meaningful.
 	Ports []ServicePort `json:"ports"`
+}
+
+// ServiceTypeInfo is the search's serviceStackTypeInfo: which type, at which
+// version, a service runs.
+type ServiceTypeInfo struct {
+	VersionName string `json:"serviceStackTypeVersionName"`
 }
 
 // ServicePort is one port of a service.
