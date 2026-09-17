@@ -166,11 +166,11 @@ func TestGroupRepoProtections(t *testing.T) {
 	if main.EnablePush {
 		t.Error("main allows a direct push")
 	}
-	if !main.EnableMergeWhitelist || len(main.MergeWhitelistTeams) != 1 || main.MergeWhitelistTeams[0] != "release" {
-		t.Errorf("main merges = %+v; the group repo takes merges from the release team", main.MergeWhitelistTeams)
-	}
-	if !main.BlockAdminMergeOverride {
-		t.Error("an admin can still override the merge on main")
+	if main.EnableMergeWhitelist || len(main.MergeWhitelistTeams) != 0 || main.BlockAdminMergeOverride {
+		// D23: anyone with write merges — the write and release teams, and the
+		// broker landing a Mate's proposal. Until 2026-09-17 the release team
+		// alone could, and every Mate's recipe waited for a releaser.
+		t.Errorf("main merges = %+v; the group repo takes merges from anyone with write", main)
 	}
 	if !env.EnablePushWhitelist || len(env.PushWhitelistUsers) != 1 || env.PushWhitelistUsers[0] != adminLogin {
 		t.Errorf("env/* pushers = %+v; the broker alone writes env/*", env.PushWhitelistUsers)
@@ -221,10 +221,7 @@ func applied(t *testing.T) mirror.GiteaState {
 	}
 	g.Repos["acme"] = map[string]mirror.RepoState{"group": {
 		BranchRules: map[string]gitea.BranchProtection{
-			"main": {
-				RuleName: "main", EnablePush: false, EnableMergeWhitelist: true,
-				MergeWhitelistTeams: []string{"release"}, BlockAdminMergeOverride: true,
-			},
+			"main": {RuleName: "main", EnablePush: false},
 			"env/*": {
 				RuleName: "env/*", EnablePush: true, EnablePushWhitelist: true,
 				PushWhitelistUsers: []string{adminLogin},
@@ -747,5 +744,35 @@ func TestStaleAppTokensAreRetiredAndNeverCounted(t *testing.T) {
 	want := []string{"u-jan/" + mirror.AppTokenPrefix + "1"}
 	if strings.Join(retired, ",") != strings.Join(want, ",") {
 		t.Errorf("retired = %v, want %v: only an app token past the TTL goes; a hand-made one and one with no clock stay", retired, want)
+	}
+}
+
+// D23: a recipe a Mate proposed is merged by the pass, and nothing else is —
+// a person's pull request is theirs, a bot of another group is nobody here, a
+// request against another branch or already closed is left alone.
+func TestAMatesRecipePullRequestIsMergedAndNobodyElses(t *testing.T) {
+	reg, problems := oneGroup(t)
+	g := emptyGitea()
+	main := gitea.PullRequestBranch{Ref: "main"}
+	g.GroupPullRequests = map[string][]gitea.PullRequest{"acme": {
+		{Number: 1, State: "open", User: gitea.PullRequestUser{Login: "mate-p-fen"}, Base: main},
+		{Number: 2, State: "open", User: gitea.PullRequestUser{Login: roles.Login("u-jan")}, Base: main},
+		{Number: 3, State: "open", User: gitea.PullRequestUser{Login: "mate-p-elsewhere"}, Base: main},
+		{Number: 4, State: "open", User: gitea.PullRequestUser{Login: "mate-p-fen"}, Base: gitea.PullRequestBranch{Ref: "env/stage"}},
+		{Number: 5, State: "closed", Merged: true, User: gitea.PullRequestUser{Login: "mate-p-fen"}, Base: main},
+	}}
+	plan := mirror.Compute(mirror.State{Registry: reg, Problems: problems, Gitea: g}, opts())
+
+	var merged []int64
+	for _, a := range plan.Actions {
+		if a.Kind == mirror.MergeRecipePullRequest {
+			merged = append(merged, a.PullRequest)
+		}
+	}
+	if len(merged) != 1 || merged[0] != 1 {
+		t.Fatalf("merged = %v, want #1 alone:\n%s", merged, mirror.Describe(plan))
+	}
+	if plan.Destructive() != 0 {
+		t.Errorf("a merge counted as destructive")
 	}
 }

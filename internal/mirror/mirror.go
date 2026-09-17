@@ -263,6 +263,8 @@ func (m *Mirror) gatherGitea(ctx context.Context, reg registry.Registry) (GiteaS
 		Hooks:        map[string][]gitea.Hook{},
 		BotTokens:    map[string][]gitea.AccessToken{},
 		PersonTokens: map[string][]gitea.AccessToken{},
+
+		GroupPullRequests: map[string][]gitea.PullRequest{},
 	}
 
 	users, err := m.Gitea.ListUsers(ctx)
@@ -352,6 +354,11 @@ func (m *Mirror) gatherGitea(ctx context.Context, reg registry.Registry) (GiteaS
 				repo.TagRules[r.NamePattern] = r
 			}
 			out.Repos[g.Slug][registry.GroupRepo] = repo
+			open, err := m.Gitea.ListPullRequests(ctx, g.Slug, registry.GroupRepo, "open")
+			if err != nil {
+				return out, fmt.Errorf("pull requests of %s/%s: %w", g.Slug, registry.GroupRepo, err)
+			}
+			out.GroupPullRequests[g.Slug] = open
 		} else if !gitea.IsNotFound(err) {
 			return out, fmt.Errorf("repo %s/%s: %w", g.Slug, registry.GroupRepo, err)
 		}
@@ -397,6 +404,8 @@ func (m *Mirror) perform(ctx context.Context, a Action) error {
 			Name: a.Repo, Description: "The group's recipe, environments and release tags",
 		})
 		return err
+	case MergeRecipePullRequest:
+		return m.Gitea.MergePullRequest(ctx, a.Org, a.Repo, a.PullRequest, "")
 	case SetBranchRule:
 		_, err := m.Gitea.CreateBranchProtection(ctx, a.Org, a.Repo, *a.BranchRule)
 		if err != nil && gitea.Status(err) == 422 {

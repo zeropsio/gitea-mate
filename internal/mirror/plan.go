@@ -136,6 +136,8 @@ type GiteaState struct {
 	// PersonTokens is person login -> its tokens, read for every account the
 	// broker made a person's app token for (AppTokenPrefix).
 	PersonTokens map[string][]gitea.AccessToken
+	// GroupPullRequests is org -> the pull requests open on its group repo.
+	GroupPullRequests map[string][]gitea.PullRequest
 }
 
 // TeamState is one team and who is in it.
@@ -177,7 +179,10 @@ const (
 	// app re-mints silently on the 401 that follows, so this takes nothing
 	// from anybody and the cap does not count it.
 	DeletePersonToken Kind = "delete_person_token"
-	DeliverMateAccess Kind = "deliver_mate_access"
+	// MergeRecipePullRequest lands a recipe a Mate proposed on its group repo
+	// (D23): a merge, nothing taken away.
+	MergeRecipePullRequest Kind = "merge_recipe_pull_request"
+	DeliverMateAccess      Kind = "deliver_mate_access"
 )
 
 // Action is one Gitea write. Only the fields its Kind needs are set.
@@ -201,6 +206,9 @@ type Action struct {
 	Project string
 	Service string
 	Mint    bool
+
+	// PullRequest is the number a MergeRecipePullRequest merges.
+	PullRequest int64
 }
 
 // Destructive reports whether this action takes something away. The cap counts
@@ -228,6 +236,9 @@ func (a Action) String() string {
 	}
 	if a.BranchRule != nil {
 		fmt.Fprintf(&b, " rule=%s", a.BranchRule.RuleName)
+	}
+	if a.PullRequest != 0 {
+		fmt.Fprintf(&b, " pr=#%d", a.PullRequest)
 	}
 	if a.TagRule != nil {
 		fmt.Fprintf(&b, " tags=%s", a.TagRule.NamePattern)
@@ -321,6 +332,7 @@ func (p *planner) plan() {
 	// yet is a 404), then departures, then each Mate's access, then token
 	// generations — which skip any bot the pass mints for.
 	p.planStructure()
+	p.planRecipePullRequests()
 	p.planBots()
 	p.planPeople()
 	p.planDepartures()
@@ -375,17 +387,17 @@ func (p *planner) planStructure() {
 	}
 }
 
-// groupRepoRules is what protects a group repository: main takes merges from
-// the release team and no direct push from anyone; env/* is the broker's alone,
-// named by rule so it holds before the branch exists.
+// groupRepoRules is what protects a group repository: main takes no direct
+// push from anyone and merges from anyone with write — the write and release
+// teams, and the broker landing a Mate's proposal (D23; until 2026-09-17 the
+// release team alone, which left every Mate's recipe waiting for a releaser);
+// env/* is the broker's alone, named by rule so it holds before the branch
+// exists. What sets the releasers apart is the v* tag protection.
 func (p *planner) groupRepoRules() []gitea.BranchProtection {
 	return []gitea.BranchProtection{
 		{
-			RuleName:                "main",
-			EnablePush:              false,
-			EnableMergeWhitelist:    true,
-			MergeWhitelistTeams:     []string{TeamRelease},
-			BlockAdminMergeOverride: true,
+			RuleName:   groupMainBranch,
+			EnablePush: false,
 		},
 		{
 			RuleName:            "env/*",
@@ -393,6 +405,35 @@ func (p *planner) groupRepoRules() []gitea.BranchProtection {
 			EnablePushWhitelist: true,
 			PushWhitelistUsers:  []string{p.opts.AdminLogin},
 		},
+	}
+}
+
+// groupMainBranch is the group repo's protected branch, where the recipe and
+// the declarations live.
+const groupMainBranch = "main"
+
+// planRecipePullRequests lands every recipe a Mate proposed (D23): a pull
+// request open on the group repo against main, opened by the bot of a Mate
+// registered in that group, is merged as it is. The group repo takes merges
+// from anyone with write, and a Mate's proposal is the group's own import,
+// not something a person has to review — the owner, 2026-09-17, on a first
+// recipe that waited for a releaser: "they all should be able to merge on the
+// import yaml repo". A person's pull request is theirs to merge; a bot of
+// another group is nobody here.
+func (p *planner) planRecipePullRequests() {
+	for _, g := range p.state.Registry.Groups {
+		bots := map[string]bool{}
+		for _, prj := range g.Projects {
+			if prj.Kind == roles.KindMate {
+				bots[BotLogin(prj.ID)] = true
+			}
+		}
+		for _, pr := range p.state.Gitea.GroupPullRequests[g.Slug] {
+			if pr.State != "open" || pr.Merged || pr.Base.Ref != groupMainBranch || !bots[pr.User.Login] {
+				continue
+			}
+			p.do(Action{Kind: MergeRecipePullRequest, Org: g.Slug, Repo: registry.GroupRepo, Login: pr.User.Login, PullRequest: pr.Number})
+		}
 	}
 }
 

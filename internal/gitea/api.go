@@ -441,6 +441,59 @@ func (c *Client) IsCollaborator(ctx context.Context, owner, repo, login string) 
 }
 
 // ---------------------------------------------------------------------------
+// Pull requests
+// ---------------------------------------------------------------------------
+
+// PullRequest is what the broker needs of one: who opened it, where it lands,
+// whether it is still open.
+type PullRequest struct {
+	Number int64             `json:"number"`
+	State  string            `json:"state"`
+	Merged bool              `json:"merged"`
+	Title  string            `json:"title"`
+	User   PullRequestUser   `json:"user"`
+	Base   PullRequestBranch `json:"base"`
+	Head   PullRequestBranch `json:"head"`
+}
+
+// PullRequestUser is the account that opened a pull request.
+type PullRequestUser struct {
+	Login string `json:"login"`
+}
+
+// PullRequestBranch is one side of a pull request.
+type PullRequestBranch struct {
+	Ref string `json:"ref"`
+	Sha string `json:"sha"`
+}
+
+// ListPullRequests is GET /repos/{o}/{r}/pulls?state={state}, every page.
+func (c *Client) ListPullRequests(ctx context.Context, owner, repo, state string) ([]PullRequest, error) {
+	var all []PullRequest
+	err := paged(func(page int) (int, error) {
+		var out []PullRequest
+		path := withPage("/repos/"+esc(owner)+"/"+esc(repo)+"/pulls?state="+esc(state), page)
+		if err := c.do(ctx, http.MethodGet, path, nil, &out, authToken); err != nil {
+			return 0, err
+		}
+		all = append(all, out...)
+		return len(out), nil
+	})
+	return all, err
+}
+
+// MergePullRequest is POST /repos/{o}/{r}/pulls/{n}/merge with a merge commit.
+// Gitea answers 405 when the request cannot be merged as it is.
+func (c *Client) MergePullRequest(ctx context.Context, owner, repo string, number int64, message string) error {
+	in := struct {
+		Do      string `json:"Do"`
+		Message string `json:"merge_message_field,omitempty"`
+	}{Do: "merge", Message: message}
+	path := "/repos/" + esc(owner) + "/" + esc(repo) + "/pulls/" + strconv.FormatInt(number, 10) + "/merge"
+	return c.do(ctx, http.MethodPost, path, in, nil, authToken)
+}
+
+// ---------------------------------------------------------------------------
 // Branch and tag protection
 // ---------------------------------------------------------------------------
 

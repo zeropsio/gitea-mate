@@ -269,7 +269,9 @@ func MayRelease(state mirror.State, group registry.Group, pusher string) (bool, 
 }
 
 // PullRequest is a pull request opened, closed or merged. A merge into the
-// group repo's `main` is a recipe or a declaration change.
+// group repo's `main` is a recipe or a declaration change; a Mate's bot
+// opening one there is a recipe proposal the rights loop merges (D23), so the
+// loop is nudged rather than left to its next tick.
 func (p *Pipeline) PullRequest(ctx context.Context, org string, payload []byte) error {
 	var body struct {
 		Action      string `json:"action"`
@@ -278,6 +280,9 @@ func (p *Pipeline) PullRequest(ctx context.Context, org string, payload []byte) 
 			Base   struct {
 				Ref string `json:"ref"`
 			} `json:"base"`
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
 		} `json:"pull_request"`
 		Repository struct {
 			FullName string `json:"full_name"`
@@ -286,7 +291,7 @@ func (p *Pipeline) PullRequest(ctx context.Context, org string, payload []byte) 
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return fmt.Errorf("pull_request: %w", err)
 	}
-	if !body.PullRequest.Merged || body.PullRequest.Base.Ref != environments.MainBranch {
+	if body.PullRequest.Base.Ref != environments.MainBranch {
 		return nil
 	}
 	_, repo, err := fullName(body.Repository.FullName)
@@ -294,6 +299,12 @@ func (p *Pipeline) PullRequest(ctx context.Context, org string, payload []byte) 
 		return err
 	}
 	if repo != registry.GroupRepo {
+		return nil
+	}
+	if !body.PullRequest.Merged {
+		if p.Nudge != nil && strings.HasPrefix(body.PullRequest.User.Login, "mate-") {
+			p.Nudge()
+		}
 		return nil
 	}
 

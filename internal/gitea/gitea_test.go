@@ -390,3 +390,30 @@ func TestCreateUserBoundToASourceNeedsNoPassword(t *testing.T) {
 		t.Errorf("a local account carries a source: %+v", local)
 	}
 }
+
+func TestPullRequestsAreListedByStateAndMergedByNumber(t *testing.T) {
+	f := giteatest.New(t)
+	c := f.Client()
+	ctx := context.Background()
+	if _, err := c.CreateOrg(ctx, "acme", "Acme"); err != nil {
+		t.Fatalf("org: %v", err)
+	}
+	if _, err := c.CreateOrgRepo(ctx, "acme", gitea.NewRepo{Name: "group"}); err != nil {
+		t.Fatalf("repo: %v", err)
+	}
+	f.AddPullRequest("acme/group", gitea.PullRequest{Number: 7, User: gitea.PullRequestUser{Login: "mate-x"}, Base: gitea.PullRequestBranch{Ref: "main"}})
+
+	open, err := c.ListPullRequests(ctx, "acme", "group", "open")
+	if err != nil || len(open) != 1 || open[0].Number != 7 || open[0].User.Login != "mate-x" {
+		t.Fatalf("open = %+v, %v", open, err)
+	}
+	if err := c.MergePullRequest(ctx, "acme", "group", 7, ""); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if open, _ = c.ListPullRequests(ctx, "acme", "group", "open"); len(open) != 0 {
+		t.Errorf("still open after the merge: %+v", open)
+	}
+	if err := c.MergePullRequest(ctx, "acme", "group", 7, ""); gitea.Status(err) != 405 {
+		t.Errorf("merging a merged request = %v, want 405", err)
+	}
+}

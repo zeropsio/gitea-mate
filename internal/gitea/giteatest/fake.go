@@ -52,8 +52,9 @@ type Fake struct {
 	teams   map[string][]*gitea.Team // org -> teams
 	members map[int64]map[string]bool
 
-	repos         map[string]*gitea.Repo       // "org/name"
-	collaborators map[string]map[string]string // "org/name" -> login -> permission
+	repos         map[string]*gitea.Repo          // "org/name"
+	pulls         map[string][]*gitea.PullRequest // "org/name" -> its pull requests
+	collaborators map[string]map[string]string    // "org/name" -> login -> permission
 	branchRules   map[string][]gitea.BranchProtection
 	tagRules      map[string][]gitea.TagProtection
 	hooks         map[string][]gitea.Hook // org -> hooks
@@ -84,6 +85,7 @@ func New(t *testing.T) *Fake {
 		teams:         map[string][]*gitea.Team{},
 		members:       map[int64]map[string]bool{},
 		repos:         map[string]*gitea.Repo{},
+		pulls:         map[string][]*gitea.PullRequest{},
 		collaborators: map[string]map[string]string{},
 		branchRules:   map[string][]gitea.BranchProtection{},
 		tagRules:      map[string][]gitea.TagProtection{},
@@ -724,6 +726,8 @@ func (f *Fake) repoRoutes(w http.ResponseWriter, r *http.Request, path string) {
 		writeJSON(w, 200, f.repos[full])
 	case strings.HasPrefix(rest, "/collaborators/"):
 		f.collaborator(w, r, full, strings.TrimPrefix(rest, "/collaborators/"))
+	case strings.HasPrefix(rest, "/pulls"):
+		f.pullRequests(w, r, full, strings.TrimPrefix(rest, "/pulls"))
 	case strings.HasPrefix(rest, "/branch_protections"):
 		f.branchProtection(w, r, full, strings.TrimPrefix(rest, "/branch_protections"))
 	case strings.HasPrefix(rest, "/tag_protections"):
@@ -751,6 +755,62 @@ func (f *Fake) repoRoutes(w http.ResponseWriter, r *http.Request, path string) {
 		writeJSON(w, 200, job)
 	default:
 		fail(w, http.StatusNotFound, "the fake does not serve "+path)
+	}
+}
+
+// AddPullRequest opens a pull request on a repository the fake knows. An
+// empty State is "open".
+func (f *Fake) AddPullRequest(full string, pr gitea.PullRequest) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if pr.State == "" {
+		pr.State = "open"
+	}
+	f.pulls[full] = append(f.pulls[full], &pr)
+}
+
+// PullRequest returns one by number.
+func (f *Fake) PullRequest(full string, number int64) (gitea.PullRequest, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, p := range f.pulls[full] {
+		if p.Number == number {
+			return *p, true
+		}
+	}
+	return gitea.PullRequest{}, false
+}
+
+func (f *Fake) pullRequests(w http.ResponseWriter, r *http.Request, full, rest string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch {
+	case r.Method == http.MethodGet && rest == "":
+		state := r.URL.Query().Get("state")
+		out := []gitea.PullRequest{}
+		for _, p := range f.pulls[full] {
+			if state == "" || state == "all" || p.State == state {
+				out = append(out, *p)
+			}
+		}
+		writeJSON(w, 200, out)
+	case r.Method == http.MethodPost && strings.HasSuffix(rest, "/merge"):
+		number := strings.TrimSuffix(strings.TrimPrefix(rest, "/"), "/merge")
+		for _, p := range f.pulls[full] {
+			if strconv.FormatInt(p.Number, 10) != number {
+				continue
+			}
+			if p.State != "open" {
+				fail(w, http.StatusMethodNotAllowed, "pull request is not open")
+				return
+			}
+			p.State, p.Merged = "closed", true
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		fail(w, http.StatusNotFound, "no such pull request")
+	default:
+		fail(w, http.StatusNotFound, "the fake does not serve pulls"+rest)
 	}
 }
 

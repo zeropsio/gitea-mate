@@ -41,6 +41,11 @@ type Pipeline struct {
 	Queue    *deploy.Queue
 	Records  *deploy.Records
 
+	// Nudge asks the rights loop for a pass soon. A Mate's recipe pull request
+	// is merged by that pass (D23), and a nudge makes it now rather than at the
+	// next tick. Optional.
+	Nudge func()
+
 	// RunnerImport is the text of import/runner.yaml, with its two
 	// placeholders still in it.
 	RunnerImport string

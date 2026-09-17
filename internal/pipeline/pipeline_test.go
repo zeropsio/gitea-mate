@@ -362,3 +362,44 @@ func TestARefusedTagStaysRefusedAcrossBothPaths(t *testing.T) {
 		t.Fatal("a refused tag deployed")
 	}
 }
+
+// D23: a Mate's bot opening a pull request on the group repo asks the rights
+// loop for a pass now; a person's, or one on a service repository, does not.
+func TestAMatesRecipePullRequestNudgesTheLoop(t *testing.T) {
+	t.Parallel()
+	opened := func(repo, login string) []byte {
+		raw, _ := json.Marshal(map[string]any{
+			"action": "opened",
+			"pull_request": map[string]any{
+				"merged": false,
+				"base":   map[string]any{"ref": "main"},
+				"user":   map[string]any{"login": login},
+			},
+			"repository": map[string]any{"full_name": repo},
+		})
+		return raw
+	}
+	for _, tc := range []struct {
+		name  string
+		repo  string
+		login string
+		want  int
+	}{
+		{"a Mate's bot on the group repo", "acme/group", "mate-" + matePrj, 1},
+		{"a person on the group repo", "acme/group", roles.Login(ownerUser), 0},
+		{"a Mate's bot on a service repository", "acme/api", "mate-" + matePrj, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			nudges := 0
+			w.pipe.Nudge = func() { nudges++ }
+			if err := w.pipe.PullRequest(context.Background(), "acme", opened(tc.repo, tc.login)); err != nil {
+				t.Fatalf("PullRequest: %v", err)
+			}
+			if nudges != tc.want {
+				t.Errorf("nudges = %d, want %d", nudges, tc.want)
+			}
+		})
+	}
+}

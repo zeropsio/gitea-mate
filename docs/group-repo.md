@@ -2,8 +2,10 @@
 
 One repository per group, made by the broker's rights loop when the group is registered. It holds
 the recipe (every tier's import), which Zerops project each environment is and what feeds it, and
-the release tags. `main` is protected: merges by the `release` team only (guide D13, 5.1); `env/*`
-is written by the broker alone; tags `v*` are created by the `release` team alone.
+the release tags. `main` is protected: no direct push for anyone, merges by anyone with write —
+the `write` and `release` teams — and a Mate's recipe pull request is merged by the broker on
+arrival (D23; until 2026-09-17 the `release` team alone merged, and every Mate's recipe waited for a
+releaser); `env/*` is written by the broker alone; tags `v*` are created by the `release` team alone.
 
 ## Layout
 

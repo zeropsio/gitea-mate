@@ -597,3 +597,39 @@ func TestAFailedWriteIsRetriedByMintingAgain(t *testing.T) {
 		t.Errorf("GITEA_TOKEN holds %q, want generation 2", got)
 	}
 }
+
+// D23 through the fake: a recipe pull request a Mate's bot opened on the group
+// repo is merged by the next pass; the second pass finds nothing to do.
+func TestAMatesRecipePullRequestIsMergedByThePass(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	if _, err := r.mirror.Pass(ctx); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	r.gitea.AddPullRequest("acme/group", gitea.PullRequest{
+		Number: 1, Title: "Mate: the group's import files",
+		User: gitea.PullRequestUser{Login: "mate-p-fen"}, Base: gitea.PullRequestBranch{Ref: "main"},
+	})
+	r.gitea.AddPullRequest("acme/group", gitea.PullRequest{
+		Number: 2, Title: "a person's change",
+		User: gitea.PullRequestUser{Login: "u-jan"}, Base: gitea.PullRequestBranch{Ref: "main"},
+	})
+
+	second, err := r.mirror.Pass(ctx)
+	if err != nil || len(second.Failures) != 0 {
+		t.Fatalf("second pass: %v %v", err, second.Failures)
+	}
+	if pr, _ := r.gitea.PullRequest("acme/group", 1); !pr.Merged {
+		t.Errorf("the Mate's recipe pull request was not merged: %+v", pr)
+	}
+	if pr, _ := r.gitea.PullRequest("acme/group", 2); pr.Merged {
+		t.Errorf("a person's pull request was merged: %+v", pr)
+	}
+	third, err := r.mirror.Pass(ctx)
+	if err != nil {
+		t.Fatalf("third pass: %v", err)
+	}
+	if third.Planned != 0 {
+		t.Errorf("the third pass plans:\n%s", mirror.Describe(third.Plan))
+	}
+}

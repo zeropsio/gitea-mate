@@ -144,6 +144,9 @@ func run(log *slog.Logger) error {
 		Log:            log,
 		ClientID:       cfg.ZeropsClientID,
 		GiteaProjectID: cfg.ZeropsProjectID,
+		// A Mate's recipe pull request is merged by the rights loop's next pass;
+		// the hook that announces it asks for that pass now (D23).
+		Nudge: loop.Nudge,
 		Resolver: &deploy.Resolver{
 			Gitea: giteaClient,
 			Log:   log,
