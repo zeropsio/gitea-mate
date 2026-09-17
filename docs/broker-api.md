@@ -101,6 +101,12 @@ pushes to a branch of its own (`mate/{bot name}`) and lands on `main` through pu
 
 Caller: a job on the group's runner, `Authorization: token <github.token>`.
 
+The `environment` a job asks for is a declared name, or a tier's name — `stage`, `production` — for
+the group's only environment of that tier: the workflow zcp writes into a service repository names
+the tier, while the app names an environment after its group (`todo-stage`), and every job's deploy
+answered `404 unknown_environment` until this resolved it (measured 2026-09-17). A tier with several
+environments needs one named; the refusal lists them.
+
 ```json
 { "environment": "stage", "service": "api", "repository": "acme/api" }
 ```

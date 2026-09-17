@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/zeropsio/gitea-mate/internal/deploy"
@@ -124,10 +125,29 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	env, declared := plan.File.Environment(body.Environment)
 	if !declared {
-		WriteError(w, http.StatusNotFound, "unknown_environment",
-			body.Environment+" is not an environment of "+caller.Owner)
-		return
+		// The workflow zcp writes asks for a tier's name — `stage` — and the
+		// app names an environment after its group (`todo-stage`): every
+		// job's deploy answered 404 on the owner's run of 2026-09-17 and the
+		// catch-up pass did the work. A tier's name is its only environment;
+		// several of a tier need naming.
+		switch ofTier := plan.File.OfTier(environments.Tier(body.Environment)); len(ofTier) {
+		case 0:
+			WriteError(w, http.StatusNotFound, "unknown_environment",
+				body.Environment+" is not an environment of "+caller.Owner)
+			return
+		case 1:
+			env, declared = ofTier[0], true
+		default:
+			names := make([]string, 0, len(ofTier))
+			for _, e := range ofTier {
+				names = append(names, e.Name)
+			}
+			WriteError(w, http.StatusNotFound, "unknown_environment",
+				body.Environment+" names "+strconv.Itoa(len(ofTier))+" environments of "+caller.Owner+" ("+strings.Join(names, ", ")+"); ask for one by name")
+			return
+		}
 	}
+
 	recipe, hasTier := plan.Recipes[env.Tier]
 	if !hasTier {
 		WriteError(w, http.StatusBadGateway, "upstream", "the group's "+string(env.Tier)+" tier could not be read")

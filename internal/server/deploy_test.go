@@ -63,6 +63,12 @@ type deployRig struct {
 // job in acme/api.
 func newDeployRig(t *testing.T) *deployRig {
 	t.Helper()
+	return newDeployRigWith(t, deployEnvironments)
+}
+
+// newDeployRigWith is the rig over one environments document.
+func newDeployRigWith(t *testing.T, environmentsYAML string) *deployRig {
+	t.Helper()
 	g := giteatest.New(t)
 	g.AddRepo("acme/api", "main")
 	g.AddRepo("acme/other", "main")
@@ -76,7 +82,7 @@ func newDeployRig(t *testing.T) *deployRig {
 	g.AddUser(gitea.User{ID: 5, Login: "u-jan", Active: true})
 	g.AddToken("u-jan", "personal", "a-persons-token", "all")
 
-	file, err := environments.Parse([]byte(deployEnvironments))
+	file, err := environments.Parse([]byte(environmentsYAML))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -318,4 +324,44 @@ func TestAQueuedJobImportsTheGroupsFirstRunner(t *testing.T) {
 	if !r.zerops.Started("svc-runner") {
 		t.Fatal("the existing runner was not started")
 	}
+}
+
+// A workflow asks for a tier's name (zcp writes `environment: stage`) while
+// the app names the environment after the group (`todo-stage`): on the owner's
+// run of 2026-09-17 every job's deploy answered 404 and only the catch-up pass
+// deployed. A tier's name is its only environment; two of a tier need naming.
+func TestDeployTakesATiersNameForItsOnlyEnvironment(t *testing.T) {
+	const oneStage = `
+version: 1
+environments:
+  acme-stage:
+    tier: stage
+    project: p-stage
+    sources: [main]
+`
+	const twoStages = oneStage + `  acme-stage-2:
+    tier: stage
+    project: p-stage-2
+    sources: [main]
+`
+	t.Run("the tier's only environment", func(t *testing.T) {
+		r := newDeployRigWith(t, oneStage)
+		rr := r.post("the-job-token", `{"environment":"stage","service":"api","repository":"acme/api"}`)
+		if rr.Code != http.StatusAccepted {
+			t.Fatalf("POST /deploy = %d %s", rr.Code, rr.Body.String())
+		}
+		if len(r.deploys.asked) != 1 || r.deploys.asked[0] != "acme-stage/api" {
+			t.Fatalf("asked = %v, want acme-stage/api", r.deploys.asked)
+		}
+	})
+	t.Run("two environments of the tier", func(t *testing.T) {
+		r := newDeployRigWith(t, twoStages)
+		rr := r.post("the-job-token", `{"environment":"stage","service":"api","repository":"acme/api"}`)
+		if rr.Code != http.StatusNotFound || errorOf(t, rr) != "unknown_environment" {
+			t.Fatalf("POST /deploy = %d %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "acme-stage-2") || len(r.deploys.asked) != 0 {
+			t.Fatalf("the refusal names both and queues nothing: %s %v", rr.Body.String(), r.deploys.asked)
+		}
+	})
 }
