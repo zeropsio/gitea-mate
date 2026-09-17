@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,9 @@ import (
 const (
 	org        = "org-1"
 	giteaPrjID = "p-gitea"
+	// zcpService is Fen's container: the service the pass writes the Mate's
+	// Gitea access onto.
+	zcpService = "s-fen-zcp"
 )
 
 type rig struct {
@@ -53,6 +57,14 @@ func newRig(t *testing.T) *rig {
 		zerops.Project{ID: "p-fen", Name: "Fen", UserRoles: []zerops.UserRole{{ClientUserID: "cu-jan", RoleCode: "OWNER"}}},
 		zerops.Project{ID: "p-prod", Name: "Acme production"},
 	)
+	// Fen's project: its zcp container, and the platform's own core stack,
+	// which is never the one written to.
+	z.SetServices("p-fen",
+		zerops.Service{ID: "s-fen-core", ProjectID: "p-fen", Name: "core", Status: "ACTIVE", IsSystem: true,
+			TypeInfo: zerops.ServiceTypeInfo{VersionName: "core@1"}},
+		zerops.Service{ID: zcpService, ProjectID: "p-fen", Name: "zcp", Status: "ACTIVE",
+			TypeInfo: zerops.ServiceTypeInfo{VersionName: "zcp@1"}},
+	)
 
 	g := giteatest.New(t)
 
@@ -60,17 +72,45 @@ func newRig(t *testing.T) *rig {
 		zerops: z,
 		gitea:  g,
 		mirror: &mirror.Mirror{
-			Zerops:         z.Client("broker"),
-			Gitea:          g.Client(),
-			Log:            slog.New(slog.DiscardHandler),
-			ClientID:       org,
-			GiteaProjectID: giteaPrjID,
-			AdminLogin:     giteatest.AdminUser,
-			HookURL:        hookURL,
-			Cap:            10,
-			Now:            func() time.Time { return now },
+			Zerops:          z.Client("broker"),
+			Gitea:           g.Client(),
+			Log:             slog.New(slog.DiscardHandler),
+			ClientID:        org,
+			GiteaProjectID:  giteaPrjID,
+			AdminLogin:      giteatest.AdminUser,
+			HookURL:         hookURL,
+			GiteaPublicURL:  giteaPublicURL,
+			BrokerPublicURL: brokerPublicURL,
+			Cap:             10,
+			Now:             func() time.Time { return now },
 		},
 	}
+}
+
+// vars reads Fen's container back as key -> entry.
+func (r *rig) vars() map[string]zerops.ServiceUserData {
+	out := map[string]zerops.ServiceUserData{}
+	for _, e := range r.zerops.UserData(zcpService) {
+		out[e.Key] = e
+	}
+	return out
+}
+
+// touchedContainer reports which requests wrote a service variable or moved a
+// container — the writes a delivery may and may not make.
+func (r *rig) touchedContainer() (creates, updates, restarts int) {
+	for _, req := range r.zerops.Requests {
+		switch {
+		case strings.HasPrefix(req, "POST /service-stack/") && strings.HasSuffix(req, "/user-data"):
+			creates++
+		case strings.HasPrefix(req, "PUT /user-data/"):
+			updates++
+		case strings.HasSuffix(req, "/restart"), strings.HasSuffix(req, "/stop"), strings.HasSuffix(req, "/start"),
+			strings.HasSuffix(req, "/reload"):
+			restarts++
+		}
+	}
+	return creates, updates, restarts
 }
 
 func TestPassBuildsAndThenChangesNothing(t *testing.T) {
@@ -335,4 +375,225 @@ func contains(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// A Mate's Gitea access
+// ---------------------------------------------------------------------------
+
+// The first pass on a fresh Mate mints its bot's first generation and writes
+// the three variables onto its container; the second pass touches nothing.
+// The container is never restarted: zcp reads the live env store.
+func TestPassDeliversAMatesAccessOnceAndNeverRestarts(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+
+	first, err := r.mirror.Pass(ctx)
+	if err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	if len(first.Failures) != 0 || len(first.Problems) != 0 {
+		t.Fatalf("failures %v, problems %v", first.Failures, first.Problems)
+	}
+
+	names := r.gitea.Tokens("mate-p-fen")
+	if len(names) != 1 || names[0] != mirror.TokenName("mate-p-fen", 1) {
+		t.Fatalf("tokens = %v, want generation 1 alone", names)
+	}
+	vars := r.vars()
+	if got := vars[mirror.VarGiteaURL]; got.Content != giteaPublicURL || got.Sensitive {
+		t.Errorf("GITEA_URL = %+v", got)
+	}
+	if got := vars[mirror.VarBrokerURL]; got.Content != brokerPublicURL || got.Sensitive {
+		t.Errorf("MATE_BROKER_URL = %+v", got)
+	}
+	token := vars[mirror.VarGiteaToken]
+	if !token.Sensitive || token.Content == "" || !strings.HasSuffix(token.Content, "mate/mate-p-fen/1") {
+		t.Errorf("GITEA_TOKEN = %+v, want the minted generation, sensitive", token)
+	}
+	if r.zerops.UserData("s-fen-core") != nil {
+		t.Error("the platform's core stack was written to")
+	}
+	creates, updates, restarts := r.touchedContainer()
+	if creates != 3 || updates != 0 || restarts != 0 {
+		t.Errorf("creates %d updates %d restarts %d; want three creates and nothing else", creates, updates, restarts)
+	}
+
+	r.zerops.Requests = nil
+	r.gitea.ResetCalls()
+	second, err := r.mirror.Pass(ctx)
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if second.Planned != 0 {
+		t.Errorf("the second pass plans:\n%s", mirror.Describe(second.Plan))
+	}
+	if r.zerops.Wrote() {
+		t.Errorf("the second pass wrote to Zerops: %v", r.zerops.Requests)
+	}
+	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 1 {
+		t.Errorf("the second pass minted: %v", got)
+	}
+}
+
+// A container holding another Gitea's access — the account was re-imported,
+// or the Mate moved — gets a new generation and all three variables: the ones
+// that exist are updated in place, the missing one created, and nothing is
+// ever revoked on that pass.
+func TestAnotherGiteasAccessIsReplacedInPlace(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.gitea.AddUser(gitea.User{Login: "mate-p-fen", Active: true, Restricted: true})
+	r.gitea.AddToken("mate-p-fen", mirror.TokenName("mate-p-fen", 1), "old-value-1", mirror.BotScopes...)
+	r.zerops.SetUserData(zcpService,
+		zerops.ServiceUserData{ID: "ud-url", Key: mirror.VarGiteaURL, Content: "https://elsewhere.example"},
+		zerops.ServiceUserData{ID: "ud-tok", Key: mirror.VarGiteaToken, Content: "old-value-1", Sensitive: true},
+	)
+
+	result, err := r.mirror.Pass(ctx)
+	if err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if len(result.Failures) != 0 {
+		t.Fatalf("failures %v", result.Failures)
+	}
+
+	names := r.gitea.Tokens("mate-p-fen")
+	if len(names) != 2 || !contains(names, mirror.TokenName("mate-p-fen", 2)) || !contains(names, mirror.TokenName("mate-p-fen", 1)) {
+		t.Fatalf("tokens = %v, want generations 1 and 2", names)
+	}
+	vars := r.vars()
+	if got := vars[mirror.VarGiteaURL]; got.ID != "ud-url" || got.Content != giteaPublicURL {
+		t.Errorf("GITEA_URL = %+v, want the same variable updated", got)
+	}
+	if got := vars[mirror.VarGiteaToken]; got.ID != "ud-tok" || !got.Sensitive || !strings.HasSuffix(got.Content, "mate/mate-p-fen/2") {
+		t.Errorf("GITEA_TOKEN = %+v, want the same variable holding generation 2", got)
+	}
+	if got := vars[mirror.VarBrokerURL]; got.ID == "" || got.Content != brokerPublicURL {
+		t.Errorf("MATE_BROKER_URL = %+v, want it created", got)
+	}
+	creates, updates, restarts := r.touchedContainer()
+	if creates != 1 || updates != 2 || restarts != 0 {
+		t.Errorf("creates %d updates %d restarts %d", creates, updates, restarts)
+	}
+}
+
+// A container whose token is fine and whose broker URL is stale is written
+// without a new generation.
+func TestAStaleBrokerURLIsWrittenWithoutAMint(t *testing.T) {
+	r := newRig(t)
+	r.gitea.AddUser(gitea.User{Login: "mate-p-fen", Active: true, Restricted: true})
+	r.gitea.AddToken("mate-p-fen", mirror.TokenName("mate-p-fen", 1), "value-1", mirror.BotScopes...)
+	r.zerops.SetUserData(zcpService,
+		zerops.ServiceUserData{Key: mirror.VarGiteaURL, Content: giteaPublicURL},
+		zerops.ServiceUserData{Key: mirror.VarBrokerURL, Content: "https://old-broker.example"},
+		zerops.ServiceUserData{Key: mirror.VarGiteaToken, Content: "value-1", Sensitive: true},
+	)
+
+	if _, err := r.mirror.Pass(context.Background()); err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 1 {
+		t.Errorf("a generation was minted for a URL fix: %v", got)
+	}
+	if got := r.vars()[mirror.VarBrokerURL].Content; got != brokerPublicURL {
+		t.Errorf("MATE_BROKER_URL = %q", got)
+	}
+	if creates, updates, _ := r.touchedContainer(); creates != 0 || updates != 1 {
+		t.Errorf("creates %d updates %d, want the one update", creates, updates)
+	}
+}
+
+// A Mate the broker cannot serve yet is reported and skipped; the pass goes
+// on for everything else and tries again next time.
+func TestAnUnservableMateIsReportedNotFatal(t *testing.T) {
+	cases := []struct {
+		name string
+		bend func(r *rig)
+		want string
+	}{
+		{
+			name: "the app has not granted the broker the project: 403",
+			bend: func(r *rig) { r.zerops.Ungranted["p-fen"] = true },
+			want: "granted",
+		},
+		{
+			name: "the project has no zcp service yet",
+			bend: func(r *rig) { r.zerops.SetServices("p-fen") },
+			want: "zcp@",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			tc.bend(r)
+
+			result, err := r.mirror.Pass(context.Background())
+			if err != nil {
+				t.Fatalf("pass: %v", err)
+			}
+			// The rest of the pass happened: the org, its bot.
+			if !r.gitea.Wrote() {
+				t.Error("the pass wrote nothing to Gitea")
+			}
+			if _, ok := r.gitea.User("mate-p-fen"); !ok {
+				t.Error("the bot was not made")
+			}
+			// Nothing was minted for a container that cannot be written, and
+			// nothing was written to Zerops.
+			if got := r.gitea.Tokens("mate-p-fen"); len(got) != 0 {
+				t.Errorf("a generation was minted with nowhere to put it: %v", got)
+			}
+			if r.zerops.Wrote() {
+				t.Errorf("the pass wrote to Zerops: %v", r.zerops.Requests)
+			}
+			var reported bool
+			for _, p := range result.Problems {
+				if strings.Contains(p, "p-fen") && strings.Contains(p, tc.want) {
+					reported = true
+				}
+			}
+			if !reported {
+				t.Errorf("problems = %v, want one naming p-fen and %q", result.Problems, tc.want)
+			}
+			if len(result.Failures) != 0 {
+				t.Errorf("failures = %v", result.Failures)
+			}
+		})
+	}
+}
+
+// A delivery whose write fails is a failure of that action, not of the pass;
+// the next pass mints again because the container does not hold the newest
+// generation.
+func TestAFailedWriteIsRetriedByMintingAgain(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.zerops.Fail["POST /service-stack/"+zcpService+"/user-data"] = http.StatusInternalServerError
+
+	first, err := r.mirror.Pass(ctx)
+	if err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	if len(first.Failures) != 1 || !strings.Contains(first.Failures[0], "deliver_mate_access") {
+		t.Fatalf("failures = %v, want the delivery alone", first.Failures)
+	}
+	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 1 {
+		t.Fatalf("tokens = %v", got)
+	}
+
+	delete(r.zerops.Fail, "POST /service-stack/"+zcpService+"/user-data")
+	second, err := r.mirror.Pass(ctx)
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if len(second.Failures) != 0 {
+		t.Fatalf("failures = %v", second.Failures)
+	}
+	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 2 {
+		t.Errorf("tokens = %v, want generation 2 beside the orphaned 1", got)
+	}
+	if got := r.vars()[mirror.VarGiteaToken].Content; !strings.HasSuffix(got, "mate/mate-p-fen/2") {
+		t.Errorf("GITEA_TOKEN holds %q, want generation 2", got)
+	}
 }

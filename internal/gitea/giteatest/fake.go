@@ -143,7 +143,7 @@ func (f *Fake) AddToken(login, name, value string, scopes ...string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.tokens = append(f.tokens, tokenRow{
-		AccessToken: gitea.AccessToken{ID: f.id(), Name: name, Scopes: scopes, Value: value},
+		AccessToken: gitea.AccessToken{ID: f.id(), Name: name, Scopes: scopes, Value: value, TokenLastEight: last8(value)},
 		Owner:       login,
 	})
 }

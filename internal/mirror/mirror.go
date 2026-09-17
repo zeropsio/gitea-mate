@@ -43,6 +43,10 @@ type Mirror struct {
 	AppOrigins []string
 	// HookURL is where Gitea posts this account's webhooks.
 	HookURL string
+	// GiteaPublicURL and BrokerPublicURL are what every Mate's container is
+	// given as GITEA_URL and MATE_BROKER_URL.
+	GiteaPublicURL  string
+	BrokerPublicURL string
 	// Cap is the most destructive actions one pass may apply.
 	Cap int
 	// TokenGrace overrides DefaultTokenGrace.
@@ -118,11 +122,18 @@ func (m *Mirror) Pass(ctx context.Context) (Result, error) {
 		return Result{}, err
 	}
 	plan := Compute(state, Options{
-		AdminLogin: m.AdminLogin,
-		HookURL:    m.HookURL,
-		Now:        m.now(),
-		TokenGrace: m.TokenGrace,
+		AdminLogin:      m.AdminLogin,
+		HookURL:         m.HookURL,
+		GiteaPublicURL:  m.GiteaPublicURL,
+		BrokerPublicURL: m.BrokerPublicURL,
+		Now:             m.now(),
+		TokenGrace:      m.TokenGrace,
 	})
+	// What the pass noticed and will not act on is said once per pass, so a
+	// Mate the broker cannot serve yet is in the log by name. Never a token.
+	for _, problem := range plan.Problems {
+		m.log().Warn("the rights loop cannot act on this", "problem", problem)
+	}
 
 	result := Result{
 		Planned:        len(plan.Actions),
@@ -161,6 +172,9 @@ func (m *Mirror) Gather(ctx context.Context) (State, error) {
 		return State{}, fmt.Errorf("%w: Gitea: %w", ErrUnreadable, err)
 	}
 	state.Gitea = giteaState
+	// A Mate's container that cannot be read is that Mate's problem, not the
+	// pass's: it is reported, skipped and read again next time.
+	state.MateServices, state.MateProblems = m.gatherMates(ctx, state.Registry)
 	return state, nil
 }
 
@@ -277,6 +291,24 @@ func (m *Mirror) gatherGitea(ctx context.Context, reg registry.Registry) (GiteaS
 	}
 
 	for _, g := range reg.Groups {
+		// A bot's tokens belong to the bot, not to its org: they are read
+		// whether or not the org exists yet, so a pass never mints a
+		// generation for a bot that already holds a live one.
+		for _, prj := range g.Projects {
+			if prj.Kind != roles.KindMate {
+				continue
+			}
+			login := BotLogin(prj.ID)
+			if _, exists := out.Users[login]; !exists {
+				continue
+			}
+			tokens, err := m.Gitea.ListTokens(ctx, login)
+			if err != nil {
+				return out, fmt.Errorf("tokens of %s: %w", login, err)
+			}
+			out.BotTokens[login] = tokens
+		}
+
 		if _, err := m.Gitea.GetOrg(ctx, g.Slug); err != nil {
 			if !gitea.IsNotFound(err) {
 				return out, fmt.Errorf("org %s: %w", g.Slug, err)
@@ -332,21 +364,6 @@ func (m *Mirror) gatherGitea(ctx context.Context, reg registry.Registry) (GiteaS
 			return out, fmt.Errorf("hooks of %s: %w", g.Slug, err)
 		}
 		out.Hooks[g.Slug] = hooks
-
-		for _, prj := range g.Projects {
-			if prj.Kind != roles.KindMate {
-				continue
-			}
-			login := BotLogin(prj.ID)
-			if _, exists := out.Users[login]; !exists {
-				continue
-			}
-			tokens, err := m.Gitea.ListTokens(ctx, login)
-			if err != nil {
-				return out, fmt.Errorf("tokens of %s: %w", login, err)
-			}
-			out.BotTokens[login] = tokens
-		}
 	}
 	return out, nil
 }
@@ -453,6 +470,8 @@ func (m *Mirror) perform(ctx context.Context, a Action) error {
 		return nil
 	case DeleteBotToken:
 		return m.Gitea.DeleteToken(ctx, a.Login, a.TokenName)
+	case DeliverMateAccess:
+		return m.deliverMateAccess(ctx, a)
 	default:
 		return fmt.Errorf("unknown action %q", a.Kind)
 	}

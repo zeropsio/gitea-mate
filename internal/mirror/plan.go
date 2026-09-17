@@ -85,6 +85,11 @@ type State struct {
 	Gitea GiteaState
 	// Mates names each Mate project, so a bot can carry its Mate's name.
 	Mates map[string]string
+	// MateServices is each Mate's zcp container, by project id, for the Mates
+	// whose project the pass could read; MateProblems says, for the others,
+	// why not. A Mate in neither is one the state was built without.
+	MateServices map[string]MateService
+	MateProblems map[string]string
 }
 
 // Member is one person in the org, as the planner needs them.
@@ -156,6 +161,7 @@ const (
 	DeactivatePerson   Kind = "deactivate_person"
 	DeletePersonTokens Kind = "delete_person_tokens"
 	DeleteBotToken     Kind = "delete_bot_token"
+	DeliverMateAccess  Kind = "deliver_mate_access"
 )
 
 // Action is one Gitea write. Only the fields its Kind needs are set.
@@ -173,6 +179,12 @@ type Action struct {
 	BranchRule *gitea.BranchProtection
 	TagRule    *gitea.TagProtection
 	HookURL    string
+
+	// Project and Service name the Mate and its container a delivery writes
+	// to; Mint says whether it mints a new token generation first.
+	Project string
+	Service string
+	Mint    bool
 }
 
 // Destructive reports whether this action takes something away. The cap counts
@@ -192,6 +204,7 @@ func (a Action) String() string {
 	for _, f := range []struct{ k, v string }{
 		{"org", a.Org}, {"repo", a.Repo}, {"team", a.Team},
 		{"login", a.Login}, {"token", a.TokenName},
+		{"project", a.Project}, {"service", a.Service},
 	} {
 		if f.v != "" {
 			fmt.Fprintf(&b, " %s=%s", f.k, f.v)
@@ -202,6 +215,9 @@ func (a Action) String() string {
 	}
 	if a.TagRule != nil {
 		fmt.Fprintf(&b, " tags=%s", a.TagRule.NamePattern)
+	}
+	if a.Mint {
+		b.WriteString(" mint=true")
 	}
 	return b.String()
 }
@@ -239,6 +255,10 @@ type Options struct {
 	AdminLogin string
 	// HookURL is where Gitea posts this account's webhooks.
 	HookURL string
+	// GiteaPublicURL and BrokerPublicURL are what a Mate's container must
+	// hold as GITEA_URL and MATE_BROKER_URL.
+	GiteaPublicURL  string
+	BrokerPublicURL string
 	// Now is the clock the token grace is measured against.
 	Now time.Time
 	// TokenGrace defaults to DefaultTokenGrace.
@@ -276,12 +296,14 @@ func (p *planner) plan() {
 
 	// The order is what Gitea will accept: structure, then the bots, then the
 	// people and the bots into their teams (a team member who does not exist
-	// yet is a 404), then departures, then token generations.
+	// yet is a 404), then departures, then each Mate's access, then token
+	// generations — which skip any bot the pass mints for.
 	p.planStructure()
 	p.planBots()
 	p.planPeople()
 	p.planDepartures()
-	p.planBotTokens()
+	minting := p.planMateAccess()
+	p.planBotTokens(minting)
 }
 
 // planStructure: an org, its three teams, its group repository and its
@@ -499,10 +521,14 @@ func (p *planner) planDepartures() {
 }
 
 // planBotTokens: older generations of a bot's token go only once the newest has
-// existed for the grace period. A crash between mint and write then leaves two
-// live tokens for ten minutes, never a Mate with none.
-func (p *planner) planBotTokens() {
+// existed for the grace period, and never on a pass that mints for the bot. A
+// crash between mint and write then leaves two live tokens for ten minutes,
+// never a Mate with none.
+func (p *planner) planBotTokens(minting map[string]bool) {
 	for _, bot := range sortedTokenKeys(p.state.Gitea.BotTokens) {
+		if minting[bot] {
+			continue
+		}
 		type gen struct {
 			n     int
 			token gitea.AccessToken

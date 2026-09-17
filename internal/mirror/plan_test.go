@@ -10,6 +10,7 @@ import (
 	"github.com/zeropsio/gitea-mate/internal/mirror"
 	"github.com/zeropsio/gitea-mate/internal/registry"
 	"github.com/zeropsio/gitea-mate/internal/roles"
+	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
 
 const (
@@ -19,8 +20,34 @@ const (
 
 var now = time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
 
+const (
+	giteaPublicURL  = "https://git.example"
+	brokerPublicURL = "https://broker.example"
+)
+
 func opts() mirror.Options {
-	return mirror.Options{AdminLogin: adminLogin, HookURL: hookURL, Now: now}
+	return mirror.Options{
+		AdminLogin: adminLogin, HookURL: hookURL, Now: now,
+		GiteaPublicURL: giteaPublicURL, BrokerPublicURL: brokerPublicURL,
+	}
+}
+
+// served is the Mate container of p-fen holding the three variables right for
+// a token whose value is token.
+func served(token string) map[string]mirror.MateService {
+	return map[string]mirror.MateService{"p-fen": {
+		ServiceID: "s-zcp",
+		Vars: map[string]zerops.ServiceUserData{
+			mirror.VarGiteaURL:   {ID: "ud-1", Key: mirror.VarGiteaURL, Content: giteaPublicURL},
+			mirror.VarBrokerURL:  {ID: "ud-2", Key: mirror.VarBrokerURL, Content: brokerPublicURL},
+			mirror.VarGiteaToken: {ID: "ud-3", Key: mirror.VarGiteaToken, Content: token, Sensitive: true},
+		},
+	}}
+}
+
+// liveToken is one live generation of p-fen's bot whose value ends in last8.
+func liveToken(generation int, last8 string, age time.Duration) gitea.AccessToken {
+	return gitea.AccessToken{Name: mirror.TokenName("mate-p-fen", generation), TokenLastEight: last8, CreatedAt: now.Add(-age)}
 }
 
 // oneGroup is a registry with one group, one Mate and a production project.
@@ -164,11 +191,15 @@ func TestPlanIsIdempotent(t *testing.T) {
 			{UserID: "u-owner", Email: "o@x", Status: "ACTIVE", RoleCode: roles.Owner},
 			{UserID: "u-jan", Email: "j@x", Status: "ACTIVE", RoleCode: roles.ReadOnly},
 		},
-		Gitea: applied(t),
+		Gitea:        applied(t),
+		MateServices: served("tok-11111111"),
 	}
 	plan := mirror.Compute(state, opts())
 	if len(plan.Actions) != 0 {
 		t.Errorf("a second pass plans %d actions:\n%s", len(plan.Actions), mirror.Describe(plan))
+	}
+	if len(plan.Problems) != 0 {
+		t.Errorf("a second pass reports %v", plan.Problems)
 	}
 }
 
@@ -204,6 +235,7 @@ func applied(t *testing.T) mirror.GiteaState {
 		},
 	}}
 	g.Hooks["acme"] = []gitea.Hook{{ID: 9, Config: map[string]string{"url": hookURL}}}
+	g.BotTokens["mate-p-fen"] = []gitea.AccessToken{liveToken(1, "11111111", time.Hour)}
 	return g
 }
 
@@ -412,16 +444,17 @@ func TestOlderTokenGenerationsWaitForTheGrace(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			g := applied(t)
 			g.BotTokens = map[string][]gitea.AccessToken{"mate-p-fen": {
-				{Name: "mate/mate-p-fen/1", CreatedAt: now.Add(-3 * time.Hour)},
-				{Name: "mate/mate-p-fen/2", CreatedAt: now.Add(-2 * time.Hour)},
-				{Name: "mate/mate-p-fen/3", CreatedAt: now.Add(-tc.newestAge)},
+				liveToken(1, "11111111", 3*time.Hour),
+				liveToken(2, "22222222", 2*time.Hour),
+				liveToken(3, "33333333", tc.newestAge),
 				{Name: "some-hand-made-token", CreatedAt: now.Add(-4 * time.Hour)},
 			}}
 			state := mirror.State{
 				Registry: reg, Problems: problems,
-				Mates:   map[string]string{"p-fen": "Fen"},
-				Members: settled(),
-				Gitea:   g,
+				Mates:        map[string]string{"p-fen": "Fen"},
+				Members:      settled(),
+				Gitea:        g,
+				MateServices: served("tok-33333333"),
 			}
 			plan := mirror.Compute(state, opts())
 
@@ -442,12 +475,10 @@ func TestOlderTokenGenerationsWaitForTheGrace(t *testing.T) {
 func TestOneGenerationIsNeverRevoked(t *testing.T) {
 	reg, problems := oneGroup(t)
 	g := applied(t)
-	g.BotTokens = map[string][]gitea.AccessToken{"mate-p-fen": {
-		{Name: "mate/mate-p-fen/1", CreatedAt: now.Add(-3 * time.Hour)},
-	}}
+	g.BotTokens = map[string][]gitea.AccessToken{"mate-p-fen": {liveToken(1, "11111111", 3*time.Hour)}}
 	plan := mirror.Compute(mirror.State{
 		Registry: reg, Problems: problems, Mates: map[string]string{"p-fen": "Fen"},
-		Members: settled(), Gitea: g,
+		Members: settled(), Gitea: g, MateServices: served("tok-11111111"),
 	}, opts())
 	for _, a := range plan.Actions {
 		if a.Kind == mirror.DeleteBotToken {
@@ -497,4 +528,187 @@ func TestParseTokenName(t *testing.T) {
 	if got := mirror.TokenName("mate-p1", 3); got != "mate/mate-p1/3" {
 		t.Errorf("TokenName = %q", got)
 	}
+}
+
+// A Mate's Gitea access is delivered by the pass, not asked for: the plan
+// carries one action per Mate whose container is short of the three
+// variables or whose token is not the bot's newest live generation.
+func TestMateAccessIsPlannedWhenItIsNotTrue(t *testing.T) {
+	reg, problems := oneGroup(t)
+
+	cases := []struct {
+		name     string
+		tokens   []gitea.AccessToken
+		services map[string]mirror.MateService
+		problems map[string]string
+		want     bool // an action is planned
+		mint     bool // and it mints a new generation
+	}{
+		{
+			name:   "the three variables are right and the token is the newest generation: nothing",
+			tokens: []gitea.AccessToken{liveToken(1, "11111111", time.Hour)}, services: served("tok-11111111"),
+		},
+		{
+			name:   "GITEA_TOKEN is absent",
+			tokens: []gitea.AccessToken{liveToken(1, "11111111", time.Hour)},
+			services: func() map[string]mirror.MateService {
+				s := served("tok-11111111")
+				delete(s["p-fen"].Vars, mirror.VarGiteaToken)
+				return s
+			}(),
+			want: true, mint: true,
+		},
+		{
+			name:   "GITEA_URL names another Gitea, so the token there is not ours",
+			tokens: []gitea.AccessToken{liveToken(1, "11111111", time.Hour)},
+			services: func() map[string]mirror.MateService {
+				s := served("tok-11111111")
+				s["p-fen"].Vars[mirror.VarGiteaURL] = zerops.ServiceUserData{ID: "ud-1", Key: mirror.VarGiteaURL, Content: "https://elsewhere.example"}
+				return s
+			}(),
+			want: true, mint: true,
+		},
+		{
+			name: "the bot has no live generation", tokens: nil, services: served("tok-11111111"),
+			want: true, mint: true,
+		},
+		{
+			name:   "the bot's only tokens are hand-made ones",
+			tokens: []gitea.AccessToken{{Name: "hand-made", TokenLastEight: "11111111"}}, services: served("tok-11111111"),
+			want: true, mint: true,
+		},
+		{
+			name: "the container holds an older generation than the newest — a crash between mint and write",
+			tokens: []gitea.AccessToken{
+				liveToken(1, "11111111", time.Hour), liveToken(2, "22222222", time.Minute),
+			},
+			services: served("tok-11111111"),
+			want:     true, mint: true,
+		},
+		{
+			name:   "an empty container: every variable is missing",
+			tokens: nil, services: map[string]mirror.MateService{"p-fen": {ServiceID: "s-zcp", Vars: map[string]zerops.ServiceUserData{}}},
+			want: true, mint: true,
+		},
+		{
+			name:   "only MATE_BROKER_URL is wrong: written, no new generation",
+			tokens: []gitea.AccessToken{liveToken(1, "11111111", time.Hour)},
+			services: func() map[string]mirror.MateService {
+				s := served("tok-11111111")
+				s["p-fen"].Vars[mirror.VarBrokerURL] = zerops.ServiceUserData{ID: "ud-2", Key: mirror.VarBrokerURL, Content: "https://old-broker.example"}
+				return s
+			}(),
+			want: true, mint: false,
+		},
+		{
+			name:     "the container could not be read: reported, not acted on",
+			tokens:   nil,
+			problems: map[string]string{"p-fen": "the broker's token does not reach its project (403)"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := applied(t)
+			g.BotTokens = map[string][]gitea.AccessToken{}
+			if tc.tokens != nil {
+				g.BotTokens["mate-p-fen"] = tc.tokens
+			}
+			plan := mirror.Compute(mirror.State{
+				Registry: reg, Problems: problems, Mates: map[string]string{"p-fen": "Fen"},
+				Members: settled(), Gitea: g, MateServices: tc.services, MateProblems: tc.problems,
+			}, opts())
+
+			var deliveries []mirror.Action
+			for _, a := range plan.Actions {
+				if a.Kind == mirror.DeliverMateAccess {
+					deliveries = append(deliveries, a)
+				}
+			}
+			if !tc.want {
+				if len(deliveries) != 0 {
+					t.Fatalf("planned %v", deliveries)
+				}
+				if len(tc.problems) > 0 && !mentions(plan.Problems, "p-fen") {
+					t.Errorf("the unreadable Mate is not reported: %v", plan.Problems)
+				}
+				return
+			}
+			if len(deliveries) != 1 {
+				t.Fatalf("planned %d deliveries, want one:\n%s", len(deliveries), mirror.Describe(plan))
+			}
+			a := deliveries[0]
+			if a.Org != "acme" || a.Login != "mate-p-fen" || a.Project != "p-fen" || a.Service != "s-zcp" || a.FullName != "Fen" {
+				t.Errorf("action = %+v", a)
+			}
+			if a.Mint != tc.mint {
+				t.Errorf("mint = %v, want %v", a.Mint, tc.mint)
+			}
+			if a.Destructive() {
+				t.Error("a delivery counts against the cap")
+			}
+		})
+	}
+}
+
+// A Mate the state says nothing about — neither a container nor a reason —
+// is reported, never acted on.
+func TestAMateWithNoContainerReadIsReported(t *testing.T) {
+	reg, problems := oneGroup(t)
+	plan := mirror.Compute(mirror.State{
+		Registry: reg, Problems: problems, Mates: map[string]string{"p-fen": "Fen"},
+		Members: settled(), Gitea: applied(t),
+	}, opts())
+	for _, a := range plan.Actions {
+		if a.Kind == mirror.DeliverMateAccess {
+			t.Fatalf("planned %s with no container to write to", a)
+		}
+	}
+	if !mentions(plan.Problems, "p-fen") {
+		t.Errorf("problems = %v", plan.Problems)
+	}
+}
+
+// A pass that mints revokes nothing of that bot: the older generations wait
+// for a pass without a mint, so a crash between mint and write never leaves a
+// Mate with a dead token and no live one.
+func TestARevocationWaitsForAPassWithoutAMint(t *testing.T) {
+	reg, problems := oneGroup(t)
+	g := applied(t)
+	g.BotTokens = map[string][]gitea.AccessToken{"mate-p-fen": {
+		liveToken(1, "11111111", 3*time.Hour),
+		liveToken(2, "22222222", 11*time.Minute),
+	}}
+	services := served("tok-11111111")
+	delete(services["p-fen"].Vars, mirror.VarGiteaToken)
+
+	plan := mirror.Compute(mirror.State{
+		Registry: reg, Problems: problems, Mates: map[string]string{"p-fen": "Fen"},
+		Members: settled(), Gitea: g, MateServices: services,
+	}, opts())
+
+	var minted, revoked bool
+	for _, a := range plan.Actions {
+		switch a.Kind {
+		case mirror.DeliverMateAccess:
+			minted = a.Mint
+		case mirror.DeleteBotToken:
+			revoked = true
+		}
+	}
+	if !minted {
+		t.Fatal("no generation is minted for a container without a token")
+	}
+	if revoked {
+		t.Errorf("a generation was revoked on the same pass as a mint:\n%s", mirror.Describe(plan))
+	}
+}
+
+func mentions(problems []string, needle string) bool {
+	for _, p := range problems {
+		if strings.Contains(p, needle) {
+			return true
+		}
+	}
+	return false
 }

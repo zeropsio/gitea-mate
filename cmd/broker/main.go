@@ -73,7 +73,10 @@ func run(log *slog.Logger) error {
 		AdminLogin:     cfg.GiteaAdminUser,
 		AppOrigins:     cfg.MateAppOrigins,
 		HookURL:        cfg.BrokerPublicURL + "/hooks/gitea",
-		Cap:            cfg.MirrorCap,
+		// Every registered Mate's container is given these two, and a token.
+		GiteaPublicURL:  cfg.GiteaPublicURL,
+		BrokerPublicURL: cfg.BrokerPublicURL,
+		Cap:             cfg.MirrorCap,
 	}
 	rights.SetHookSecret(cfg.GiteaWebhookSecret.Reveal())
 	loop := mirror.NewLoop(rights, log, cfg.MirrorInterval, mirror.DefaultNudgeDelay)
