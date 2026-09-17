@@ -198,23 +198,6 @@ func Compute(person Person, overrides map[string]Role, registry Registry) Rights
 	return out
 }
 
-// Effective is a person's role on one project: its override for them when
-// there is one, their org role otherwise. An inactive person has none.
-//
-// docs/roles.md states the rule; [Compute] applies it internally, and
-// POST /mate/credential needs it by itself — its gate is "the project's
-// effective OWNER, or an org OWNER/ADMIN", which the open/listed/hidden output
-// cannot express.
-func Effective(person Person, overrides map[string]Role, projectID string) Role {
-	if person.Status != StatusActive {
-		return NoAccess
-	}
-	if r, ok := overrides[projectID]; ok {
-		return r
-	}
-	return person.OrgRole
-}
-
 // TeamsFor returns the Gitea teams a person belongs to in one group, in the
 // order docs/vocabulary.md lists them. The rights loop writes exactly these.
 func (r GroupRights) TeamsFor() []string {

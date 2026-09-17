@@ -3,9 +3,10 @@
 //
 // No endpoint takes a Zerops key, and being inside the project proves nothing
 // — the runners share its network — so every route that changes state proves
-// its caller for itself: /mate/credential a throwaway, /mate/repository a
-// Mate's Gitea token, /hooks/gitea the HMAC, and the OIDC routes the client
-// secret.
+// its caller for itself: /mate/repository a Mate's Gitea token, /hooks/gitea
+// the HMAC, and the OIDC routes the client secret (and /oidc/complete a
+// throwaway). A Mate's own Gitea access is no route at all: the rights loop
+// delivers it.
 package server
 
 import (
@@ -19,7 +20,6 @@ import (
 	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/gitea"
 	"github.com/zeropsio/gitea-mate/internal/oidc"
-	"github.com/zeropsio/gitea-mate/internal/throwaway"
 	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
 
@@ -30,10 +30,9 @@ var repoNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
 // Deps are what the broker's routes need. Everything is an explicit
 // dependency, so a test drives the whole router against two fakes.
 type Deps struct {
-	Zerops    *zerops.Client
-	Gitea     *gitea.Client
-	Throwaway *throwaway.Checker
-	OIDC      *oidc.Provider
+	Zerops *zerops.Client
+	Gitea  *gitea.Client
+	OIDC   *oidc.Provider
 	// Hooks takes every webhook the routes do not handle themselves.
 	Hooks Hooks
 	// Deploys is what POST /deploy and GET /deploy/{id} drive, and Records the
@@ -89,9 +88,6 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	if s.deps.Throwaway != nil {
-		mux.HandleFunc("POST /mate/credential", s.handleCredential)
-	}
 	if s.deps.Gitea != nil {
 		mux.HandleFunc("POST /mate/repository", s.handleRepository)
 	}

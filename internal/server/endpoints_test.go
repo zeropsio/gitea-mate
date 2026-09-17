@@ -17,7 +17,6 @@ import (
 	"github.com/zeropsio/gitea-mate/internal/gitea"
 	"github.com/zeropsio/gitea-mate/internal/gitea/giteatest"
 	"github.com/zeropsio/gitea-mate/internal/mirror"
-	"github.com/zeropsio/gitea-mate/internal/throwaway"
 	"github.com/zeropsio/gitea-mate/internal/zerops"
 	"github.com/zeropsio/gitea-mate/internal/zerops/zeropstest"
 )
@@ -69,17 +68,6 @@ func newRig(t *testing.T) *rig {
 		zerops.Project{ID: "p-stray", Name: "Something else"},
 	)
 
-	// Three throwaways, one per person.
-	for _, who := range []struct{ bearer, user string }{
-		{"jan", "u-jan"}, {"olga", "u-olga"}, {"vera", "u-vera"},
-	} {
-		z.AddIdentity(who.bearer, zeropstest.Identity{UserInfoID: "tok-" + who.bearer, TokenID: "tok-" + who.bearer, ClientID: clientID})
-		z.AddToken(zerops.Token{
-			ID: "tok-" + who.bearer, Name: "gitea-signin:" + giteaHost + ":n0nce",
-			RoleCode: "NO_ACCESS", CreatedByUser: who.user, Created: now.Add(-30 * time.Second),
-		})
-	}
-
 	g := giteatest.New(t)
 	gc := g.Client()
 	ctx := context.Background()
@@ -104,13 +92,9 @@ func newRig(t *testing.T) *rig {
 		MateAppURL:         "https://app.example",
 		RunnerQuietPeriod:  50 * time.Millisecond,
 	}
-	zc := z.Client("broker")
 	s := New(cfg, slog.New(slog.DiscardHandler), Deps{
-		Zerops: zc,
+		Zerops: z.Client("broker"),
 		Gitea:  gc,
-		Throwaway: &throwaway.Checker{
-			Broker: zc, AsCaller: z.Client, ClientID: clientID, GiteaHost: giteaHost,
-		},
 	})
 	t.Cleanup(s.Close)
 	return &rig{zerops: z, gitea: g, server: s, handler: s.Handler()}
@@ -122,139 +106,15 @@ func (r *rig) do(req *http.Request) *httptest.ResponseRecorder {
 	return rr
 }
 
-func (r *rig) credential(bearer, body string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, "/mate/credential", strings.NewReader(body))
+// A Mate's Gitea access is no route: the rights loop delivers it (D20). The
+// old POST /mate/credential answers 404 like any path the broker never had.
+func TestThereIsNoCredentialRoute(t *testing.T) {
+	r := newRig(t)
+	req := httptest.NewRequest(http.MethodPost, "/mate/credential", strings.NewReader(`{"project":"p-fen"}`))
 	req.Header.Set("Content-Type", "application/json")
-	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
-	}
-	return r.do(req)
-}
-
-// ---------------------------------------------------------------------------
-// POST /mate/credential
-// ---------------------------------------------------------------------------
-
-func TestCredentialEnsureThenRotate(t *testing.T) {
-	r := newRig(t)
-
-	// ensure with no live token mints generation 1.
-	rr := r.credential("jan", `{"project":"p-fen"}`)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("ensure = %d: %s", rr.Code, rr.Body)
-	}
-	var first credentialResponse
-	decode(t, rr, &first)
-	if !first.Minted || first.Generation != 1 || first.Token == "" {
-		t.Fatalf("first = %+v", first)
-	}
-	if first.Org != "acme" || first.Bot != "mate-p-fen" || first.URL != "https://"+giteaHost {
-		t.Errorf("first = %+v", first)
-	}
-	// The bot is restricted and a reader of its group.
-	bot, ok := r.gitea.User("mate-p-fen")
-	if !ok || !bot.Restricted {
-		t.Errorf("bot = %+v, %v", bot, ok)
-	}
-	if got := r.gitea.TeamMembers("acme", "read"); !contains(got, "mate-p-fen") {
-		t.Errorf("read team = %v", got)
-	}
-
-	// ensure with a live token mints nothing and returns no token.
-	rr = r.credential("jan", `{"project":"p-fen","mode":"ensure"}`)
-	var second credentialResponse
-	decode(t, rr, &second)
-	if second.Minted || second.Token != "" || second.Generation != 1 {
-		t.Fatalf("a second ensure = %+v", second)
-	}
-
-	// rotate mints generation 2 and leaves generation 1 alone — the rights loop
-	// revokes it once the newest is ten minutes old.
-	rr = r.credential("jan", `{"project":"p-fen","mode":"rotate"}`)
-	var third credentialResponse
-	decode(t, rr, &third)
-	if !third.Minted || third.Generation != 2 || third.Token == "" {
-		t.Fatalf("rotate = %+v", third)
-	}
-	names := r.gitea.Tokens("mate-p-fen")
-	if len(names) != 2 || !contains(names, mirror.TokenName("mate-p-fen", 1)) || !contains(names, mirror.TokenName("mate-p-fen", 2)) {
-		t.Errorf("tokens = %v", names)
-	}
-}
-
-func TestCredentialRefusals(t *testing.T) {
-	cases := []struct {
-		name       string
-		bearer     string
-		body       string
-		wantStatus int
-		wantError  string
-		wantReason string
-	}{
-		{
-			name: "the project is not in the registry", bearer: "jan", body: `{"project":"p-stray"}`,
-			wantStatus: http.StatusNotFound, wantError: "not_registered",
-		},
-		{
-			name: "the project is a production project, not a Mate", bearer: "jan", body: `{"project":"p-prod"}`,
-			wantStatus: http.StatusNotFound, wantError: "not_registered",
-		},
-		{
-			name: "a project nobody has heard of", bearer: "jan", body: `{"project":"p-nowhere"}`,
-			wantStatus: http.StatusNotFound, wantError: "not_registered",
-		},
-		{
-			name:   "a member who is neither the Mate's owner nor an org owner or admin",
-			bearer: "vera", body: `{"project":"p-fen"}`,
-			wantStatus: http.StatusForbidden, wantError: "not_owner",
-		},
-		{
-			name: "no throwaway at all", bearer: "", body: `{"project":"p-fen"}`,
-			wantStatus: http.StatusUnauthorized, wantError: "throwaway_invalid", wantReason: throwaway.ReasonTokenDead,
-		},
-		{
-			name: "a mode nobody serves", bearer: "jan", body: `{"project":"p-fen","mode":"delete"}`,
-			wantStatus: http.StatusBadRequest, wantError: "invalid_request",
-		},
-		{
-			name: "no project", bearer: "jan", body: `{}`,
-			wantStatus: http.StatusBadRequest, wantError: "invalid_request",
-		},
-		{
-			name: "a body that is not JSON", bearer: "jan", body: `not json`,
-			wantStatus: http.StatusBadRequest, wantError: "invalid_request",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			r := newRig(t)
-			rr := r.credential(tc.bearer, tc.body)
-			if rr.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d: %s", rr.Code, tc.wantStatus, rr.Body)
-			}
-			var body ErrorBody
-			decode(t, rr, &body)
-			if body.Error != tc.wantError {
-				t.Errorf("error = %q, want %q", body.Error, tc.wantError)
-			}
-			if tc.wantReason != "" && body.Reason != tc.wantReason {
-				t.Errorf("reason = %q, want %q", body.Reason, tc.wantReason)
-			}
-			if body.Message == "" {
-				t.Error("the refusal has no plain words")
-			}
-		})
-	}
-}
-
-// An org owner may ask for any Mate's credential; so may an admin. The Mate's
-// own owner is the third case, covered above.
-func TestCredentialForAnOrgOwner(t *testing.T) {
-	r := newRig(t)
-	rr := r.credential("olga", `{"project":"p-fen"}`)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d: %s", rr.Code, rr.Body)
+	req.Header.Set("Authorization", "Bearer anything")
+	if rr := r.do(req); rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rr.Code, rr.Body)
 	}
 }
 
@@ -271,16 +131,14 @@ func (r *rig) repository(token, body string) *httptest.ResponseRecorder {
 	return r.do(req)
 }
 
-// botToken mints a bot and its token the way /mate/credential would.
+// botToken seeds Fen's bot and a live token the way a pass of the rights loop
+// leaves them, and returns the token's value.
 func (r *rig) botToken(t *testing.T) string {
 	t.Helper()
-	rr := r.credential("jan", `{"project":"p-fen"}`)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("credential = %d: %s", rr.Code, rr.Body)
-	}
-	var out credentialResponse
-	decode(t, rr, &out)
-	return out.Token
+	const value = "value-mate-p-fen-1"
+	r.gitea.AddUser(gitea.User{Login: "mate-p-fen", Active: true, Restricted: true})
+	r.gitea.AddToken("mate-p-fen", mirror.TokenName("mate-p-fen", 1), value, mirror.BotScopes...)
+	return value
 }
 
 func TestRepositoryIsIdempotent(t *testing.T) {

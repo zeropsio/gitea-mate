@@ -1,8 +1,8 @@
 // Package throwaway proves a person from a throwaway Zerops integration token.
 //
-// docs/broker-api.md, "Proving a person": POST /mate/credential and
-// POST /oidc/complete take a throwaway the Mate app minted as the person. The
-// broker accepts it only when all six conditions hold, in this order, and
+// docs/broker-api.md, "Proving a person": POST /oidc/complete takes a
+// throwaway the Mate app minted as the person. The broker accepts it only when
+// all six conditions hold, in this order, and
 // refuses with throwaway_invalid plus a reason otherwise. The caller is the
 // token's createdByUser. The app deletes the throwaway right after the call;
 // the broker never stores it.

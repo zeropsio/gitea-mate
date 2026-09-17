@@ -192,26 +192,3 @@ func mustJSON(t *testing.T, v any) string {
 	}
 	return string(b)
 }
-
-func TestEffective(t *testing.T) {
-	person := Person{ID: "u", OrgRole: ReadOnly, Status: StatusActive}
-	overrides := map[string]Role{"p-own": Owner}
-
-	cases := []struct {
-		name      string
-		person    Person
-		projectID string
-		want      Role
-	}{
-		{"an override wins", person, "p-own", Owner},
-		{"the org role otherwise", person, "p-other", ReadOnly},
-		{"an inactive person holds nothing, override or not", Person{ID: "u", OrgRole: Owner, Status: "INVITED"}, "p-own", NoAccess},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := Effective(tc.person, overrides, tc.projectID); got != tc.want {
-				t.Errorf("Effective = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}

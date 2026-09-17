@@ -1,6 +1,6 @@
 // Command broker is the Zerops ↔ Gitea broker: it mirrors Zerops permissions
-// into a Gitea instance, signs people in to Gitea and hands Mates their Gitea
-// access.
+// into a Gitea instance, signs people in to Gitea and delivers every Mate its
+// Gitea access.
 //
 // Its API is docs/broker-api.md; every name it uses is in docs/vocabulary.md.
 package main
@@ -149,14 +149,13 @@ func run(log *slog.Logger) error {
 	deployLoop := &pipeline.Loop{Pipeline: pipe, Log: log}
 
 	srv := server.New(cfg, log, server.Deps{
-		Zerops:    zeropsClient,
-		Gitea:     giteaClient,
-		Throwaway: checker,
-		OIDC:      provider,
-		Hooks:     pipe,
-		Deploys:   pipe,
-		Records:   records,
-		Runners:   pipe,
+		Zerops:  zeropsClient,
+		Gitea:   giteaClient,
+		OIDC:    provider,
+		Hooks:   pipe,
+		Deploys: pipe,
+		Records: records,
+		Runners: pipe,
 		// The app's public OAuth2 client is whatever the last pass registered.
 		OAuthClient: func() (server.OAuthClient, bool) {
 			client, ok := rights.AppClient()
