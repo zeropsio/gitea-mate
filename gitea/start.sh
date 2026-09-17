@@ -47,7 +47,10 @@ echo "start.sh: rendering $CONF ..."
 zsc envReplace --silent gitea/app.ini /tmp/app.ini
 sudo install -m 660 -o root -g zerops /tmp/app.ini "$CONF"
 
-require_zerops_source || exit 1
+# A boot that is waiting for the broker's secret to resolve comes back here
+# every few seconds; a short pause keeps the retries few (measured 2026-09-17:
+# the first boot's secret wait took four restarts three seconds apart).
+require_zerops_source || { sleep 5; exit 1; }
 
 echo "start.sh: starting gitea ..."
 exec "$GITEA_BIN" web --config "$CONF"
