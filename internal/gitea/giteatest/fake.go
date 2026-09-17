@@ -11,6 +11,7 @@ package giteatest
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -41,7 +42,10 @@ type Fake struct {
 	mu  sync.Mutex
 	srv *httptest.Server
 
-	users   map[string]*gitea.User
+	users map[string]*gitea.User
+	// sources is the login sources Gitea knows, by id; the recipe's `zerops`
+	// source is 1 once admin-init.sh has added it.
+	sources map[int64]bool
 	tokens  []tokenRow
 	nextID  int64
 	orgs    map[string]*gitea.Org
@@ -75,6 +79,7 @@ func New(t *testing.T) *Fake {
 	t.Helper()
 	f := &Fake{
 		users:         map[string]*gitea.User{},
+		sources:       map[int64]bool{1: true},
 		orgs:          map[string]*gitea.Org{},
 		teams:         map[string][]*gitea.Team{},
 		members:       map[int64]map[string]bool{},
@@ -444,6 +449,12 @@ func (f *Fake) createUser(w http.ResponseWriter, r *http.Request) {
 	// login source does not (400 PasswordIsRequired otherwise).
 	if in.Password == "" && in.SourceID == 0 {
 		fail(w, http.StatusBadRequest, "PasswordIsRequired")
+		return
+	}
+	// As 1.27.2 answers when the recipe's source has not been added yet
+	// (measured 2026-09-17): a 422 with these words.
+	if in.SourceID != 0 && !f.sources[in.SourceID] {
+		fail(w, http.StatusUnprocessableEntity, fmt.Sprintf("login source does not exist [id: %d]", in.SourceID))
 		return
 	}
 	u := &gitea.User{

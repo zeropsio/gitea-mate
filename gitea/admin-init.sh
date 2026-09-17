@@ -123,7 +123,7 @@ resolved() {
 
 add_oidc_source() {
   if ! resolved "${BROKER_PUBLIC_URL:-}" || ! resolved "${OIDC_CLIENT_SECRET:-}"; then
-    echo "admin-init.sh: BROKER_PUBLIC_URL or OIDC_CLIENT_SECRET has not resolved yet, leaving the OIDC source for a later boot"
+    echo "admin-init.sh: BROKER_PUBLIC_URL or OIDC_CLIENT_SECRET has not resolved yet; start.sh restarts this boot until it has"
     return 0
   fi
   # Repair, not skip. The secret this boot holds is the authoritative one, and
@@ -144,11 +144,11 @@ add_oidc_source() {
   # ("Failed to create OpenID Connect Provider ... Non-success code for
   # Discovery URL: 502", measured 2026-09-16): the sign-in page offers no
   # Zerops link and, since the guard above then sees the source, no later boot
-  # ever repairs it. So wait, and on a broker that never answers leave the
-  # source for a boot that can add it properly.
+  # ever repairs it. So wait; on a broker that never answers, return without
+  # the source and let start.sh refuse to serve, which restarts this boot.
   echo "admin-init.sh: waiting for the broker's discovery URL ..."
   if ! ./gitea/wait-for-url.sh "$BROKER_PUBLIC_URL/.well-known/openid-configuration" 900; then
-    echo "admin-init.sh: the broker never answered, leaving the zerops login source for a later boot"
+    echo "admin-init.sh: the broker never answered; start.sh restarts this boot and this runs again"
     return 0
   fi
 

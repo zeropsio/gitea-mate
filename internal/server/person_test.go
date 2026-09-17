@@ -184,6 +184,37 @@ func TestASecondSignInReusesTheAccountAndMintsAnotherToken(t *testing.T) {
 	}
 }
 
+// The recipe's Gitea had no login source yet on the owner's run of 2026-09-17
+// (admin-init.sh had left it "for a later boot"): Gitea answered every account
+// creation with 422 "login source does not exist [id: 1]", the broker turned
+// that into a 502, the platform's edge replaced the 502 with its own page, and
+// the app retried "still setting up" every twenty seconds for a quarter of an
+// hour. A refusal is answered as one, in Gitea's words.
+func TestAGiteaRefusalIsAnsweredInItsWordsNotAsStillSettingUp(t *testing.T) {
+	r := newPeopleRig(t)
+	r.server.cfg.GiteaOIDCSourceID = 9 // a source this Gitea does not have
+
+	rr := r.personToken("throwaway-jan", "https://app.example")
+	if rr.Code != http.StatusFailedDependency {
+		t.Fatalf("POST /person/token = %d, want 424: %s", rr.Code, rr.Body.String())
+	}
+	var body struct{ Error, Message string }
+	_ = json.Unmarshal(rr.Body.Bytes(), &body)
+	if body.Error != "gitea_refused" || !strings.Contains(body.Message, "login source does not exist [id: 9]") {
+		t.Errorf("body = %+v, want gitea_refused with Gitea's words", body)
+	}
+	if _, ok := r.gitea.User(roles.Login("u-jan")); ok {
+		t.Errorf("an account was made despite the refusal")
+	}
+	if got := r.passes.Load(); got != 0 {
+		t.Errorf("passes = %d, want 0", got)
+	}
+	// Still answered with CORS, so the browser can read the refusal.
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("Access-Control-Allow-Origin = %q", got)
+	}
+}
+
 func TestATokenThatProvesNobodyIsRefused(t *testing.T) {
 	r := newPeopleRig(t)
 	for _, bearer := range []string{"", "nonsense", "broker"} {

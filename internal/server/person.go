@@ -95,8 +95,7 @@ func (s *Server) handlePersonToken(w http.ResponseWriter, r *http.Request) {
 	login := roles.Login(caller.UserID)
 	created, err := s.ensurePerson(ctx, login, caller)
 	if err != nil {
-		s.log.Error("the person's Gitea account could not be made true", "login", login, "err", err.Error())
-		WriteError(w, http.StatusBadGateway, "gitea", "Gitea could not be reached")
+		s.answerGiteaFailure(w, "the person's Gitea account could not be made true", login, err)
 		return
 	}
 	if created && s.deps.Pass != nil {
@@ -112,8 +111,7 @@ func (s *Server) handlePersonToken(w http.ResponseWriter, r *http.Request) {
 	name := mirror.AppTokenPrefix + strconv.FormatInt(time.Now().UnixNano(), 10)
 	token, err := s.deps.Gitea.MintToken(ctx, login, name, appTokenScopes)
 	if err != nil {
-		s.log.Error("a person's app token could not be minted", "login", login, "err", err.Error())
-		WriteError(w, http.StatusBadGateway, "gitea", "Gitea could not be reached")
+		s.answerGiteaFailure(w, "a person's app token could not be minted", login, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, personTokenBody{
@@ -121,6 +119,33 @@ func (s *Server) handlePersonToken(w http.ResponseWriter, r *http.Request) {
 		Login:     login,
 		ExpiresIn: int(s.cfg.AppTokenTTL.Seconds()),
 	})
+}
+
+// answerGiteaFailure tells Gitea saying no from Gitea being away. A 4xx is a
+// refusal of what the broker asked — a login source that does not exist, a
+// name it will not take — and is answered 424 with Gitea's own words, so the
+// app can show them once. Anything else is Gitea not answering, answered 502,
+// which the app reads as "still setting up" and asks again in a while. The
+// platform's edge replaces an upstream 502 with its own HTML page (measured
+// 2026-09-17), so a 502 carries no words of the broker's anyway — which is
+// why a refusal must not be one: it left the app retrying "still setting up"
+// against a Gitea whose login source had never been added.
+func (s *Server) answerGiteaFailure(w http.ResponseWriter, what, login string, err error) {
+	s.log.Error(what, "login", login, "err", err.Error())
+	if status := gitea.Status(err); status >= 400 && status < 500 {
+		WriteError(w, http.StatusFailedDependency, "gitea_refused", "Gitea refused: "+giteaWords(err))
+		return
+	}
+	WriteError(w, http.StatusBadGateway, "gitea", "Gitea could not be reached")
+}
+
+// giteaWords is what Gitea said, without the broker's framing.
+func giteaWords(err error) string {
+	var apiErr *gitea.APIError
+	if errors.As(err, &apiErr) && apiErr.Message != "" {
+		return apiErr.Message
+	}
+	return err.Error()
 }
 
 // ensurePerson makes the person's Gitea account exist, bound to the OIDC

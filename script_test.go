@@ -195,3 +195,55 @@ func TestAdminInitOIDCSecret(t *testing.T) {
 		})
 	}
 }
+
+// start.sh exits non-zero while Gitea has no `zerops` login source, so the
+// platform re-runs the start command — admin-init.sh and then start.sh —
+// instead of serving a Gitea nobody can sign in to. Measured on the owner's
+// run of 2026-09-17: admin-init.sh left the source "for a later boot" at
+// 11:20:38 because the broker's secret had not resolved, and no boot came
+// until a restart by hand at 11:38; every sign-in until then was refused with
+// "login source does not exist [id: 1]".
+func TestStartRefusesToServeWithoutTheZeropsSource(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is not on the path")
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("cwd: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		list  string // what `gitea admin auth list` prints; empty = the command fails
+		serve bool
+	}{
+		{"the source is there", "ID   Name     Type   Enabled\n1    zerops   OAuth2   true\n", true},
+		{"no source yet", "ID   Name     Type   Enabled\n", false},
+		{"the sources cannot be listed", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			stub := "#!/usr/bin/env bash\n" +
+				"if [ \"$1\" = admin ] && [ \"$2\" = auth ] && [ \"$3\" = list ]; then\n"
+			if tc.list == "" {
+				stub += "  exit 1\n"
+			} else {
+				stub += "  printf '%s' \"$LIST\"\n"
+			}
+			stub += "fi\nexit 0\n"
+			bin := dir + "/gitea-stub"
+			if err := os.WriteFile(bin, []byte(stub), 0o755); err != nil {
+				t.Fatalf("write stub: %v", err)
+			}
+			cmd := exec.Command("bash", "-c", "START_SOURCE_ONLY=1 . ./gitea/start.sh && require_zerops_source")
+			cmd.Dir = root
+			cmd.Env = append(os.Environ(), "GITEA_BIN="+bin, "CONF="+dir+"/app.ini", "LIST="+tc.list)
+			out, runErr := cmd.CombinedOutput()
+			if (runErr == nil) != tc.serve {
+				t.Fatalf("serve = %v, want %v\n%s", runErr == nil, tc.serve, out)
+			}
+			if !tc.serve && !strings.Contains(string(out), "not there yet, restarting") {
+				t.Errorf("a refused boot must say why; output:\n%s", out)
+			}
+		})
+	}
+}
