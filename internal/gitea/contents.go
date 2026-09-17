@@ -1,12 +1,10 @@
 package gitea
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -182,33 +180,8 @@ const maxArchive = 512 << 20
 // folder, and a prefixed one fails its build (ledger 2026-09-15).
 func (c *Client) Archive(ctx context.Context, owner, repo, sha string) ([]byte, error) {
 	path := "/repos/" + esc(owner) + "/" + esc(repo) + "/archive/" + esc(sha) + ".tar.gz"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+apiPath+path, nil)
-	if err != nil {
-		return nil, fmt.Errorf("gitea: GET %s: %w", path, err)
-	}
-	req.Header.Set("Authorization", "token "+c.token)
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("gitea: GET %s: %w", path, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxArchive))
-	if err != nil {
-		return nil, fmt.Errorf("gitea: GET %s: %w", path, err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		var msg struct {
-			Message string `json:"message"`
-		}
-		_ = json.Unmarshal(raw, &msg)
-		if msg.Message == "" {
-			msg.Message = strings.TrimSpace(string(bytes.TrimSpace(raw)))
-		}
-		return nil, &APIError{Status: resp.StatusCode, Message: msg.Message, Path: "GET " + path}
-	}
-	return raw, nil
+	_, raw, err := c.send(ctx, http.MethodGet, path, nil, authToken, maxArchive)
+	return raw, err
 }
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,12 @@
 //   - an arbitrary caller's token, for the two reads that answer "who is
 //     this?" — GET /user and GET /repos/{o}/{r}/actions/jobs/{id}.
 //
+// The first two are the site admin's pair, and the client never holds them:
+// it asks an [AdminSource] for each call, and asks again when Gitea refuses
+// what it was given. That is how the broker outlives a pair that had not
+// reached its container when it started, or that Gitea's first boot minted
+// anew (internal/siteadmin).
+//
 // Nothing here ever logs or returns a token value except the one call whose
 // whole purpose is to mint one.
 package gitea
@@ -38,26 +44,64 @@ const DefaultTimeout = 30 * time.Second
 // (50 by default), so the paging loop below is what actually reads a long list.
 const pageSize = 50
 
+// AdminCredentials is the site admin's pair: the API token almost every call
+// carries, and the password the token routes take instead.
+type AdminCredentials struct {
+	Token    string
+	Password string
+}
+
+// AdminSource hands the client the site admin's credentials. The client asks
+// for each call, and when Gitea answers 401 to the pair it was given it asks
+// again — Refused — and retries that call once with the answer. A source that
+// answers the refused pair back has nothing new to try, and the 401 stands.
+type AdminSource interface {
+	// Admin is the pair a call should carry. An error is the call's error:
+	// Gitea is never asked with nothing.
+	Admin(ctx context.Context) (AdminCredentials, error)
+	// Refused says Gitea answered 401 to used, and answers the pair to retry
+	// with.
+	Refused(ctx context.Context, used AdminCredentials) (AdminCredentials, error)
+}
+
+// StaticAdmin is an AdminSource that always answers one pair — a test, the
+// lab, a local run. A refusal is final: there is nothing else to answer.
+type StaticAdmin AdminCredentials
+
+// Admin implements AdminSource.
+func (s StaticAdmin) Admin(context.Context) (AdminCredentials, error) {
+	return AdminCredentials(s), nil
+}
+
+// Refused implements AdminSource: the same pair, which the client knows not
+// to retry with.
+func (s StaticAdmin) Refused(context.Context, AdminCredentials) (AdminCredentials, error) {
+	return AdminCredentials(s), nil
+}
+
 // Config builds a Client.
 type Config struct {
 	// BaseURL is GITEA_URL — the instance's origin, no /api/v1.
 	BaseURL string
-	// AdminToken is the site admin's API token.
-	AdminToken string
-	// AdminUser and AdminPassword are the site admin's basic-auth credentials.
-	// They are needed only by the token routes, which refuse an API token.
-	AdminUser     string
+	// Admin is where the site admin's pair comes from. Nil means the static
+	// pair below.
+	Admin AdminSource
+	// AdminToken and AdminPassword are the static pair, read only when Admin
+	// is nil.
+	AdminToken    string
 	AdminPassword string
-	HTTP          *http.Client
+	// AdminUser is the site admin's login, which basic auth carries beside
+	// the password.
+	AdminUser string
+	HTTP      *http.Client
 }
 
 // Client talks to one Gitea.
 type Client struct {
-	base          string
-	token         string
-	adminUser     string
-	adminPassword string
-	http          *http.Client
+	base      string
+	admin     AdminSource
+	adminUser string
+	http      *http.Client
 }
 
 // New builds an admin client.
@@ -66,12 +110,15 @@ func New(cfg Config) *Client {
 	if hc == nil {
 		hc = &http.Client{Timeout: DefaultTimeout}
 	}
+	admin := cfg.Admin
+	if admin == nil {
+		admin = StaticAdmin{Token: cfg.AdminToken, Password: cfg.AdminPassword}
+	}
 	return &Client{
-		base:          strings.TrimSuffix(cfg.BaseURL, "/"),
-		token:         cfg.AdminToken,
-		adminUser:     cfg.AdminUser,
-		adminPassword: cfg.AdminPassword,
-		http:          hc,
+		base:      strings.TrimSuffix(cfg.BaseURL, "/"),
+		admin:     admin,
+		adminUser: cfg.AdminUser,
+		http:      hc,
 	}
 }
 
@@ -79,7 +126,7 @@ func New(cfg Config) *Client {
 // admin credential at all. It is how /mate/repository resolves a Mate's bot and
 // how /deploy will resolve a job.
 func (c *Client) AsToken(token string) *Client {
-	return &Client{base: c.base, token: token, http: c.http}
+	return &Client{base: c.base, admin: StaticAdmin{Token: token}, http: c.http}
 }
 
 // BaseURL is the instance origin this client talks to.
@@ -124,43 +171,86 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any, a aut
 	return err
 }
 
+// maxJSON bounds one JSON answer.
+const maxJSON = 16 << 20
+
 func (c *Client) doStatus(ctx context.Context, method, path string, in, out any, a auth) (int, error) {
-	var body io.Reader
+	var body []byte
 	if in != nil {
 		raw, err := json.Marshal(in)
 		if err != nil {
 			return 0, fmt.Errorf("gitea: encode %s %s: %w", method, path, err)
 		}
-		body = bytes.NewReader(raw)
+		body = raw
 	}
-
-	req, err := http.NewRequestWithContext(ctx, method, c.base+apiPath+path, body)
+	status, raw, err := c.send(ctx, method, path, body, a, maxJSON)
 	if err != nil {
-		return 0, fmt.Errorf("gitea: %s %s: %w", method, path, err)
+		return status, err
+	}
+	if out != nil && len(raw) > 0 {
+		if err := json.Unmarshal(raw, out); err != nil {
+			return status, fmt.Errorf("gitea: %s %s: decode: %w", method, path, err)
+		}
+	}
+	return status, nil
+}
+
+// send makes one call with the pair the source answers, and once more with a
+// fresh pair when Gitea refuses the first. It answers the status and the body
+// of a 2xx, or the refusal as an APIError.
+func (c *Client) send(ctx context.Context, method, path string, body []byte, a auth, limit int64) (int, []byte, error) {
+	creds, err := c.admin.Admin(ctx)
+	if err != nil {
+		return 0, nil, fmt.Errorf("gitea: %s %s: the site admin's credentials: %w", method, path, err)
+	}
+	for attempt := 0; ; attempt++ {
+		status, raw, err := c.once(ctx, method, path, body, a, creds, limit)
+		if status != http.StatusUnauthorized || attempt > 0 {
+			return status, raw, err
+		}
+		fresh, ferr := c.admin.Refused(ctx, creds)
+		if ferr != nil {
+			return status, raw, fmt.Errorf("%w; and the site admin's credentials could not be read again: %w", err, ferr)
+		}
+		if fresh == creds {
+			return status, raw, err
+		}
+		creds = fresh
+	}
+}
+
+func (c *Client) once(ctx context.Context, method, path string, body []byte, a auth, creds AdminCredentials, limit int64) (int, []byte, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+apiPath+path, reader)
+	if err != nil {
+		return 0, nil, fmt.Errorf("gitea: %s %s: %w", method, path, err)
 	}
 	switch a {
 	case authBasic:
-		if c.adminUser == "" || c.adminPassword == "" {
-			return 0, errors.New("gitea: this call needs the site admin's basic-auth credentials, which are not configured")
+		if c.adminUser == "" || creds.Password == "" {
+			return 0, nil, errors.New("gitea: this call needs the site admin's basic-auth credentials, which are not configured")
 		}
-		req.SetBasicAuth(c.adminUser, c.adminPassword)
+		req.SetBasicAuth(c.adminUser, creds.Password)
 	default:
-		req.Header.Set("Authorization", "token "+c.token)
+		req.Header.Set("Authorization", "token "+creds.Token)
 	}
 	req.Header.Set("Accept", "application/json")
-	if in != nil {
+	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("gitea: %s %s: %w", method, path, err)
+		return 0, nil, fmt.Errorf("gitea: %s %s: %w", method, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
-		return resp.StatusCode, fmt.Errorf("gitea: %s %s: %w", method, path, err)
+		return resp.StatusCode, nil, fmt.Errorf("gitea: %s %s: %w", method, path, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		var msg struct {
@@ -170,14 +260,9 @@ func (c *Client) doStatus(ctx context.Context, method, path string, in, out any,
 		if msg.Message == "" {
 			msg.Message = strings.TrimSpace(string(raw))
 		}
-		return resp.StatusCode, &APIError{Status: resp.StatusCode, Message: msg.Message, Path: method + " " + path}
+		return resp.StatusCode, nil, &APIError{Status: resp.StatusCode, Message: msg.Message, Path: method + " " + path}
 	}
-	if out != nil && len(raw) > 0 {
-		if err := json.Unmarshal(raw, out); err != nil {
-			return resp.StatusCode, fmt.Errorf("gitea: %s %s: decode: %w", method, path, err)
-		}
-	}
-	return resp.StatusCode, nil
+	return resp.StatusCode, raw, nil
 }
 
 // exists turns a call whose 404 means "no" into a boolean.
