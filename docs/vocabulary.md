@@ -52,10 +52,10 @@ app at registration — on a collision the app numbers it (`acme-2`, `acme-3`) �
 |---|---|
 | the Gitea project | tagged `mate:tool:gitea`; services `db`, `volume`, `web`, `broker`, and `runner{slugcompact}` per group |
 | a runner service's hostname | `runner` + the slug with `-` removed, cut to 25 characters (Zerops hostnames are `[a-z0-9]`, 25 max) |
-| the broker's token | `mate-broker`: org `READ_ONLY`, `BASIC_USER` on the Gitea project, `BASIC_USER` on each group stage and production as they are created |
+| the broker's token | `mate-broker`: org `READ_ONLY`, `BASIC_USER` on the Gitea project, `BASIC_USER` on each group stage and production as they are created, and `BASIC_USER` on each Mate project as the app registers it — so the rights loop can deliver the Mate's Gitea access (`broker-api.md`) |
 | a Mate's token | `zcp-{project}` (the platform's), lowered to `NO_ACCESS` + `BASIC_USER` on its project; replacements `zcp-{project}/{generation}` |
 | a door throwaway | `mate-door:{projectId}:{nonce}` — `NO_ACCESS`, no grants, no flags |
-| a Gitea throwaway | `gitea-signin:{gitea host}:{nonce}` — the same shape; used for sign-in consent and for `POST /mate/credential` |
+| a Gitea throwaway | `gitea-signin:{gitea host}:{nonce}` — the same shape; used for sign-in consent |
 | an app version | named by the full commit sha; production's `{sha} {tag} {tagger login}` — the sha is always the first token |
 
 ## Gitea's environment that the app fills in (service `web`, plain)
@@ -90,11 +90,13 @@ Zerops ones.
 | `MATE_APP_ORIGINS` | the app, at import (plain) | every origin the app runs from, comma-separated — the same list `web` gets as `GITEA_CORS_ALLOW_DOMAIN`. The app's OAuth2 client is registered for `{origin}/gitea/callback` of each, and `GET /gitea/oauth-client` answers them CORS. `MATE_APP_URL` is one of them whether or not the value names it, so an unset variable is that origin alone |
 | `LISTEN_ADDR` | import (plain) | `:8080` |
 
-## A Mate's environment (service `zcp`, written by the app — `giteaCredential.ts`)
+## A Mate's environment (service `zcp`, written by the broker's rights loop)
 
 `GITEA_URL` (plain, Gitea's public origin), `MATE_BROKER_URL` (plain, the broker's public origin —
-where zcp asks for repositories), `GITEA_TOKEN` (sensitive, the bot's token), and `ZCP_API_KEY`
-moved here from the project as a sensitive service variable (guide 0.10). zcp reads all four from
-its process environment and nothing else; at sign-up the first three can land minutes after the
-Mate is up, so zcp waits for them with backoff. The old `GITEA_REPO` is gone: a Mate asks the
-broker for its repositories and holds as many as it has dev pairs.
+where zcp asks for repositories), `GITEA_TOKEN` (sensitive, the bot's token) — written by the
+broker's rights loop for every registered Mate (`broker-api.md`, *A Mate's Gitea access*), never by
+the app or by a person; and `ZCP_API_KEY`, moved here from the project as a sensitive service
+variable by the app (guide 0.10). zcp reads the three Gitea values from the container's live env
+store, which the platform rewrites within seconds of a write — no restart — and waits for them with
+backoff when they are not there yet. The old `GITEA_REPO` is gone: a Mate asks the broker for its
+repositories and holds as many as it has dev pairs.

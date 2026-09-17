@@ -1,15 +1,18 @@
 # The broker's HTTP API
 
-Six endpoints and an OIDC provider. **No endpoint takes a Zerops key**, and being inside the
+Five endpoints and an OIDC provider. **No endpoint takes a Zerops key**, and being inside the
 project proves nothing — the runners share its network — so every call is checked against the party
 it claims to be. JSON in and out; errors are `{"error": "<code>", "message": "<plain words>"}`.
+
+A Mate's own Gitea access is not an endpoint at all: the rights loop delivers it (below, *A Mate's
+Gitea access*).
 
 Names used below are in `docs/vocabulary.md`; the rights function in `docs/roles.md`.
 
 ## Proving a person: the throwaway check
 
-`POST /mate/credential` and `POST /oidc/complete` take a **throwaway Zerops integration token**
-the Mate app minted as the person, `Authorization: Bearer <token>`. The broker accepts it only when
+`POST /oidc/complete` takes a **throwaway Zerops integration token** the Mate app minted as the
+person, `Authorization: Bearer <token>`. The broker accepts it only when
 every one of these holds, in this order, and refuses with `throwaway_invalid` plus a `reason`
 otherwise:
 
@@ -31,36 +34,42 @@ otherwise:
 The caller is `createdByUser`. The app deletes the throwaway right after the call; the broker
 never stores it.
 
-## `POST /mate/credential` — a Mate's Gitea access (guide 1.5)
+## A Mate's Gitea access — delivered by the rights loop (guide 1.5)
 
-Caller: the Mate app, as the person, by a throwaway.
+Nobody asks for it. The registry says which projects are Mates (`mate:gm:{group}:{project}:mate`,
+written by the org's owner), and the loop makes every registered Mate's access true on each pass,
+the way it makes teams and bots true:
 
-```json
-{ "project": "<Zerops project id>", "mode": "ensure" }
-```
+1. **The bot** — `mate-{projectId}`, restricted, in its group's `read` team (as today).
+2. **A live token** — when the bot has no token named `mate/{bot}/{n}`, or the token the Mate's
+   container holds is not the bot's newest generation (compared through Gitea's `token_last_eight`
+   against the value the platform returns in clear), the loop mints generation *n+1* (scopes
+   `write:repository,read:user`). Without the second clause a crash between mint and write would
+   leave the container on generation *n* while the grace rule revokes it ten minutes later.
+3. **The Mate's environment** — with the broker's Zerops token, which the app granted `BASIC_USER`
+   on the Mate's project when it registered it, the loop finds the project's `zcp@1` service and
+   writes three service variables on it: `GITEA_URL` and `MATE_BROKER_URL` (plain) and
+   `GITEA_TOKEN` (sensitive). A variable already holding the right value is not written; a
+   `GITEA_URL` naming another Gitea means the token there is not ours, so the loop mints a new
+   generation and writes all three; a stale `MATE_BROKER_URL` alone is put right as a plain write. The loop never restarts the container: zcp reads these from the
+   container's live env store, which the platform rewrites within seconds of the write (measured
+   2026-09-16 and 2026-09-17).
 
-`mode` is `ensure` (default) or `rotate`.
+Ordering makes this safe at sign-up. The registry entry is written before the Mate's project has a
+container, and a write onto a service that is still `NEW` or `READY_TO_DEPLOY` is accepted and
+present once it is `ACTIVE` (measured 2026-09-17), so the variables are usually there before zcp
+first looks. When they are not — the account's first project, where this broker is itself still
+building — zcp waits with backoff and the loop catches up on its first pass. A Mate registered
+later (an older project tagged into a group) is served on the next pass the same way.
 
-Checks: the project is a `mate` entry of the registry (`not_registered`); the caller is its
-effective `OWNER`, or an org `OWNER`/`ADMIN` (`not_owner` — the role function decides). Then the
-broker makes the bot if it is missing (in the group's org, in its `read` team) and:
+What the loop cannot do it reports and retries: a Mate project the broker's token does not reach
+(the app has not granted it yet), a project with no `zcp@1` service (nothing to write to), a
+platform refusal. None of these stops the pass for the other Mates.
 
-- `ensure`: when a live token of the bot exists (any `mate/{bot}/{n}`), nothing new is minted;
-- `ensure` with none, or `rotate`: mints generation *n+1* (`mate/{bot}/{n+1}`, scopes
-  `write:repository,read:user`). Older generations are revoked by the rights loop only once the
-  newest is ten minutes old — never here.
-
-```json
-{ "url": "https://web-1234-3000.prg1.zerops.app", "org": "acme", "bot": "mate-p1",
-  "generation": 2, "minted": true, "token": "<value>" }
-```
-
-`token` is present only when `minted` is true. The app writes `GITEA_URL`, `MATE_BROKER_URL` and
-(when minted) `GITEA_TOKEN` onto the Mate's `zcp` service and restarts it. A Mate that already
-holds a token for this Gitea is not asked about at all; a Mate that holds a token but for
-**another** Gitea (its `GITEA_URL` differs) is asked with `rotate`, never `ensure` — `ensure`
-would answer `minted: false` for a bot whose token is live, and the app would write a URL whose
-token it does not hold.
+Rotation — a compromised Mate, a leaver — is the same mechanism: the loop mints generation *n+1*
+and writes it; older generations are revoked by the loop only once the newest is ten minutes old,
+never on the same pass, so a crash between mint and write leaves two live tokens for ten minutes
+and never a dead Mate.
 
 ## `POST /mate/repository` — a service repository for a Mate (guide 1.5, 2.1)
 
