@@ -83,8 +83,11 @@ The broker resolves the token against Gitea (`GET /api/v1/user`): the login must
 `mate-{projectId}` bot (`not_a_bot`) whose project is registered (`not_registered`); the org is the
 project's group. It creates `{org}/{name}` — private, `auto_init` with default branch `main`,
 `main` protected (no direct push, merge by the `write` team) — and adds the bot as a collaborator
-with write. Idempotent: an existing repository the bot already collaborates on answers `200` with
-`created: false`; one it does not answers `409 taken`.
+with write. An existing service repository of the group answers `200` with `created: false`, and a
+bot that does not collaborate on it yet is made a collaborator with write first: that is how a
+group's second Mate joins its app, since the recipe's `buildFromGit` names the same repository for
+every Mate it creates (D24). `group` — the group repository — answers `409 taken`, made yet or not:
+a Mate's recipe reaches it only as a pull request from its bot's fork (D23).
 
 ```json
 { "fullName": "acme/api", "cloneUrl": "https://web-1234-3000.prg1.zerops.app/acme/api",

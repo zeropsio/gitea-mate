@@ -217,6 +217,17 @@ func (f *Fake) Repos(org string) []string {
 	return out
 }
 
+// Collaborators reads back a repository's collaborators and their permissions.
+func (f *Fake) Collaborators(org, repo string) map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]string{}
+	for login, permission := range f.collaborators[org+"/"+repo] {
+		out[login] = permission
+	}
+	return out
+}
+
 // BranchRules reads back a repository's branch protections.
 func (f *Fake) BranchRules(org, repo string) []gitea.BranchProtection {
 	f.mu.Lock()

@@ -6,9 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -180,23 +182,86 @@ func TestRepositoryIsIdempotent(t *testing.T) {
 	}
 }
 
+// A group's Mates work on one app: the recipe's buildFromGit names the same
+// repository for every Mate it creates, so a second registered Mate asking for
+// a service repository that exists joins it — write as a collaborator, the
+// access the Mate that asked first holds — and main stays behind pull requests.
+func TestASecondMateJoinsAServiceRepositoryOfItsGroup(t *testing.T) {
+	r := newRig(t)
+	if rr := r.repository(r.botToken(t), `{"name":"api"}`); rr.Code != http.StatusOK {
+		t.Fatalf("the first Mate: status = %d: %s", rr.Code, rr.Body)
+	}
+
+	ada := r.secondMate(t)
+	rr := r.repository(ada, `{"name":"api"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("the second Mate: status = %d: %s", rr.Code, rr.Body)
+	}
+	var joined repositoryResponse
+	decode(t, rr, &joined)
+	if joined.Created || joined.FullName != "acme/api" || joined.DefaultBranch != "main" ||
+		joined.CloneURL != "https://"+giteaHost+"/acme/api" {
+		t.Errorf("joined = %+v", joined)
+	}
+	collaborators := r.gitea.Collaborators("acme", "api")
+	if collaborators["mate-p-ada"] != "write" || collaborators["mate-p-fen"] != "write" {
+		t.Errorf("collaborators = %v, want both bots with write", collaborators)
+	}
+	rules := r.gitea.BranchRules("acme", "api")
+	if len(rules) != 1 || rules[0].RuleName != "main" || rules[0].EnablePush {
+		t.Errorf("rules = %+v", rules)
+	}
+}
+
+// secondMate registers Ada — a second Mate of the acme group — and seeds her
+// bot and its live token the way a pass of the rights loop leaves them.
+func (r *rig) secondMate(t *testing.T) string {
+	t.Helper()
+	var projects []zerops.Project
+	for _, id := range []string{giteaPrj, "p-fen", "p-prod", "p-stray"} {
+		project, ok := r.zerops.Project(id)
+		if !ok {
+			t.Fatalf("the rig has no project %s", id)
+		}
+		if id == giteaPrj {
+			project.TagList = append(slices.Clone(project.TagList), "mate:gm:g-acme:p-ada:mate")
+		}
+		projects = append(projects, project)
+	}
+	r.zerops.SetProjects(append(projects, zerops.Project{ID: "p-ada", Name: "Ada"})...)
+
+	const value = "value-mate-p-ada-1"
+	r.gitea.AddUser(gitea.User{Login: "mate-p-ada", Active: true, Restricted: true})
+	r.gitea.AddToken("mate-p-ada", mirror.TokenName("mate-p-ada", 1), value, mirror.BotScopes...)
+	return value
+}
+
 func TestRepositoryRefusals(t *testing.T) {
-	t.Run("a repository the bot does not collaborate on is taken", func(t *testing.T) {
-		r := newRig(t)
-		token := r.botToken(t)
-		if _, err := r.gitea.Client().CreateOrgRepo(context.Background(), "acme", gitea.NewRepo{Name: "group"}); err != nil {
-			t.Fatalf("CreateOrgRepo: %v", err)
-		}
-		rr := r.repository(token, `{"name":"group"}`)
-		if rr.Code != http.StatusConflict {
-			t.Fatalf("status = %d: %s", rr.Code, rr.Body)
-		}
-		var body ErrorBody
-		decode(t, rr, &body)
-		if body.Error != "taken" {
-			t.Errorf("error = %q", body.Error)
-		}
-	})
+	// The group repository is no Mate's to write, made yet or not: its recipe
+	// arrives as a pull request from the bot's fork (D23).
+	for _, made := range []bool{true, false} {
+		t.Run(fmt.Sprintf("the group repository is taken (made: %v)", made), func(t *testing.T) {
+			r := newRig(t)
+			token := r.botToken(t)
+			if made {
+				if _, err := r.gitea.Client().CreateOrgRepo(context.Background(), "acme", gitea.NewRepo{Name: "group"}); err != nil {
+					t.Fatalf("CreateOrgRepo: %v", err)
+				}
+			}
+			rr := r.repository(token, `{"name":"group"}`)
+			if rr.Code != http.StatusConflict {
+				t.Fatalf("status = %d: %s", rr.Code, rr.Body)
+			}
+			var body ErrorBody
+			decode(t, rr, &body)
+			if body.Error != "taken" {
+				t.Errorf("error = %q", body.Error)
+			}
+			if _, ok := r.gitea.Collaborators("acme", "group")["mate-p-fen"]; ok {
+				t.Errorf("the bot was made a collaborator on the group repository")
+			}
+		})
+	}
 
 	t.Run("a token Gitea does not know", func(t *testing.T) {
 		r := newRig(t)

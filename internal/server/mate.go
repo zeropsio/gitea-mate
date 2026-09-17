@@ -7,6 +7,7 @@ import (
 
 	"github.com/zeropsio/gitea-mate/internal/gitea"
 	"github.com/zeropsio/gitea-mate/internal/mirror"
+	"github.com/zeropsio/gitea-mate/internal/registry"
 	"github.com/zeropsio/gitea-mate/internal/roles"
 )
 
@@ -37,6 +38,12 @@ func (s *Server) handleRepository(w http.ResponseWriter, r *http.Request) {
 	}
 	if !repoNamePattern.MatchString(body.Name) {
 		WriteError(w, http.StatusBadRequest, "invalid_request", "a service repository is named ^[a-z][a-z0-9-]{0,39}$")
+		return
+	}
+	// The group repository is no Mate's to write, made yet or not: a Mate's
+	// recipe reaches it as a pull request from its bot's fork (D23).
+	if body.Name == registry.GroupRepo {
+		WriteError(w, http.StatusConflict, "taken", "the group repository takes a Mate's changes only as a pull request from its fork")
 		return
 	}
 
@@ -73,8 +80,11 @@ func (s *Server) handleRepository(w http.ResponseWriter, r *http.Request) {
 	existing, err := s.deps.Gitea.GetRepo(ctx, group.Slug, body.Name)
 	switch {
 	case err == nil:
-		// Idempotent: a repository this bot already collaborates on answers 200;
-		// one it does not is taken.
+		// Idempotent, and how a group's second Mate joins its app: a service
+		// repository that exists is the group's codebase — the recipe's
+		// buildFromGit names it for every Mate the recipe creates — so a Mate of
+		// the group that does not collaborate on it yet is given the write the
+		// first Mate holds. main stays behind pull requests either way.
 		collaborator, err := s.deps.Gitea.IsCollaborator(ctx, group.Slug, body.Name, who.Login)
 		if err != nil {
 			s.log.Error("the collaborators could not be read", "repo", existing.FullName, "err", err.Error())
@@ -82,8 +92,12 @@ func (s *Server) handleRepository(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !collaborator {
-			WriteError(w, http.StatusConflict, "taken", "that name already belongs to another repository of this group")
-			return
+			if err := s.deps.Gitea.AddCollaborator(ctx, group.Slug, body.Name, who.Login, "write"); err != nil {
+				s.log.Error("the bot could not join the repository", "repo", existing.FullName, "err", err.Error())
+				WriteError(w, http.StatusBadGateway, "upstream", "the Mate could not be given write on that repository")
+				return
+			}
+			s.log.Info("a Mate joined a repository of its group", "repo", existing.FullName, "bot", who.Login)
 		}
 		WriteJSON(w, http.StatusOK, repositoryResponse{
 			FullName: existing.FullName, CloneURL: s.cloneURL(existing.FullName),

@@ -427,7 +427,7 @@ func (c *Client) ListOrgRepos(ctx context.Context, org string) ([]Repo, error) {
 }
 
 // AddCollaborator is PUT /repos/{o}/{r}/collaborators/{login}. A bot writes as
-// a collaborator on the repositories it created, and nowhere else.
+// a collaborator on its group's service repositories, and nowhere else.
 func (c *Client) AddCollaborator(ctx context.Context, owner, repo, login, permission string) error {
 	in := struct {
 		Permission string `json:"permission"`
