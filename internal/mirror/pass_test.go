@@ -633,3 +633,48 @@ func TestAMatesRecipePullRequestIsMergedByThePass(t *testing.T) {
 		t.Errorf("the third pass plans:\n%s", mirror.Describe(third.Plan))
 	}
 }
+
+// A rule that exists is edited into shape, never created again: Gitea answers
+// a duplicate with 403, and the owner's org kept main's release-only merge
+// whitelist through every pass until this was measured (2026-09-17). Here a
+// group repo carries the pre-D23 rule; one pass puts the current one in place
+// and the next finds nothing to do.
+func TestAnExistingBranchRuleIsEditedIntoShape(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	if _, err := r.mirror.Pass(ctx); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	stale := gitea.BranchProtection{
+		RuleName: "main", EnablePush: false, EnableMergeWhitelist: true,
+		MergeWhitelistTeams: []string{"release"}, BlockAdminMergeOverride: true,
+	}
+	if _, err := r.gitea.Client().EditBranchProtection(ctx, "acme", "group", "main", stale); err != nil {
+		t.Fatalf("staling the rule: %v", err)
+	}
+
+	second, err := r.mirror.Pass(ctx)
+	if err != nil || len(second.Failures) != 0 {
+		t.Fatalf("second pass: %v %v", err, second.Failures)
+	}
+	rules, err := r.gitea.Client().ListBranchProtections(ctx, "acme", "group")
+	if err != nil {
+		t.Fatalf("rules: %v", err)
+	}
+	var main *gitea.BranchProtection
+	for i := range rules {
+		if rules[i].RuleName == "main" {
+			main = &rules[i]
+		}
+	}
+	if main == nil || main.EnablePush || main.EnableMergeWhitelist || main.BlockAdminMergeOverride {
+		t.Fatalf("main after the pass = %+v; want no direct push and no merge whitelist", main)
+	}
+	third, err := r.mirror.Pass(ctx)
+	if err != nil {
+		t.Fatalf("third pass: %v", err)
+	}
+	if third.Planned != 0 {
+		t.Errorf("the third pass plans:\n%s", mirror.Describe(third.Plan))
+	}
+}

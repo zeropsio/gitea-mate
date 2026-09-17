@@ -407,10 +407,22 @@ func (m *Mirror) perform(ctx context.Context, a Action) error {
 	case MergeRecipePullRequest:
 		return m.Gitea.MergePullRequest(ctx, a.Org, a.Repo, a.PullRequest, "")
 	case SetBranchRule:
-		_, err := m.Gitea.CreateBranchProtection(ctx, a.Org, a.Repo, *a.BranchRule)
-		if err != nil && gitea.Status(err) == 422 {
-			_, err = m.Gitea.EditBranchProtection(ctx, a.Org, a.Repo, a.BranchRule.RuleName, *a.BranchRule)
+		// Look before writing, as for a tag rule: Gitea 1.27.2 answers a
+		// duplicate rule with 403 "Branch protection already exist", not the
+		// 422 the old fallback waited for — measured on the owner's org
+		// 2026-09-17, where main kept its release-only whitelist through every
+		// pass and the recipe merge was refused 405 behind it.
+		existing, err := m.Gitea.ListBranchProtections(ctx, a.Org, a.Repo)
+		if err != nil {
+			return err
 		}
+		for _, r := range existing {
+			if r.RuleName == a.BranchRule.RuleName {
+				_, err := m.Gitea.EditBranchProtection(ctx, a.Org, a.Repo, r.RuleName, *a.BranchRule)
+				return err
+			}
+		}
+		_, err = m.Gitea.CreateBranchProtection(ctx, a.Org, a.Repo, *a.BranchRule)
 		return err
 	case SetTagRule:
 		existing, err := m.Gitea.ListTagProtections(ctx, a.Org, a.Repo)

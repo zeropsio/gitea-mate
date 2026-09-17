@@ -855,7 +855,8 @@ func (f *Fake) branchProtection(w http.ResponseWriter, r *http.Request, full, re
 		_ = json.NewDecoder(r.Body).Decode(&p)
 		for _, existing := range f.branchRules[full] {
 			if existing.RuleName == p.RuleName {
-				fail(w, http.StatusUnprocessableEntity, "rule already exists")
+				// As 1.27.2 answers a duplicate rule (measured 2026-09-17).
+				fail(w, http.StatusForbidden, "Branch protection already exist")
 				return
 			}
 		}

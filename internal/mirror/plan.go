@@ -646,14 +646,26 @@ func (p *planner) sortedMembers() []Member {
 }
 
 func sameBranchRule(have, want gitea.BranchProtection) bool {
-	return have.EnablePush == want.EnablePush &&
-		have.EnablePushWhitelist == want.EnablePushWhitelist &&
-		have.EnableMergeWhitelist == want.EnableMergeWhitelist &&
-		have.BlockAdminMergeOverride == want.BlockAdminMergeOverride &&
-		sameStrings(have.PushWhitelistTeams, want.PushWhitelistTeams) &&
-		sameStrings(have.PushWhitelistUsers, want.PushWhitelistUsers) &&
-		sameStrings(have.MergeWhitelistTeams, want.MergeWhitelistTeams) &&
-		sameStrings(have.MergeWhitelistUsers, want.MergeWhitelistUsers)
+	if have.EnablePush != want.EnablePush ||
+		have.EnablePushWhitelist != want.EnablePushWhitelist ||
+		have.EnableMergeWhitelist != want.EnableMergeWhitelist ||
+		have.BlockAdminMergeOverride != want.BlockAdminMergeOverride {
+		return false
+	}
+	// A list behind a switch that is off is not in force. Gitea keeps the old
+	// names on it, and they must not make a rule read as different on every
+	// pass (main's release list after D23 turned its merge whitelist off).
+	if want.EnablePushWhitelist &&
+		(!sameStrings(have.PushWhitelistTeams, want.PushWhitelistTeams) ||
+			!sameStrings(have.PushWhitelistUsers, want.PushWhitelistUsers)) {
+		return false
+	}
+	if want.EnableMergeWhitelist &&
+		(!sameStrings(have.MergeWhitelistTeams, want.MergeWhitelistTeams) ||
+			!sameStrings(have.MergeWhitelistUsers, want.MergeWhitelistUsers)) {
+		return false
+	}
+	return true
 }
 
 func sameTagRule(have, want gitea.TagProtection) bool {
