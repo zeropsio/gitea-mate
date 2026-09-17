@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -65,7 +64,7 @@ type personTokenBody struct {
 }
 
 func (s *Server) handlePersonToken(w http.ResponseWriter, r *http.Request) {
-	s.appCORS(w, r)
+	s.appCORS(w)
 	ctx := r.Context()
 
 	caller, err := s.deps.Throwaway.Check(ctx, bearerOf(r))
@@ -151,21 +150,18 @@ func (s *Server) ensurePerson(ctx context.Context, login string, caller throwawa
 	return err == nil, err
 }
 
-func (s *Server) handlePersonTokenPreflight(w http.ResponseWriter, r *http.Request) {
-	s.appCORS(w, r)
+func (s *Server) handlePersonTokenPreflight(w http.ResponseWriter, _ *http.Request) {
+	s.appCORS(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// appCORS allows the origins the Mate app runs from and nothing else. The
-// origin is matched literally: a runner in this project can reach this port,
-// and localhost is not 127.0.0.1.
-func (s *Server) appCORS(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Vary", "Origin")
-	origin := r.Header.Get("Origin")
-	if origin == "" || !slices.Contains(s.cfg.MateAppOrigins, origin) {
-		return
-	}
-	w.Header().Set("Access-Control-Allow-Origin", origin)
+// appCORS answers the app wherever it is served from: mate.zerops.io, a
+// developer's localhost, the desktop and mobile shells (D22). The origin
+// proves nothing here — the call carries a throwaway only the person's own
+// Zerops session could have minted, and no cookie is involved — so a browser
+// on any origin is told what it could have read with curl.
+func (s *Server) appCORS(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 }

@@ -57,7 +57,6 @@ func newPeopleRig(t *testing.T) *peopleRig {
 		GiteaWebhookSecret: "the-webhook-secret",
 		BrokerPublicURL:    "https://broker.example",
 		MateAppURL:         "https://app.example",
-		MateAppOrigins:     []string{"https://app.example", "http://localhost:5734"},
 		GiteaOIDCSourceID:  1,
 		AppTokenTTL:        12 * time.Hour,
 		RunnerQuietPeriod:  50 * time.Millisecond,
@@ -159,8 +158,8 @@ func TestAPersonGetsATokenThatActsAsThemAndAnAccountBoundToTheSource(t *testing.
 		t.Errorf("passes = %d, want 1", got)
 	}
 
-	// CORS: the app's origin is answered by name.
-	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example" {
+	// CORS: every origin, since the proof is the bearer (D22).
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Errorf("Access-Control-Allow-Origin = %q", got)
 	}
 	if got := rr.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(got, "Authorization") {
@@ -220,30 +219,27 @@ func TestAPersonWhoIsNotAnActiveMemberGetsNothing(t *testing.T) {
 	}
 }
 
-func TestPersonTokenAnswersCORSForTheAppsOriginsOnly(t *testing.T) {
+func TestPersonTokenAnswersEveryOrigin(t *testing.T) {
 	r := newPeopleRig(t)
-	for _, tc := range []struct {
-		origin string
-		want   string
-	}{
-		{"https://app.example", "https://app.example"},
-		{"http://localhost:5734", "http://localhost:5734"},
-		{"http://127.0.0.1:5734", ""},
-		{"https://evil.example", ""},
+	// D22: the proof is the bearer, never the origin. A Gitea made from
+	// mate.zerops.io is driven from a developer's localhost, and back.
+	for _, origin := range []string{
+		"https://mate.zerops.io", "http://localhost:5734", "http://127.0.0.1:5734", "https://elsewhere.example",
 	} {
 		req := httptest.NewRequest(http.MethodOptions, "/person/token", nil)
-		req.Header.Set("Origin", tc.origin)
+		req.Header.Set("Origin", origin)
 		rr := r.do(req)
 		if rr.Code != http.StatusNoContent {
-			t.Errorf("OPTIONS from %s = %d", tc.origin, rr.Code)
+			t.Errorf("OPTIONS from %s = %d", origin, rr.Code)
 		}
-		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != tc.want {
-			t.Errorf("origin %s: Access-Control-Allow-Origin = %q, want %q", tc.origin, got, tc.want)
+		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+			t.Errorf("origin %s: Access-Control-Allow-Origin = %q, want *", origin, got)
 		}
-		if tc.want != "" {
-			if got := rr.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "POST") {
-				t.Errorf("origin %s: methods = %q, want POST", tc.origin, got)
-			}
+		if got := rr.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "POST") {
+			t.Errorf("origin %s: methods = %q, want POST", origin, got)
+		}
+		if got := rr.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(got, "Authorization") {
+			t.Errorf("origin %s: headers = %q, want Authorization", origin, got)
 		}
 	}
 }

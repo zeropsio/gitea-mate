@@ -19,7 +19,6 @@ import (
 // other writes a host that does not resolve.
 var placeholders = map[string]string{
 	"__REGION__":            "prg1",
-	"__CORS__":              "http://localhost:5173",
 	"__ZEROPS_TOKEN__":      "token-value",
 	"__ZEROPS_CLIENT_ID__":  "y6tz5g4lQVaENpmlknyrRw",
 	"__ZEROPS_PROJECT_ID__": "m1VrZPJlSnAmnYAvfuEZEg",
@@ -73,11 +72,11 @@ func TestGiteaProjectImportHosts(t *testing.T) {
 	}
 }
 
-// The Mate app's origins are one list: `web` allows them, and the broker
-// registers the app's public OAuth2 client for a callback on each. A document
-// that fills __CORS__ for one service only would leave the app a client it
-// cannot use from half the shells it runs in.
-func TestGiteaProjectImportGivesBothServicesTheSameOrigins(t *testing.T) {
+// A Gitea answers every browser origin (D22): the app proves itself with a
+// bearer on every call, so no service carries an origin list, and a Gitea
+// made from one origin — mate.zerops.io, a developer's localhost — is driven
+// from any other. A document that listed origins again would pin it.
+func TestGiteaProjectImportCarriesNoOriginList(t *testing.T) {
 	var doc struct {
 		Services []struct {
 			Hostname string         `yaml:"hostname"`
@@ -87,19 +86,11 @@ func TestGiteaProjectImportGivesBothServicesTheSameOrigins(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(filledImport(t)), &doc); err != nil {
 		t.Fatalf("the import is not YAML: %v", err)
 	}
-	want := placeholders["__CORS__"]
-	got := map[string]any{}
 	for _, s := range doc.Services {
-		switch s.Hostname {
-		case "web":
-			got["web"] = s.Vault["GITEA_CORS_ALLOW_DOMAIN"]
-		case "broker":
-			got["broker"] = s.Vault["MATE_APP_ORIGINS"]
-		}
-	}
-	for _, hostname := range []string{"web", "broker"} {
-		if got[hostname] != want {
-			t.Errorf("%s got the origins %v, want %q", hostname, got[hostname], want)
+		for _, name := range []string{"GITEA_CORS_ALLOW_DOMAIN", "MATE_APP_ORIGINS"} {
+			if _, ok := s.Vault[name]; ok {
+				t.Errorf("%s carries %s: a Gitea answers every origin", s.Hostname, name)
+			}
 		}
 	}
 }

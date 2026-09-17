@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -151,50 +150,6 @@ func TestLoad(t *testing.T) {
 			name:    "a non-positive cap is refused",
 			mutate:  func(m map[string]string) { m["MIRROR_CAP"] = "0" },
 			wantErr: []string{"MIRROR_CAP is not a positive integer"},
-		},
-		{
-			name: "MATE_APP_ORIGINS is the list the broker answers CORS for",
-			mutate: func(m map[string]string) {
-				m["MATE_APP_ORIGINS"] = "https://app.example, http://localhost:5173 ,http://127.0.0.1:5173/"
-			},
-			check: func(t *testing.T, c *Config) {
-				want := []string{"https://app.example", "http://localhost:5173", "http://127.0.0.1:5173"}
-				if !slices.Equal(c.MateAppOrigins, want) {
-					t.Errorf("MateAppOrigins = %v, want %v", c.MateAppOrigins, want)
-				}
-			},
-		},
-		{
-			name:   "MATE_APP_URL is an origin of the app whether or not the list names it",
-			mutate: func(m map[string]string) { m["MATE_APP_ORIGINS"] = "http://localhost:5173" },
-			check: func(t *testing.T, c *Config) {
-				want := []string{"http://localhost:5173", "https://app.example"}
-				if !slices.Equal(c.MateAppOrigins, want) {
-					t.Errorf("MateAppOrigins = %v, want %v", c.MateAppOrigins, want)
-				}
-			},
-		},
-		{
-			name: "an unset list is MATE_APP_URL alone",
-			check: func(t *testing.T, c *Config) {
-				if !slices.Equal(c.MateAppOrigins, []string{"https://app.example"}) {
-					t.Errorf("MateAppOrigins = %v", c.MateAppOrigins)
-				}
-			},
-		},
-		{
-			name:    "an origin that is no origin at all is refused",
-			mutate:  func(m map[string]string) { m["MATE_APP_ORIGINS"] = "https://app.example,localhost:5173" },
-			wantErr: []string{"MATE_APP_ORIGINS carries an entry that is not an absolute origin"},
-		},
-		{
-			name:   "a repeated origin is listed once",
-			mutate: func(m map[string]string) { m["MATE_APP_ORIGINS"] = "https://app.example,https://app.example/" },
-			check: func(t *testing.T, c *Config) {
-				if !slices.Equal(c.MateAppOrigins, []string{"https://app.example"}) {
-					t.Errorf("MateAppOrigins = %v", c.MateAppOrigins)
-				}
-			},
 		},
 		{
 			name:   "LISTEN_ADDR is honoured when set",

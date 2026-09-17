@@ -70,14 +70,12 @@ export GITEA_ADMIN_TOKEN=…       GITEA_ADMIN_PASSWORD=…    GITEA_WEBHOOK_SEC
 export OIDC_CLIENT_SECRET=…      OIDC_SEED=…
 export BROKER_PUBLIC_URL=http://127.0.0.1:8080
 export MATE_APP_URL=http://127.0.0.1:5173
-export MATE_APP_ORIGINS=http://127.0.0.1:5173,http://localhost:5173
 go run ./cmd/broker
 ```
 
 Optional tunables: `LISTEN_ADDR` (`:8080`), `GITEA_ADMIN_USERNAME` (`admin`), `MIRROR_INTERVAL`
-(`3m`), `MIRROR_CAP` (`10`), `RUNNER_QUIET_PERIOD` (`15m`), `MATE_APP_ORIGINS` (`MATE_APP_URL`
-alone — every other origin the app runs from belongs in it; the broker answers the app's own calls
-with CORS for each), `GITEA_OIDC_SOURCE_ID` (`1`), `APP_TOKEN_TTL` (`12h`).
+(`3m`), `MIRROR_CAP` (`10`), `RUNNER_QUIET_PERIOD` (`15m`), `GITEA_OIDC_SOURCE_ID` (`1`),
+`APP_TOKEN_TTL` (`12h`).
 
 `GITEA_ADMIN_PASSWORD` is not in `docs/vocabulary.md`'s table but guide 1.3 names it: Gitea's token
 routes (`/users/{login}/tokens`) answer `401 auth required` to an API token, however privileged

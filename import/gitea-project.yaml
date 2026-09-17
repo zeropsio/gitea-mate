@@ -22,14 +22,11 @@
 #                          derived from it here: `api.app-{region}.zerops.io`
 #                          for the API and `{host}.{region}.zerops.app` for a
 #                          subdomain.
-#   __CORS__               every origin the Mate app runs from, comma-separated,
-#                          port included: ALLOW_DOMAIN matches a string, so
-#                          localhost does not cover 127.0.0.1 (measured
-#                          2026-09-16). The desktop and mobile shells' origins
-#                          belong here too. It is filled twice — `web` allows
-#                          those origins, the broker answers the app's own
-#                          calls with CORS for each — and the two lists are
-#                          the same list on purpose.
+#
+# No origin list: Gitea's [cors] and the broker's POST /person/token answer
+# every origin (D22). Every browser call carries the person's token in a
+# header and no cookie, so the origin proves nothing, and a Gitea made from
+# one origin — mate.zerops.io, a developer's localhost — is driven from any.
 #
 # `<@generateRandomString(<64>)>` is the platform's preprocessor: the value is
 # generated inside the import and never passes through the browser.
@@ -58,7 +55,6 @@ services:
         value: <@generateRandomString(<64>)>
         sensitive: true
       GITEA_DOMAIN: web-${zeropsSubdomainHost}-3000.__REGION__.zerops.app
-      GITEA_CORS_ALLOW_DOMAIN: __CORS__
       BROKER_PUBLIC_URL: https://broker-${zeropsSubdomainHost}-8080.__REGION__.zerops.app
       # Gitea's client secret for the `zerops` login source. The broker
       # generates nothing: the two services reference one another's values, so
@@ -118,5 +114,4 @@ services:
         sensitive: true
       BROKER_PUBLIC_URL: https://broker-${zeropsSubdomainHost}-8080.__REGION__.zerops.app
       MATE_APP_URL: __MATE_APP_URL__
-      MATE_APP_ORIGINS: __CORS__
       LISTEN_ADDR: :8080

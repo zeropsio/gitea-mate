@@ -65,7 +65,6 @@ app at registration — on a collision the app numbers it (`acme-2`, `acme-3`) �
 | Variable | Holds |
 |---|---|
 | `GITEA_DOMAIN` | `web-${zeropsSubdomainHost}-3000.{region}.zerops.app` — Gitea derives `ROOT_URL` from it |
-| `GITEA_CORS_ALLOW_DOMAIN` | every origin the Mate app runs from, comma-separated, spelled literally with the port (`[cors] ALLOW_DOMAIN` matches strings) |
 | `BROKER_PUBLIC_URL` | the broker's public origin — the OIDC issuer `admin-init.sh` registers |
 | `OIDC_CLIENT_SECRET` | reference `${broker_OIDC_CLIENT_SECRET}` |
 
@@ -88,8 +87,7 @@ Zerops ones.
 | `OIDC_CLIENT_SECRET` | import preprocessor | Gitea's client secret for the `zerops` source (`web` references it as `${broker_OIDC_CLIENT_SECRET}`) |
 | `OIDC_SEED` | import preprocessor | 64 random characters; the ES256 signing key is derived from it deterministically |
 | `BROKER_PUBLIC_URL` | import (plain) | `https://{BROKER_DOMAIN}` — the OIDC issuer |
-| `MATE_APP_URL` | the app, at import (plain) | the web app's origin; the sign-in consent page lives there |
-| `MATE_APP_ORIGINS` | the app, at import (plain) | every origin the app runs from, comma-separated — the same list `web` gets as `GITEA_CORS_ALLOW_DOMAIN`. `POST /person/token` answers them CORS, by name. `MATE_APP_URL` is one of them whether or not the value names it, so an unset variable is that origin alone |
+| `MATE_APP_URL` | the app, at import (plain) | the app origin this Gitea was made from; the consent page of Gitea's own sign-in lives there. A redirect target, not an allowlist: the app drives the broker and Gitea from any origin — `[cors]` and `POST /person/token` answer `*`, since every call carries a bearer and no cookie (D22) |
 | `LISTEN_ADDR` | import (plain) | `:8080` |
 | `GITEA_OIDC_SOURCE_ID` | — (plain, optional) | the id of Gitea's `zerops` login source, `1` unless set: the recipe adds it once at first boot as the only source, and Gitea 1.27 has no API that lists sources. A person the broker creates is bound to it |
 | `APP_TOKEN_TTL` | — (plain, optional) | how long a person's app token lives before the rights loop retires it, `12h` unless set |
