@@ -13,7 +13,10 @@
 #   __ZEROPS_TOKEN__       the broker's Zerops token: org READ_ONLY, BASIC_USER
 #                          on this project, and BASIC_USER on each group stage
 #                          and production as they are created. Minted by the
-#                          app as the owner; the only deploy key in the account.
+#                          app as the owner. It reads and decides; since D27 a
+#                          job deploys, on the environment's own deploy token,
+#                          which the app writes onto the broker service later
+#                          (MATE_DEPLOY_TOKEN_{HEX}, docs/vocabulary.md).
 #   __ZEROPS_CLIENT_ID__   the org id.
 #   __ZEROPS_PROJECT_ID__  this project's id — where the registry tags live.
 #   __MATE_APP_URL__       the web app's origin; the sign-in consent page.

@@ -65,7 +65,7 @@ Rules the broker enforces (guide 5.1, 5.3):
   the first source.
 - Production deploys only what an approved release tag lists (below). `sources: release` is the
   only value a production environment may have.
-- Only environments in this file exist to the broker; a `POST /deploy` for any other name is
+- Only environments in this file exist to the broker; a `POST /deploy/grant` for any other name is
   `unknown_environment`. The `service` must be a runtime service of the environment's tier.
 - The broker's Zerops token holds `BASIC_USER` on each `project` here — the app adds the grant
   when it adds the environment. An environment whose project the broker cannot reach is reported,
@@ -85,13 +85,14 @@ web 77ab0e1f2d3c4b5a69788796a5b4c3d2e1f0a9b8
 One line per service, `{service hostname} {full 40-hex sha}`; blank lines are tolerated, anything
 else — a short sha included, which would never compare equal to a version's name and so redeploy for
 ever — makes the tag unparseable and it is refused. A rollback is a new tag
-listing an earlier tag's commits — a tag name is never reused, and `POST /deploy` takes no ref.
+listing an earlier tag's commits — a tag name is never reused, and a grant is given for the commit
+protected state wants, never for one a job picks.
 
 When the tag's webhook arrives the broker re-checks the pusher's production rights in Zerops
 (the mirror lags a role change by minutes, so Gitea's team is not the last word) and writes a
 commit status on the tagged commit: context `mate/release/{tag}`, state `success` (approved) or
 `failure` (refused), description naming the pusher. A refused tag stays in Gitea as a record and
-deploys nothing, ever — a restart, a catch-up pass and a later `POST /deploy {production}` all
+deploys nothing, ever — a restart, a catch-up pass and a later `POST /deploy/grant {production}` all
 read the statuses, never the tag list. "Newest" among approved tags is by the tag's tagger date
 (`GET /repos/{o}/{r}/git/tags/{sha}`), ties broken by semver.
 
@@ -101,12 +102,14 @@ or no switch.
 
 ## What is deployed, and how the broker names it
 
-Every Zerops app version the broker creates is named by the full sha of the commit it was built
-from; production's by `{sha} {tag} {tagger login}`. The catch-up pass compares each environment's
-desired head with the sha in the deployed version's name and deploys the difference; the sha is
-always the first token of the name. Deploy outcomes are commit statuses on the service repository's
-commit: context `mate/deploy/{environment}/{service}`, state `pending` / `success` / `failure`,
-description = the Zerops app version id (or the platform's error).
+A job deploys, with `zcli push` (D27); the broker tells it what to call the version. Every Zerops
+app version is named by the full sha of the commit it was built from; production's by `{sha} {tag}
+{tagger login}`. The catch-up pass compares each environment's desired head with the sha in the
+deployed version's name and starts a job for the difference; the sha is always the first token of
+the name. Production is built from the release's commits — nothing is promoted from a stage. Deploy
+outcomes are commit statuses on the service repository's commit: context
+`mate/deploy/{environment}/{service}`, state `pending` (`dispatched`, then `deploying · job {id}`
+once a job holds the key) / `success` (`live`) / `failure` (the job's or the broker's reason).
 
 ## Recipe deltas
 

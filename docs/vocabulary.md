@@ -43,7 +43,7 @@ app at registration — on a collision the app numbers it (`acme-2`, `acme-3`) �
 | the site admin | `admin` (never `mate`) |
 | the OIDC source | `zerops` (callback `{ROOT_URL}/user/oauth2/zerops/callback`) |
 | protected branches | `main` on every repository: no direct push for anyone, merge by anyone with write (the `write` and `release` teams; on the group repo the broker merges a Mate's recipe pull request itself, D23); `env/*` on the group repo: the broker only; tags `v*` on the group repo: the `release` team. `main` is born with an initial commit, so a Mate's branch must descend from it (zcp fetches `main` before it branches) — an unrelated history merges only by rebase (measured 2026-09-16). The API merge is refused to the site admin when a merge whitelist is set; only a member of the whitelisted team merges |
-| commit statuses the broker writes | `mate/release/{tag}` on the tagged group-repo commit (`success` = approved, `failure` = refused — per tag, since several tags may point at one commit), `mate/deploy/{environment}/{service}` on the service repo's commit (`pending` / `success` / `failure`, description = the Zerops app version id) |
+| commit statuses the broker writes | `mate/release/{tag}` on the tagged group-repo commit (`success` = approved, `failure` = refused — per tag, since several tags may point at one commit), `mate/deploy/{environment}/{service}` on the service repo's commit (`pending` = `dispatched`, then `deploying · job {id}`; `success` = `live`; `failure` = why) |
 | the group repo's files | `environments.yaml` and the tier directories — `docs/group-repo.md` |
 | runner per group | registered at org scope, labels `ubuntu-latest:host,ubuntu-26.04:host`, named after its container hostname |
 | webhooks | one org hook per group, made by the broker, events `push`, `create`, `delete`, `pull_request`, `workflow_job`, `workflow_run`; secret `GITEA_WEBHOOK_SECRET` |
@@ -77,6 +77,7 @@ Zerops ones.
 | Variable | Set by | Holds |
 |---|---|---|
 | `MATE_ZEROPS_TOKEN` | the app, at import | the broker's Zerops token |
+| `MATE_DEPLOY_TOKEN_{HEX}` | the app, as the person who adds a stage or a production | that environment's deploy token (D27): `NO_ACCESS` in the org, `BASIC_USER` on the environment's project; `{HEX}` is the project id's bytes in upper-case hex. Read through the API at every grant, never from the container's own environment |
 | `MATE_ZEROPS_API_URL` | import (plain) | `https://api.app-prg1.zerops.io` (the region's API) |
 | `MATE_ZEROPS_CLIENT_ID` | the app, at import (plain) | the org id |
 | `MATE_ZEROPS_PROJECT_ID` | the app, at import (plain) | the Gitea project's id — where the registry lives |

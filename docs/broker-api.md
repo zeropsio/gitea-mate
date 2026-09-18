@@ -97,52 +97,81 @@ a Mate's recipe reaches it only as a pull request from its bot's fork (D23).
 `cloneUrl` never carries a `.git` suffix (the platform's clone preflight fails on one). The Mate
 pushes to a branch of its own (`mate/{bot name}`) and lands on `main` through pull requests.
 
-## `POST /deploy`, `GET /deploy/{id}` — a workflow asks for a deploy (guide 5.3, 5.4)
+## `POST /deploy/grant`, `POST /deploy/{id}/result` — a job asks to deploy (D27)
 
 Caller: a job on the group's runner, `Authorization: token <github.token>`.
 
-The `environment` a job asks for is a declared name, or a tier's name — `stage`, `production` — for
-the group's only environment of that tier: the workflow zcp writes into a service repository names
-the tier, while the app names an environment after its group (`todo-stage`), and every job's deploy
-answered `404 unknown_environment` until this resolved it (measured 2026-09-17). A tier with several
-environments needs one named; the refusal lists them.
+A job deploys, with `zcli push`; the broker decides whether it may and hands it the key. The job
+says which commit it has checked out and — when the broker dispatched it — which environment:
 
 ```json
-{ "environment": "stage", "service": "api", "repository": "acme/api" }
+{ "repository": "acme/api", "sha": "3f9c…", "environment": "acme-stage", "service": "api" }
 ```
+
+`environment` and `service` are optional. A job started by a push names neither and is granted
+whatever its branch feeds on push, one environment at a time, until the answer is no longer
+`granted`. A named `environment` is a declared name, or a tier's name — `stage`, `production` — for
+the group's only environment of that tier (a tier with several needs one named; the refusal lists
+them). `service` narrows a repository that builds several services to one.
 
 How the broker knows the caller (measured 2026-09-16): `GET /api/v1/user` with the token answers
-`login: gitea-actions`, `login_name: @gitea-actions/{taskId}` (`not_a_job` otherwise); then
+`login: gitea-actions`, `login_name: @gitea-actions/{taskId}` (`401 not_a_job` otherwise); then
 `GET /repos/{repository}/actions/jobs/{taskId}` with the same token must answer `200`
-(`wrong_repository` — it is `404` for every repository but the job's own, public ones included)
-and gives `run_id`, `head_sha`, `head_branch`. `GET /repos/{repository}` alone proves nothing.
-The workflow needs default permissions or `actions: read` for that call.
+(`403 wrong_repository` — it is `404` for every repository but the job's own, public ones included)
+and gives `run_id`. `GET /repos/{repository}` alone proves nothing. The workflow needs default
+permissions or `actions: read` for that call.
 
-The repository's org names the group; `environment` must be one of that group's environments
-(`404 unknown_environment`); `service` a service of it (`404 unknown_service`). `not_a_job` is `401`,
-`wrong_repository` `403`. **The caller picks the
-environment, never a commit or a ref:** a stage deploys the head of its source ref; production the
-commits the newest tag whose `mate/release/{tag}` status is `success` lists. The request is queued per environment,
-newest wins.
+The checks, in this order — nothing below the first refusal is read, and the key is the last thing
+touched:
 
-`202`:
+1. **The ref.** The job's run (`GET /repos/{o}/{r}/actions/runs/{run_id}`, as the broker) was
+   started by a `push` or a `workflow_dispatch`, on the repository's default branch, from the
+   repository itself. A branch's own workflow file, a pull request and a fork are unreviewed code:
+   `403 untrusted_ref`.
+2. **The environment.** The repository's org is a registered group (`404 unknown_group`); a named
+   environment exists (`404 unknown_environment`) and this repository builds a service of its tier
+   (`404 unknown_service`).
+3. **The commit.** Protected state decides what an environment wants: the head of its source for a
+   stage (the broker's merge into `env/{name}` for a mixed one), what the newest approved release
+   lists for production. A job holding another commit gets `superseded`; one holding a commit that
+   is already live gets `live`. Neither is a failure.
+4. **The gate.** `requireOnStage` unmet: `409 gate_not_met`.
+5. **One job per commit.** A grant for the same commit younger than twenty minutes: `in_progress`.
+6. **The runner.** Jobs share one container and are root in it. If any run of the org started since
+   the runner service was created fails check 1, the runner may hold a process that reads the next
+   job's key: `503 runner_tainted`, the runner is deleted and imported afresh, and the deploy is
+   dispatched again (`503 runner_unknown` when the runner cannot be found or aged).
+7. **The key.** The environment's deploy token, from the variable `MATE_DEPLOY_TOKEN_{HEX}` on the
+   broker's own service (`docs/vocabulary.md`): `424 no_deploy_token` when nobody minted one.
+
+`200`, always with a `status`:
 
 ```json
-{ "id": "d_8f2a…", "environment": "stage", "service": "api", "sha": "3f9c…", "status": "queued" }
+{ "id": "d_8f2a…", "status": "granted", "environment": "acme-stage", "service": "api", "sha": "3f9c…",
+  "token": "…", "projectId": "…", "serviceId": "…", "setup": "prod", "versionName": "3f9c…" }
 ```
 
-`GET /deploy/{id}` (same authentication, the same job or any job of the same repository):
+`status` is `granted`, `live`, `nothing`, `superseded` or `in_progress`; only `granted` carries a
+`token`, and the others carry a `message` and end the job green. The answer is `Cache-Control:
+no-store`. The token is in this answer and nowhere else the broker writes — no log, status or record.
+
+The job then runs, with the token in that one process's environment and a throwaway `HOME`:
+
+```
+zcli push --project-id … --service-id … --setup … --version-name … --workspace-state clean
+```
+
+`--workspace-state clean` pushes the commit's tree, never the working directory: a test step ran the
+repository's code before it. `POST /deploy/{id}/result` reports how it ended:
 
 ```json
-{ "id": "d_8f2a…", "status": "running", "sha": "3f9c…", "versionId": "…", "message": "" }
+{ "repository": "acme/api", "status": "success", "message": "" }
 ```
 
-`status` is `queued`, `running`, `active` or `failed`. Both answers are the same record — `environment`
-and `service` are always present, `versionId` appears once there is one. A request superseded by a
-newer one for the same environment keeps its record and follows the newer job's outcome. The broker
-keeps deploys in memory: after a restart an id it no longer holds is `404 unknown_deploy`, and the action then reads the commit status
-`mate/deploy/{environment}/{service}` on the sha instead — the same result, written by the broker
-on every outcome.
+`204`. A reported `success` is checked against what the service runs before the commit's status says
+so; public access is turned on for an HTTP service once its first deploy is live. The broker keeps
+grants in memory: after a restart an id it no longer holds is `404 unknown_deploy`, which the action
+ignores — the next pass writes the commit's status from what the service runs.
 
 ## `POST /hooks/gitea` — Gitea's webhooks (guide 1.6, 5.3, 5.5)
 
@@ -223,9 +252,11 @@ A restart forgets requests, codes and access tokens; the person signs in again.
 
 ## What the broker never does
 
-Takes a Zerops key from a caller · executes repository code (it moves archives from Gitea to
-Zerops; Zerops builds; the one `git` it runs merges refs into `env/*` in a throwaway directory with
-`core.hooksPath=/dev/null`) · reads a sibling's variables from the container (the two Gitea secrets it
+Takes a Zerops key from a caller · deploys (a job does, with `zcli push`, on a key the broker
+hands it — D27) · executes repository code or moves any (the one `git` it runs merges refs into
+`env/*` in a throwaway directory with `core.hooksPath=/dev/null`) · hands a key to a job of a
+branch's own workflow, to a job holding a commit protected state does not want, or to a runner that
+has run anything but default-branch jobs · reads a sibling's variables from the container (the two Gitea secrets it
 needs arrive as explicit `${web_…}` references) · trusts the private network · starts a pass
 because something a job can reach asked it to (there is no poke endpoint; the timer and the signed
 webhooks are the only triggers).

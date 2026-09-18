@@ -7,10 +7,12 @@ the only source of rights inside it.
   Gitea on a timer, signs people in to Gitea as an OIDC provider, hands each Mate its own Gitea bot
   token, hands each person a token that acts as them in Gitea on the same throwaway proof a Mate's
   door takes, imports
-  and wakes a group's Actions runner, and deploys what protected branches and tags allow: a stage
-  follows the head of its source branches, production the commits of the newest release tag whose
-  pusher it approved. It holds the account's only deploy key, and it executes no
-  repository code — it moves a Gitea commit archive to Zerops and Zerops builds. It has no
+  and wakes a group's Actions runner, and decides what is deployed — what protected branches and
+  tags allow: a stage follows the head of its source branches, production the commits of the newest
+  release tag whose pusher it approved. It deploys nothing itself (D27): a job of the repository's
+  own workflow runs `zcli push`, and the broker hands that job the environment's deploy token only
+  when the job runs the default branch's workflow, holds exactly the commit that is wanted, and
+  sits on a runner that has run nothing else. It executes no repository code and moves none. It has no
   database, cache or queue of its own: everything it must know already lives somewhere
   authoritative (the registry tags, the group repo's `main`, the commit statuses it writes and the
   commit sha in each app version's name), so a restart is always safe and the next pass catches up
@@ -46,13 +48,13 @@ internal/gitea      the Gitea admin client
 internal/registry   the group registry, parsed from the Gitea project's tags
 internal/mirror     the rights loop: plan Gitea writes, then apply them
 internal/environments the group repo's environments.yaml and its tiers
-internal/deploy     the decision, the per-environment queue and the executor
+internal/deploy     the decision, the per-environment queue, the dispatcher and the grant's terms
 internal/pipeline   the webhooks and the catch-up pass that drive them
 internal/oidc       the ES256 OIDC provider Gitea signs people in through
 internal/server     the routes
 gitea/              app.ini and the init scripts that run in the container
 import/             the service imports: the Gitea project, a group's runner
-actions/deploy      the composite action a workflow calls to deploy
+actions/deploy      the composite action a workflow deploys with: ask the broker, then zcli push
 ```
 
 ## Running the broker locally
@@ -101,9 +103,11 @@ and `broker` — and `import/runner.yaml` the one the broker sends when a group'
 appears. Both document their placeholders at the top. The project keeps the platform's default
 `envIsolation`, which is what stops a runner job reading Gitea's admin token.
 
-`actions/deploy/action.yml` is the composite action a workflow calls instead of holding a deploy
-credential: it asks the broker, polls, and falls back to the commit status if the broker forgot the
-deploy across a restart. `import/runner.yaml` is also embedded into the binary (`embed.go`), so the
+`actions/deploy/action.yml` is the composite action a workflow deploys with instead of holding a
+credential: `deploy.sh` tells the broker which commit the job checked out, is handed the
+environment's deploy token when the broker allows it, runs `zcli push --workspace-state clean` with
+that token in one process's environment and a throwaway `HOME`, and reports how it ended. An answer
+of `live`, `nothing`, `superseded` or `in_progress` ends the job green. `import/runner.yaml` is also embedded into the binary (`embed.go`), so the
 broker imports a runner with no file to find at run time and the document keeps one home.
 
 ## Tests
