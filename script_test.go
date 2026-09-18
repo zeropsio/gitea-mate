@@ -1,11 +1,15 @@
 package giteamate_test
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -245,5 +249,214 @@ func TestStartRefusesToServeWithoutTheZeropsSource(t *testing.T) {
 				t.Errorf("a refused boot must say why; output:\n%s", out)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// actions/deploy/deploy.sh (D27)
+// ---------------------------------------------------------------------------
+
+// deployRig is a checkout, a broker that answers what a test scripted, and a
+// `zcli` that writes down how it was called instead of deploying.
+type deployRig struct {
+	t       *testing.T
+	dir     string
+	sha     string
+	calls   string // where the stub zcli writes its arguments and environment
+	mu      sync.Mutex
+	grants  []string // the answers to POST /deploy/grant, in order; the last repeats
+	asked   []map[string]string
+	results []map[string]string
+	broker  *httptest.Server
+}
+
+func newDeployRig(t *testing.T, grants ...string) *deployRig {
+	t.Helper()
+	for _, tool := range []string{"bash", "curl", "git", "node"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip(tool + " is not on the path")
+		}
+	}
+	r := &deployRig{t: t, dir: t.TempDir(), grants: grants}
+
+	git := func(args ...string) string {
+		cmd := exec.Command("git", append([]string{"-C", r.dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q")
+	if err := os.WriteFile(filepath.Join(r.dir, "server.js"), []byte("// app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-q", "-m", "app")
+	r.sha = git("rev-parse", "HEAD")
+
+	bin := t.TempDir()
+	r.calls = filepath.Join(bin, "zcli.calls")
+	stub := "#!/usr/bin/env bash\n" +
+		"{ echo \"args: $*\"; echo \"token: ${ZEROPS_TOKEN:-}\"; echo \"home: $HOME\"; } >> " + r.calls + "\n" +
+		"exit ${ZCLI_EXIT:-0}\n"
+	if err := os.WriteFile(filepath.Join(bin, "zcli"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	r.broker = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		raw, _ := io.ReadAll(req.Body)
+		body := map[string]string{}
+		_ = json.Unmarshal(raw, &body)
+		body["authorization"] = req.Header.Get("Authorization")
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		switch {
+		case req.URL.Path == "/deploy/grant":
+			r.asked = append(r.asked, body)
+			answer := r.grants[min(len(r.asked), len(r.grants))-1]
+			status := http.StatusOK
+			if strings.HasPrefix(answer, "!") {
+				status, answer = http.StatusForbidden, answer[1:]
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(strings.ReplaceAll(answer, "SHA", r.sha)))
+		case strings.HasSuffix(req.URL.Path, "/result"):
+			body["path"] = req.URL.Path
+			r.results = append(r.results, body)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(r.broker.Close)
+	return r
+}
+
+func (r *deployRig) run(env ...string) (string, error) {
+	cmd := exec.Command("bash", "actions/deploy/deploy.sh")
+	cmd.Env = append(os.Environ(),
+		"BROKER="+r.broker.URL, "REPOSITORY=acme/api", "JOB_TOKEN=the-job-token", "WORKDIR="+r.dir)
+	cmd.Env = append(cmd.Env, env...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func (r *deployRig) zcliCalls() string {
+	raw, err := os.ReadFile(r.calls)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+const granted = `{"id":"d_1","status":"granted","environment":"acme-stage","service":"api","sha":"SHA",` +
+	`"token":"the-stage-key","projectId":"p-stage","serviceId":"svc-api","setup":"prod","versionName":"SHA"}`
+
+// TestTheDeployActionPushesWhatItWasGranted — the job says which commit it
+// holds, pushes that commit's tree on the key it is handed, reports, and — a
+// push's job names no environment — asks again until there is nothing left.
+func TestTheDeployActionPushesWhatItWasGranted(t *testing.T) {
+	r := newDeployRig(t, granted, `{"status":"nothing","message":"acme/api feeds nothing else"}`)
+	out, err := r.run()
+	if err != nil {
+		t.Fatalf("deploy.sh: %v\n%s", err, out)
+	}
+
+	if len(r.asked) != 2 || r.asked[0]["sha"] != r.sha || r.asked[0]["repository"] != "acme/api" ||
+		r.asked[0]["authorization"] != "token the-job-token" {
+		t.Fatalf("asked the broker %v", r.asked)
+	}
+	if _, named := r.asked[0]["environment"]; named {
+		t.Fatalf("a push's job named an environment: %v", r.asked[0])
+	}
+	calls := r.zcliCalls()
+	wantArgs := "args: push --project-id p-stage --service-id svc-api --setup prod --version-name " + r.sha + " --workspace-state clean"
+	if !strings.Contains(calls, wantArgs) || !strings.Contains(calls, "token: the-stage-key") {
+		t.Fatalf("zcli was called as:\n%s\nwant %q with the key in its environment", calls, wantArgs)
+	}
+	if strings.Contains(calls, "home: "+os.Getenv("HOME")+"\n") {
+		t.Fatal("zcli ran with the runner's own HOME; the key's config must land in a throwaway one")
+	}
+	if len(r.results) != 1 || r.results[0]["status"] != "success" || r.results[0]["path"] != "/deploy/d_1/result" {
+		t.Fatalf("reported %v", r.results)
+	}
+	if !strings.Contains(out, "::add-mask::the-stage-key") || strings.Count(out, "the-stage-key") != 1 {
+		t.Fatalf("the key must be masked, and appear nowhere else in the log:\n%s", out)
+	}
+	if !strings.Contains(out, "1 deployed") {
+		t.Fatalf("output:\n%s", out)
+	}
+}
+
+func TestTheDeployActionNamesWhatItWasDispatchedFor(t *testing.T) {
+	r := newDeployRig(t, granted)
+	if out, err := r.run("ENVIRONMENT=acme-stage", "SERVICE=api"); err != nil {
+		t.Fatalf("deploy.sh: %v\n%s", err, out)
+	}
+	// Told which environment, it deploys that one and asks for nothing more.
+	if len(r.asked) != 1 || r.asked[0]["environment"] != "acme-stage" || r.asked[0]["service"] != "api" {
+		t.Fatalf("asked the broker %v", r.asked)
+	}
+}
+
+func TestTheDeployActionEndsGreenWithNothingToDo(t *testing.T) {
+	for _, status := range []string{"live", "nothing", "superseded", "in_progress"} {
+		t.Run(status, func(t *testing.T) {
+			r := newDeployRig(t, `{"status":"`+status+`","message":"why"}`)
+			out, err := r.run()
+			if err != nil {
+				t.Fatalf("deploy.sh: %v\n%s", err, out)
+			}
+			if r.zcliCalls() != "" {
+				t.Fatalf("zcli ran with nothing granted:\n%s", r.zcliCalls())
+			}
+			if !strings.Contains(out, status+" — why") {
+				t.Fatalf("the job must say why it deployed nothing:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestTheDeployActionFailsOnARefusal(t *testing.T) {
+	r := newDeployRig(t, `!{"error":"untrusted_ref","message":"only the default branch's own workflow deploys"}`)
+	out, err := r.run()
+	if err == nil {
+		t.Fatalf("a refusal ended green:\n%s", out)
+	}
+	if !strings.Contains(out, "untrusted_ref") || !strings.Contains(out, "only the default branch") {
+		t.Fatalf("the refusal must be shown in the broker's words:\n%s", out)
+	}
+	if r.zcliCalls() != "" {
+		t.Fatal("zcli ran after a refusal")
+	}
+}
+
+func TestTheDeployActionReportsAFailedPush(t *testing.T) {
+	r := newDeployRig(t, granted)
+	out, err := r.run("ZCLI_EXIT=3")
+	if err == nil {
+		t.Fatalf("a failed push ended green:\n%s", out)
+	}
+	if len(r.results) != 1 || r.results[0]["status"] != "failure" || !strings.Contains(r.results[0]["message"], "exited 3") {
+		t.Fatalf("reported %v", r.results)
+	}
+}
+
+func TestTheDeployActionRefusesACheckoutThatMoved(t *testing.T) {
+	r := newDeployRig(t, strings.ReplaceAll(granted, `"sha":"SHA"`, `"sha":"0000000000000000000000000000000000000000"`))
+	out, err := r.run()
+	if err == nil {
+		t.Fatalf("a checkout that is not the granted commit was pushed:\n%s", out)
+	}
+	if r.zcliCalls() != "" {
+		t.Fatal("zcli ran for a commit the grant did not name")
+	}
+	if len(r.results) != 1 || r.results[0]["status"] != "failure" {
+		t.Fatalf("reported %v", r.results)
 	}
 }

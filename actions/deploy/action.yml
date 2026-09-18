@@ -1,17 +1,27 @@
-name: Deploy through the broker
+name: Deploy with zcli push
 description: >-
-  Asks the account's broker to deploy one service of one environment, and waits
-  for the outcome. The job carries no Zerops credential: the broker holds the
-  only deploy key, and decides what is deployed from protected state alone.
+  Deploys this commit to a group environment with `zcli push`. The job carries
+  no Zerops credential: it asks the account's broker, which hands it the
+  environment's deploy token only when the job runs the default branch's own
+  workflow and holds exactly the commit protected state wants there.
 author: Zerops Mate
 
 inputs:
   environment:
-    description: The environment to deploy, as environments.yaml names it.
-    required: true
+    description: >-
+      The environment to deploy, as environments.yaml names it, or a tier's
+      name for the group's only environment of it. Empty for a job started by a
+      push: it deploys whatever its branch feeds.
+    required: false
+    default: ""
   service:
-    description: The service of that environment to deploy.
-    required: true
+    description: The service of that environment to deploy. Empty for every one this repository builds.
+    required: false
+    default: ""
+  working-directory:
+    description: Where the repository is checked out.
+    required: false
+    default: "."
   broker:
     description: The broker's URL inside the Gitea project.
     required: false
@@ -20,108 +30,16 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Deploy ${{ inputs.service }} to ${{ inputs.environment }}
+    - name: zcli push
       shell: bash
       env:
         BROKER: ${{ inputs.broker }}
         ENVIRONMENT: ${{ inputs.environment }}
         SERVICE: ${{ inputs.service }}
+        WORKDIR: ${{ inputs.working-directory }}
         REPOSITORY: ${{ github.repository }}
-        SHA: ${{ github.sha }}
         # The job's own token. It names this job and this repository to the
         # broker and dies 0.1 s after the job ends, so it cannot be replayed.
         # It is never written to a file and never echoed.
         JOB_TOKEN: ${{ github.token }}
-      run: |
-        set -euo pipefail
-
-        api() {
-          # $1 method, $2 path, $3 body (optional). Prints the body, then the
-          # status code on its own last line.
-          local method=$1 path=$2 body=${3:-}
-          if [ -n "$body" ]; then
-            curl -sS -X "$method" "$BROKER$path" \
-              -H "Authorization: token $JOB_TOKEN" \
-              -H 'Content-Type: application/json' \
-              -d "$body" -w '\n%{http_code}'
-          else
-            curl -sS -X "$method" "$BROKER$path" \
-              -H "Authorization: token $JOB_TOKEN" -w '\n%{http_code}'
-          fi
-        }
-
-        field() { # field <json> <key>
-          printf '%s' "$1" | sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
-        }
-
-        request="{\"environment\":\"$ENVIRONMENT\",\"service\":\"$SERVICE\",\"repository\":\"$REPOSITORY\"}"
-        answer="$(api POST /deploy "$request")"
-        code="$(printf '%s' "$answer" | tail -n1)"
-        body="$(printf '%s' "$answer" | sed '$d')"
-
-        if [ "$code" != "202" ]; then
-          echo "the broker refused the deploy ($code): $body" >&2
-          exit 1
-        fi
-
-        id="$(field "$body" id)"
-        if [ -z "$id" ]; then
-          echo "the broker answered 202 with no id: $body" >&2
-          exit 1
-        fi
-        echo "deploy $id queued for $SERVICE on $ENVIRONMENT"
-
-        # Fifteen minutes, every five seconds.
-        deadline=$(( $(date +%s) + 900 ))
-        while [ "$(date +%s)" -lt "$deadline" ]; do
-          sleep 5
-
-          answer="$(api GET "/deploy/$id")"
-          code="$(printf '%s' "$answer" | tail -n1)"
-          body="$(printf '%s' "$answer" | sed '$d')"
-
-          if [ "$code" = "404" ]; then
-            # The broker keeps deploys in memory, so a restart forgets this id.
-            # The commit status it writes on every outcome says the same thing.
-            echo "the broker no longer knows $id; reading the commit status instead"
-            statuses="$(curl -sS "$GITHUB_API_URL/repos/$REPOSITORY/commits/$SHA/statuses" \
-              -H "Authorization: token $JOB_TOKEN")"
-            context="mate/deploy/$ENVIRONMENT/$SERVICE"
-            state="$(printf '%s' "$statuses" \
-              | tr '}' '\n' \
-              | grep -F "\"context\":\"$context\"" \
-              | head -n1 \
-              | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-            case "$state" in
-              success) echo "$context: success"; exit 0 ;;
-              failure|error) echo "$context: $state" >&2; exit 1 ;;
-              *) echo "$context: no outcome yet"; continue ;;
-            esac
-          fi
-
-          if [ "$code" != "200" ]; then
-            echo "the broker answered $code while polling: $body" >&2
-            exit 1
-          fi
-
-          status="$(field "$body" status)"
-          case "$status" in
-            active)
-              echo "$SERVICE is active on $ENVIRONMENT"
-              exit 0
-              ;;
-            failed)
-              echo "the deploy failed: $(field "$body" message)" >&2
-              exit 1
-              ;;
-            queued|running)
-              ;;
-            *)
-              echo "the broker answered an unknown status: $body" >&2
-              exit 1
-              ;;
-          esac
-        done
-
-        echo "the deploy did not finish within fifteen minutes" >&2
-        exit 1
+      run: ${{ github.action_path }}/deploy.sh
