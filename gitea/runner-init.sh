@@ -7,8 +7,10 @@
 # service's variables (ledger 2026-09-16), so a job cannot read the Gitea
 # admin's token or the database password from here.
 #
-# Nothing else about Zerops is on this container: no zcli, no ZEROPS_TOKEN, no
-# deploy key. A workflow that wants to deploy asks the broker.
+# zcli is on this container and no credential is: no ZEROPS_TOKEN, no deploy
+# key. A job that deploys asks the broker, which hands it one environment's key
+# for the length of one `zcli push` — and only while this runner has run
+# nothing but default-branch jobs since it was made (D27).
 #
 # https://docs.gitea.com/runner/registration/
 
@@ -17,6 +19,11 @@ set -euo pipefail
 cd /var/www
 export HOME="${HOME:-/home/zerops}"
 : "${RUNNER_BIN:=/var/www/bin/gitea-runner}"
+
+# Jobs run with the daemon's PATH; the build's pinned zcli goes onto it.
+if [ -x /var/www/bin/zcli ] && [ ! -e /usr/local/bin/zcli ]; then
+  sudo ln -s /var/www/bin/zcli /usr/local/bin/zcli
+fi
 
 for var in GITEA_INSTANCE_URL RUNNER_LABELS; do
   if [ -z "${!var:-}" ]; then

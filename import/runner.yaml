@@ -13,8 +13,10 @@
 #                 only the registration scope isolates them, and our runners
 #                 run jobs in host mode on one shared container.
 #
-# Nothing about Zerops reaches this service: no zcli, no token, no deploy key.
-# A workflow that wants to deploy asks the broker.
+# zcli is on this service and no credential is: a job that deploys asks the
+# broker, which hands it one environment's key for the length of one push, and
+# only while this runner has run nothing but default-branch jobs (D27). A
+# runner that ran a branch's own workflow is deleted and imported afresh.
 #
 # Idle, the service is stopped; the broker starts it on a `workflow_job`
 # `queued` webhook and stops it again after a quiet spell. Under load the

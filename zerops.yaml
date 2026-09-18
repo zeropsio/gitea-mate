@@ -125,6 +125,11 @@ zerops:
         # sha256 of gitea-runner-${GITEA_RUNNER_VERSION}-linux-amd64, from
         # https://dl.gitea.com/gitea-runner/3.5.0/gitea-runner-3.5.0-linux-amd64.sha256
         GITEA_RUNNER_SHA256: 16dc5c89ad5ac5496369642f01ed29c9bb130a2512e16a8cc3b400d9d0bfea73
+        # A job deploys with `zcli push` (D27). Pinned and checked like the
+        # runner itself: sha256 of zcli-linux-amd64, from
+        # https://github.com/zeropsio/zcli/releases/download/v1.1.2/checksums.txt
+        ZCLI_VERSION: v1.1.2
+        ZCLI_SHA256: b85d5cda8158d2be2e4eb42f4ed27ed0896f5d03ad31366c0da8fba48f49ffd7
       prepareCommands:
         - sudo apt-get update
         - sudo apt-get install -y --no-install-recommends ca-certificates curl
@@ -133,8 +138,12 @@ zerops:
         - curl -fsSL -o bin/gitea-runner "https://dl.gitea.com/gitea-runner/${GITEA_RUNNER_VERSION}/gitea-runner-${GITEA_RUNNER_VERSION}-linux-amd64"
         - printf '%s  bin/gitea-runner\n' "${GITEA_RUNNER_SHA256}" | sha256sum -c -
         - chmod 755 bin/gitea-runner
+        - curl -fsSL -o bin/zcli "https://github.com/zeropsio/zcli/releases/download/${ZCLI_VERSION}/zcli-linux-amd64"
+        - printf '%s  bin/zcli\n' "${ZCLI_SHA256}" | sha256sum -c -
+        - chmod 755 bin/zcli
       deployFiles:
         - bin/gitea-runner
+        - bin/zcli
         - gitea/runner-init.sh
     run:
       base: ubuntu@26.04
@@ -147,8 +156,10 @@ zerops:
       prepareCommands:
         - sudo apt-get update
         # Jobs run in host mode directly on the container, so ship what
-        # workflows need: git for checkouts, nodejs for JS actions. No zcli and
-        # no Zerops credential, ever.
+        # workflows need: git for checkouts, nodejs for JS actions, and zcli
+        # (the build's bin/zcli, linked onto the path by runner-init.sh) for
+        # the deploy step. No Zerops credential at rest, ever: a job is handed
+        # one environment's key by the broker for the length of one push.
         - sudo apt-get install -y --no-install-recommends git ca-certificates curl nodejs
       initCommands:
         - ./gitea/runner-init.sh
