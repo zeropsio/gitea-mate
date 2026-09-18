@@ -242,6 +242,11 @@ func Tags(r Registry) []string {
 	return out
 }
 
+// BrokerHostname is the broker's own service in the Gitea project, as the
+// import names it (import/gitea-project.yaml). The environments' deploy tokens
+// are secret variables on it (D27).
+const BrokerHostname = "broker"
+
 // RunnerHostname is the Zerops hostname of a group's Actions runner service:
 // "runner" plus the slug with its dashes removed, cut to 25 characters
 // (docs/vocabulary.md).

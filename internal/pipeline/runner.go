@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/registry"
 	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
@@ -138,4 +139,100 @@ func (p *Pipeline) EnsureRunner(ctx context.Context, org string) error {
 	}
 	p.log().Info("a group's runner was imported", "group", group.Slug, "hostname", hostname)
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// A runner's trust (D27)
+// ---------------------------------------------------------------------------
+
+// runnerTrust reports whether the group's runner has run nothing but the
+// default branches' own workflows since it was made.
+//
+// Jobs share one container and are root in it, so a branch's own workflow
+// could leave a process behind that reads the next job's key. Nothing on the
+// runner can be asked — it is the thing in doubt — so the answer is read from
+// Gitea: every run of the org that started since the service was created.
+// It fails closed: a runner that cannot be found or aged gets no key near it.
+func (p *Pipeline) runnerTrust(ctx context.Context, slug string) (zerops.Service, bool, string, error) {
+	hostname := registry.RunnerHostname(slug)
+	services, err := p.Zerops.Services(ctx, p.ClientID, p.GiteaProjectID)
+	if err != nil {
+		return zerops.Service{}, false, "", fmt.Errorf("the Gitea project's services: %w", err)
+	}
+	var runner zerops.Service
+	found := false
+	for _, service := range services {
+		if service.Name == hostname {
+			runner, found = service, true
+			break
+		}
+	}
+	if !found {
+		return zerops.Service{}, false, "", fmt.Errorf("the group has no runner service %s", hostname)
+	}
+	if runner.Created.IsZero() {
+		return runner, false, "", fmt.Errorf("the runner %s does not say when it was made", hostname)
+	}
+
+	runs, err := p.Gitea.ListOrgRunsSince(ctx, slug, runner.Created)
+	if err != nil {
+		return runner, false, "", fmt.Errorf("the org's runs: %w", err)
+	}
+	for _, run := range runs {
+		if run.StartedAt.IsZero() || deploy.TrustedRun(run) {
+			continue
+		}
+		return runner, false, fmt.Sprintf("run %d of %s ran %q's own workflow on the group's runner",
+			run.ID, run.Repository.FullName, run.HeadBranch), nil
+	}
+	return runner, true, "", nil
+}
+
+// replaceRunner throws a group's runner away and imports a fresh one, then
+// lets a pass start whatever was waiting for it. It returns at once: the work
+// runs on the broker's own context, never a request's.
+func (p *Pipeline) replaceRunner(slug string, runner zerops.Service) {
+	p.mu.Lock()
+	if p.replacing == nil {
+		p.replacing = map[string]bool{}
+	}
+	if p.replacing[runner.Name] {
+		p.mu.Unlock()
+		return
+	}
+	p.replacing[runner.Name] = true
+	p.mu.Unlock()
+
+	base := p.Base
+	if base == nil {
+		base = context.Background()
+	}
+	go func() {
+		defer func() {
+			p.mu.Lock()
+			delete(p.replacing, runner.Name)
+			p.mu.Unlock()
+		}()
+		process, err := p.Zerops.DeleteService(base, runner.ID)
+		if err != nil {
+			p.log().Warn("a tainted runner could not be deleted", "hostname", runner.Name, "err", err.Error())
+			return
+		}
+		final, err := p.Zerops.AwaitProcess(base, process.ID, p.PollInterval)
+		if err != nil || final.Status != zerops.ProcessFinished {
+			p.log().Warn("a tainted runner's deletion did not finish", "hostname", runner.Name)
+			return
+		}
+		p.log().Info("a tainted runner was deleted", "hostname", runner.Name)
+		if err := p.EnsureRunner(base, slug); err != nil {
+			p.log().Warn("a fresh runner could not be imported", "group", slug, "err", err.Error())
+			return
+		}
+		plan, err := p.Plan(base, slug)
+		if err != nil {
+			p.log().Warn("a group could not be caught up on its fresh runner", "group", slug, "err", err.Error())
+			return
+		}
+		_ = p.catchUpAll(base, plan)
+	}()
 }

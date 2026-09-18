@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zeropsio/gitea-mate/internal/gitea"
 )
@@ -752,6 +753,8 @@ func (f *Fake) repoRoutes(w http.ResponseWriter, r *http.Request, path string) {
 		f.branchProtection(w, r, full, strings.TrimPrefix(rest, "/branch_protections"))
 	case strings.HasPrefix(rest, "/tag_protections"):
 		f.tagProtection(w, r, full, strings.TrimPrefix(rest, "/tag_protections"))
+	case r.Method == "GET" && strings.HasPrefix(rest, "/actions/runs/"):
+		f.run(w, owner, strings.TrimPrefix(rest, "/actions/runs/"))
 	case r.Method == "POST" && strings.HasPrefix(rest, "/actions/workflows/") && strings.HasSuffix(rest, "/dispatches"):
 		f.dispatch(w, r, full, strings.TrimSuffix(strings.TrimPrefix(rest, "/actions/workflows/"), "/dispatches"))
 	case strings.HasPrefix(rest, "/statuses/"):
@@ -985,7 +988,7 @@ func (f *Fake) status(w http.ResponseWriter, r *http.Request, full, sha string) 
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s := gitea.CommitStatus{ID: f.id(), Context: in.Context, State: in.State, Description: in.Description, TargetURL: in.TargetURL}
+	s := gitea.CommitStatus{ID: f.id(), Context: in.Context, State: in.State, Description: in.Description, TargetURL: in.TargetURL, CreatedAt: time.Now()}
 	f.statuses[full+"@"+sha] = append(f.statuses[full+"@"+sha], s)
 	writeJSON(w, http.StatusCreated, s)
 }
@@ -1081,4 +1084,17 @@ func (f *Fake) dispatch(w http.ResponseWriter, r *http.Request, full, workflow s
 	}
 	f.Dispatches = append(f.Dispatches, line)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// run is GET /repos/{o}/{r}/actions/runs/{id}.
+func (f *Fake) run(w http.ResponseWriter, org, id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, run := range f.runs[org] {
+		if strconv.FormatInt(run.ID, 10) == id {
+			writeJSON(w, 200, run)
+			return
+		}
+	}
+	fail(w, http.StatusNotFound, "no such run")
 }

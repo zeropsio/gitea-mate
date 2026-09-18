@@ -113,8 +113,8 @@ func TestResolveAStageFollowsItsBranch(t *testing.T) {
 	if targets[0].Sha != apiSha || targets[0].VersionName != apiSha || targets[0].Setup != "api" {
 		t.Fatalf("api = %+v", targets[0])
 	}
-	if targets[0].PromoteFrom != nil || targets[0].Gate != nil {
-		t.Fatalf("a stage carries a promotion or a gate: %+v", targets[0])
+	if targets[0].Gate != nil {
+		t.Fatalf("a stage carries a gate: %+v", targets[0])
 	}
 }
 
@@ -166,9 +166,6 @@ func TestResolveProductionFollowsTheApprovedTag(t *testing.T) {
 	}
 	if api.Setup != "api-prod" {
 		t.Fatalf("api's setup is %q, want the production tier's", api.Setup)
-	}
-	if api.PromoteFrom == nil || api.PromoteFrom.Project != "prj-stage" || api.PromoteFrom.Setup != "api" {
-		t.Fatalf("api's promotion source is %+v", api.PromoteFrom)
 	}
 	if api.Gate == nil || api.Gate.Environment != "stage" || api.Gate.Project != "prj-stage" {
 		t.Fatalf("api's gate is %+v", api.Gate)

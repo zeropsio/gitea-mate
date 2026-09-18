@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/zeropsio/gitea-mate/internal/config"
-	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/gitea"
 	"github.com/zeropsio/gitea-mate/internal/oidc"
 	"github.com/zeropsio/gitea-mate/internal/zerops"
@@ -35,10 +34,8 @@ type Deps struct {
 	OIDC   *oidc.Provider
 	// Hooks takes every webhook the routes do not handle themselves.
 	Hooks Hooks
-	// Deploys is what POST /deploy and GET /deploy/{id} drive, and Records the
-	// broker's memory of its deploys.
+	// Deploys is what POST /deploy/grant and POST /deploy/{id}/result drive.
 	Deploys Deploys
-	Records *deploy.Records
 	// Runners imports a group's Actions runner the first time one of its
 	// workflows queues a job.
 	Runners RunnerImporter
@@ -95,9 +92,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /mate/repository", s.handleRepository)
 	}
 	mux.HandleFunc("POST /hooks/gitea", s.handleGiteaHook)
-	if s.deps.Deploys != nil && s.deps.Records != nil {
-		mux.HandleFunc("POST /deploy", s.handleDeploy)
-		mux.HandleFunc("GET /deploy/{id}", s.handleDeployStatus)
+	if s.deps.Deploys != nil {
+		mux.HandleFunc("POST /deploy/grant", s.handleDeployGrant)
+		mux.HandleFunc("POST /deploy/{id}/result", s.handleDeployResult)
 	}
 	if s.deps.Throwaway != nil && s.deps.Rights != nil && s.deps.Gitea != nil {
 		mux.HandleFunc("POST /person/token", s.handlePersonToken)

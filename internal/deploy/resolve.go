@@ -116,7 +116,7 @@ func (r *Resolver) production(ctx context.Context, plan Plan, env environments.E
 		return nil, nil, ErrNoRelease
 	}
 
-	promoteFrom, gate := r.stageBeside(plan, env)
+	gate := r.gateOf(plan, env)
 
 	var targets []Target
 	var problems []string
@@ -136,50 +136,26 @@ func (r *Resolver) production(ctx context.Context, plan Plan, env environments.E
 			Setup:       service.ZeropsSetup,
 			Gate:        gate,
 		}
-		if promoteFrom != nil {
-			if stageService, ok := promoteFrom.recipe.Service(service.Hostname); ok && stageService.Runtime() {
-				target.PromoteFrom = &PromoteSource{Project: promoteFrom.env.Project, Setup: stageService.ZeropsSetup}
-			}
-		}
 		targets = append(targets, target)
 	}
 	return targets, problems, nil
 }
 
-// stageSource is the stage a production deploy promotes from.
-type stageSource struct {
-	env    environments.Environment
-	recipe environments.Recipe
-}
-
-// stageBeside finds the stage a production environment promotes from, and the
-// gate it must satisfy. The gate is the one environments.yaml names; the
-// promotion source is that gate's stage when there is one, and otherwise the
-// group's first stage — a promotion is an optimisation, and taking the wrong
-// stage's artifact is impossible: the build sections are compared first.
-func (r *Resolver) stageBeside(plan Plan, env environments.Environment) (*stageSource, *Gate) {
-	recipe, hasStageTier := plan.Recipes[environments.TierStage]
-	if !hasStageTier {
-		return nil, nil
+// gateOf is the stage environments.yaml says a production commit must already
+// be live on (`requireOnStage`), or nil. A gate that names no declared stage is
+// reported and read as absent: the declaration is a person's to fix, and the
+// release verdict already stands between a tag and production.
+func (r *Resolver) gateOf(plan Plan, env environments.Environment) *Gate {
+	if env.RequireOnStage == "" {
+		return nil
 	}
-
-	var gate *Gate
-	if env.RequireOnStage != "" {
-		named, found := plan.File.Environment(env.RequireOnStage)
-		if !found || named.Tier != environments.TierStage {
-			r.log().Warn("an environment gates on a stage that is not declared",
-				"environment", env.Name, "gate", env.RequireOnStage)
-			return nil, nil
-		}
-		gate = &Gate{Environment: named.Name, Project: named.Project}
-		return &stageSource{env: named, recipe: recipe}, gate
+	named, found := plan.File.Environment(env.RequireOnStage)
+	if !found || named.Tier != environments.TierStage {
+		r.log().Warn("an environment gates on a stage that is not declared",
+			"environment", env.Name, "gate", env.RequireOnStage)
+		return nil
 	}
-
-	stages := plan.File.OfTier(environments.TierStage)
-	if len(stages) == 0 {
-		return nil, nil
-	}
-	return &stageSource{env: stages[0], recipe: recipe}, nil
+	return &Gate{Environment: named.Name, Project: named.Project}
 }
 
 // reportMerge writes the conflict where a person sees it: on the head of the

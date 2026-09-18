@@ -673,6 +673,9 @@ type CommitStatus struct {
 	State       string `json:"status"`
 	Description string `json:"description"`
 	TargetURL   string `json:"target_url"`
+	// CreatedAt is how old the word is: a deploy status that says "pending"
+	// is believed only for so long (deploy.DefaultPatience).
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // NewStatus is what CreateStatus sends. State is pending, success, error,
@@ -757,6 +760,15 @@ type Run struct {
 	StartedAt      time.Time `json:"started_at"`
 	Repository     Repo      `json:"repository"`
 	HeadRepository Repo      `json:"head_repository"`
+}
+
+// GetRun is GET /repos/{o}/{r}/actions/runs/{id}, as the broker: what started
+// a job, on which branch, from which repository. A job's own token proves
+// which run it belongs to (GetJob); the run is read with the broker's.
+func (c *Client) GetRun(ctx context.Context, owner, repo string, runID int64) (Run, error) {
+	var out Run
+	err := c.do(ctx, http.MethodGet, "/repos/"+esc(owner)+"/"+esc(repo)+"/actions/runs/"+itoa(runID), nil, &out, authToken)
+	return out, err
 }
 
 // maxRunPages bounds one read of an org's runs: fifty a page, newest first.

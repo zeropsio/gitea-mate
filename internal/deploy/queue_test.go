@@ -11,12 +11,11 @@ import (
 	"github.com/zeropsio/gitea-mate/internal/environments"
 )
 
-func job(slug, env, sha string, records ...string) deploy.Job {
+func job(slug, env, sha string) deploy.Job {
 	return deploy.Job{
 		Slug:        slug,
 		Environment: environments.Environment{Name: env, Tier: environments.TierStage},
 		Targets:     []deploy.Target{{Service: "api", Sha: sha}},
-		Records:     records,
 	}
 }
 
@@ -51,44 +50,6 @@ func TestQueueNewestWins(t *testing.T) {
 	defer mu.Unlock()
 	if strings.Join(ran, ",") != "aaa,ccc" {
 		t.Fatalf("the queue ran %v, want the first and then only the newest", ran)
-	}
-}
-
-func TestQueueCarriesADroppedRequestsRecords(t *testing.T) {
-	t.Parallel()
-
-	var mu sync.Mutex
-	var seen [][]string
-	release := make(chan struct{})
-	started := make(chan struct{}, 1)
-
-	queue := deploy.NewQueue(context.Background(), func(_ context.Context, j deploy.Job) {
-		mu.Lock()
-		seen = append(seen, j.Records)
-		first := len(seen) == 1
-		mu.Unlock()
-		if first {
-			started <- struct{}{}
-			<-release
-		}
-	}, nil)
-
-	queue.Submit(job("acme", "stage", "aaa", "d_1"))
-	<-started
-	queue.Submit(job("acme", "stage", "bbb", "d_2"))
-	queue.Submit(job("acme", "stage", "ccc", "d_3"))
-	close(release)
-	queue.Wait()
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(seen) != 2 {
-		t.Fatalf("the queue ran %d jobs, want 2", len(seen))
-	}
-	// Whoever was waiting on the dropped request follows the newer deploy
-	// rather than being told their request vanished.
-	if strings.Join(seen[1], ",") != "d_2,d_3" {
-		t.Fatalf("the second job answered for %v, want d_2 and d_3", seen[1])
 	}
 }
 
@@ -139,9 +100,10 @@ func TestQueueRunsTwoEnvironmentsAtOnce(t *testing.T) {
 func TestRecordsForgetTheOldest(t *testing.T) {
 	t.Parallel()
 	records := deploy.NewRecords(2)
-	first := records.New("stage", "api", "acme/api", "aaa")
-	second := records.New("stage", "api", "acme/api", "bbb")
-	third := records.New("stage", "api", "acme/api", "ccc")
+	grant := func(sha string) deploy.Record {
+		return records.New(deploy.Record{Environment: "stage", Service: "api", Repository: "acme/api", Sha: sha})
+	}
+	first, second, third := grant("aaa"), grant("bbb"), grant("ccc")
 
 	if _, ok := records.Get(first.ID); ok {
 		t.Fatal("the oldest record survived the limit")
@@ -151,13 +113,13 @@ func TestRecordsForgetTheOldest(t *testing.T) {
 			t.Fatalf("%s was forgotten", rec.ID)
 		}
 	}
-	if first.Status != deploy.StatusQueued {
-		t.Fatalf("a new record is %q, want queued", first.Status)
+	if first.Status != deploy.StatusGranted {
+		t.Fatalf("a new record is %q, want granted", first.Status)
 	}
 
-	records.Update(third.ID, func(r *deploy.Record) { r.Status = deploy.StatusActive; r.VersionID = "ver-1" })
+	records.Update(third.ID, func(r *deploy.Record) { r.Status = deploy.StatusSucceeded; r.Message = "live" })
 	back, _ := records.Get(third.ID)
-	if back.Status != deploy.StatusActive || back.VersionID != "ver-1" {
+	if back.Status != deploy.StatusSucceeded || back.Message != "live" {
 		t.Fatalf("Update left %+v", back)
 	}
 	// Updating one the store has forgotten is not an error: a deploy still
@@ -170,7 +132,7 @@ func TestRecordIDsAreDistinct(t *testing.T) {
 	records := deploy.NewRecords(0)
 	seen := map[string]bool{}
 	for i := 0; i < 200; i++ {
-		id := records.New("stage", "api", "acme/api", "aaa").ID
+		id := records.New(deploy.Record{Environment: "stage", Service: "api", Repository: "acme/api", Sha: "aaa"}).ID
 		if !strings.HasPrefix(id, "d_") {
 			t.Fatalf("id = %q, want a d_ prefix", id)
 		}

@@ -129,15 +129,16 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Since D27 the broker deploys nothing itself: a queued job is a workflow
+	// it starts, whose own job runs `zcli push` on a key the broker grants.
 	records := deploy.NewRecords(0)
-	executor := &deploy.Executor{
+	dispatcher := &deploy.Dispatcher{
 		Zerops:   zeropsClient,
 		Gitea:    giteaClient,
 		Log:      log,
 		ClientID: cfg.ZeropsClientID,
-		Records:  records,
 	}
-	queue := deploy.NewQueue(ctx, executor.Run, log)
+	queue := deploy.NewQueue(ctx, dispatcher.Run, log)
 	pipe := &pipeline.Pipeline{
 		Zerops:         zeropsClient,
 		Gitea:          giteaClient,
@@ -167,6 +168,7 @@ func run(log *slog.Logger) error {
 		Queue:        queue,
 		Records:      records,
 		RunnerImport: giteamate.RunnerImport,
+		Base:         ctx,
 	}
 	deployLoop := &pipeline.Loop{Pipeline: pipe, Log: log}
 
@@ -176,7 +178,6 @@ func run(log *slog.Logger) error {
 		OIDC:    provider,
 		Hooks:   pipe,
 		Deploys: pipe,
-		Records: records,
 		Runners: pipe,
 		// A person's own Gitea access: proved the way the OIDC consent is,
 		// placed by a pass before the answer.

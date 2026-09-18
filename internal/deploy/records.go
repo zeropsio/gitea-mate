@@ -6,36 +6,41 @@ import (
 	"sync"
 )
 
-// The statuses of docs/broker-api.md § GET /deploy/{id}.
+// A record's states: a grant was handed over, and what the job then reported.
 const (
-	StatusQueued  = "queued"
-	StatusRunning = "running"
-	StatusActive  = "active"
-	StatusFailed  = "failed"
+	StatusGranted   = "granted"
+	StatusSucceeded = "succeeded"
+	StatusFailed    = "failed"
 )
 
-// Record is one deploy as the endpoints answer it.
+// Record is one grant: what a job was allowed to deploy, kept so that its
+// report (POST /deploy/{id}/result) lands on the right commit without the job
+// naming one.
 type Record struct {
-	ID          string `json:"id"`
-	Environment string `json:"environment"`
-	Service     string `json:"service"`
-	Sha         string `json:"sha"`
-	Status      string `json:"status"`
-	VersionID   string `json:"versionId,omitempty"`
-	Message     string `json:"message"`
-	// Repository is the service repository the commit status is written on. It
-	// is not part of the answer; it is how a poll finds its own commit.
-	Repository string `json:"-"`
+	ID          string
+	Environment string
+	Service     string
+	Sha         string
+	Status      string
+	Message     string
+	// Repository is the service repository the commit status is written on,
+	// and the only repository whose jobs may report on this record.
+	Repository string
+	// ProjectID and ServiceID are where the deploy went, for what the broker
+	// does once it landed (public access).
+	ProjectID string
+	ServiceID string
 }
 
-// DefaultRecordLimit is how many deploys the broker remembers. Beyond it the
-// oldest is forgotten, which is the same thing a restart does — and the action
-// falls back to the commit status either way (docs/broker-api.md).
+// DefaultRecordLimit is how many grants the broker remembers. Beyond it the
+// oldest is forgotten, which is the same thing a restart does — a report on a
+// forgotten grant is a 404 the action shrugs at, and the next pass writes the
+// commit's status from what the service runs (docs/broker-api.md).
 const DefaultRecordLimit = 2000
 
-// Records is the broker's memory of its deploys. There is no database: a
-// restart forgets, an unknown id is 404, and the commit status the broker
-// wrote on every outcome says the same thing.
+// Records is the broker's memory of the grants it handed out. There is no
+// database: a restart forgets, an unknown id is 404, and the commit status
+// says the same thing once a pass has looked.
 type Records struct {
 	mu    sync.Mutex
 	byID  map[string]*Record
@@ -51,12 +56,10 @@ func NewRecords(limit int) *Records {
 	return &Records{byID: map[string]*Record{}, limit: limit}
 }
 
-// New records a queued deploy and returns it.
-func (r *Records) New(environment, service, repository, sha string) Record {
-	rec := Record{
-		ID: newID(), Environment: environment, Service: service,
-		Repository: repository, Sha: sha, Status: StatusQueued,
-	}
+// New records a grant and returns it with its id.
+func (r *Records) New(rec Record) Record {
+	rec.ID = newID()
+	rec.Status = StatusGranted
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	stored := rec

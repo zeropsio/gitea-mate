@@ -374,7 +374,10 @@ type Service struct {
 	ClientID  string `json:"clientId"`
 	Name      string `json:"name"`
 	Status    string `json:"status"`
-	Type      string `json:"serviceStackTypeId"`
+	// Created is when the service was made. For a group's runner it bounds
+	// which workflow runs could have touched it (D27).
+	Created time.Time `json:"created"`
+	Type    string    `json:"serviceStackTypeId"`
 	// TypeInfo names the type and version the service runs, as the search
 	// carries it. A Mate's container is the service whose version name starts
 	// with zcp@.

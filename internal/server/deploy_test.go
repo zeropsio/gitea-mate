@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -11,63 +12,42 @@ import (
 
 	"github.com/zeropsio/gitea-mate/internal/config"
 	"github.com/zeropsio/gitea-mate/internal/deploy"
-	"github.com/zeropsio/gitea-mate/internal/environments"
 	"github.com/zeropsio/gitea-mate/internal/gitea"
 	"github.com/zeropsio/gitea-mate/internal/gitea/giteatest"
 	"github.com/zeropsio/gitea-mate/internal/registry"
 	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
 
-// fakeDeploys stands in for the pipeline: it answers with a fixed plan and
-// records what it was asked to deploy, so the routes are judged on their
-// refusals and their answer, not on a whole account.
+// fakeDeploys stands in for the pipeline: it records what the routes proved
+// and passed on, and answers what a test armed it with — so the routes are
+// judged on the proof, the pass-through and how a refusal is spelled, not on a
+// whole account (internal/pipeline/grant_test.go judges the decision).
 type fakeDeploys struct {
-	plan  deploy.Plan
-	asked []string
+	grant    deploy.Grant
+	err      error
+	asked    []deploy.GrantRequest
+	reported []string
 }
 
-func (f *fakeDeploys) Plan(context.Context, string) (deploy.Plan, error) { return f.plan, nil }
-
-func (f *fakeDeploys) Deploy(_ context.Context, _ deploy.Plan, env environments.Environment, service string, records []string) error {
-	f.asked = append(f.asked, env.Name+"/"+service)
-	return nil
+func (f *fakeDeploys) Grant(_ context.Context, req deploy.GrantRequest) (deploy.Grant, error) {
+	f.asked = append(f.asked, req)
+	return f.grant, f.err
 }
 
-const deployEnvironments = `
-version: 1
-environments:
-  stage:
-    tier: stage
-    project: p-stage
-    sources: [main]
-`
-
-const deployTier = `
-services:
-  - hostname: db
-    type: postgresql@18
-  - hostname: api
-    type: nodejs@22
-    buildFromGit: https://git.example/acme/api
-    zeropsSetup: api
-`
+func (f *fakeDeploys) Result(_ context.Context, id, repository, outcome, message string) error {
+	f.reported = append(f.reported, id+" "+repository+" "+outcome+" "+message)
+	return f.err
+}
 
 type deployRig struct {
 	gitea   *giteatest.Fake
-	records *deploy.Records
 	deploys *fakeDeploys
 	handler http.Handler
 }
 
-// newDeployRig is one group with one stage, and a Gitea holding one running
-// job in acme/api.
+// newDeployRig is a Gitea holding one running job in acme/api (task 42 of run
+// 7), and a person's token that is no job at all.
 func newDeployRig(t *testing.T) *deployRig {
-	t.Helper()
-	return newDeployRigWith(t, deployEnvironments)
-}
-
-// newDeployRigWith is the rig over one environments document.
-func newDeployRigWith(t *testing.T, environmentsYAML string) *deployRig {
 	t.Helper()
 	g := giteatest.New(t)
 	g.AddRepo("acme/api", "main")
@@ -78,24 +58,13 @@ func newDeployRigWith(t *testing.T, environmentsYAML string) *deployRig {
 	g.AddToken("gitea-actions", "job-42", "the-job-token", "all")
 	// The job is 200 only for the repository it really runs in.
 	g.AddJob("acme", "api", "42", gitea.Job{ID: 42, RunID: 7, HeadSHA: "3f9c", HeadBranch: "main"})
-	// A person's token, which is not a job at all.
 	g.AddUser(gitea.User{ID: 5, Login: "u-jan", Active: true})
 	g.AddToken("u-jan", "personal", "a-persons-token", "all")
 
-	file, err := environments.Parse([]byte(environmentsYAML))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	recipe, err := environments.ParseRecipe([]byte(deployTier))
-	if err != nil {
-		t.Fatalf("ParseRecipe: %v", err)
-	}
-
-	deploys := &fakeDeploys{plan: deploy.Plan{
-		Slug: "acme", File: file,
-		Recipes: map[environments.Tier]environments.Recipe{environments.TierStage: recipe},
+	deploys := &fakeDeploys{grant: deploy.Grant{
+		ID: "d_1", Status: deploy.GrantGranted, Environment: "stage", Service: "api", Sha: "3f9c",
+		Token: "the-stage-key", ProjectID: "p-stage", ServiceID: "svc-api", Setup: "api", VersionName: "3f9c",
 	}}
-	records := deploy.NewRecords(0)
 	cfg := &config.Config{
 		ZeropsClientID: clientID, ZeropsProjectID: giteaPrj,
 		GiteaURL: g.URL(), GiteaPublicURL: "https://" + giteaHost,
@@ -103,26 +72,14 @@ func newDeployRigWith(t *testing.T, environmentsYAML string) *deployRig {
 		BrokerPublicURL:    "https://broker.example",
 		MateAppURL:         "https://app.example",
 	}
-	s := New(cfg, slog.New(slog.DiscardHandler), Deps{
-		Gitea: g.Client(), Deploys: deploys, Records: records,
-	})
+	s := New(cfg, slog.New(slog.DiscardHandler), Deps{Gitea: g.Client(), Deploys: deploys})
 	t.Cleanup(s.Close)
-	return &deployRig{gitea: g, records: records, deploys: deploys, handler: s.Handler()}
+	return &deployRig{gitea: g, deploys: deploys, handler: s.Handler()}
 }
 
-func (r *deployRig) post(token, body string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, "/deploy", strings.NewReader(body))
+func (r *deployRig) post(path, token, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "token "+token)
-	}
-	rr := httptest.NewRecorder()
-	r.handler.ServeHTTP(rr, req)
-	return rr
-}
-
-func (r *deployRig) get(token, id string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, "/deploy/"+id, nil)
 	if token != "" {
 		req.Header.Set("Authorization", "token "+token)
 	}
@@ -140,155 +97,121 @@ func errorOf(t *testing.T, rr *httptest.ResponseRecorder) string {
 	return body.Error
 }
 
-func TestDeployQueuesAndAnswersTheRecord(t *testing.T) {
+const grantBody = `{"repository":"acme/api","sha":"3f9c","environment":"stage","service":"api"}`
+
+// TestAGrantPassesOnWhatTheJobProvedNotWhatItSaid — the owner, the repository,
+// the run and the task come from Gitea's answer to the job's own token; the
+// commit and the environment are the job's word, which the pipeline judges.
+func TestAGrantPassesOnWhatTheJobProvedNotWhatItSaid(t *testing.T) {
 	r := newDeployRig(t)
-
-	rr := r.post("the-job-token", `{"environment":"stage","service":"api","repository":"acme/api"}`)
-	if rr.Code != http.StatusAccepted {
-		t.Fatalf("POST /deploy = %d %s, want 202", rr.Code, rr.Body.String())
-	}
-	var record deploy.Record
-	if err := json.Unmarshal(rr.Body.Bytes(), &record); err != nil {
-		t.Fatalf("the answer is not a record: %s", rr.Body.String())
-	}
-	if !strings.HasPrefix(record.ID, "d_") || record.Environment != "stage" || record.Service != "api" {
-		t.Fatalf("the answer is %+v", record)
-	}
-	if record.Status != deploy.StatusQueued {
-		t.Fatalf("status = %q, want queued", record.Status)
-	}
-	if len(r.deploys.asked) != 1 || r.deploys.asked[0] != "stage/api" {
-		t.Fatalf("the pipeline was asked for %v", r.deploys.asked)
-	}
-
-	// The same job can read it back.
-	rr = r.get("the-job-token", record.ID)
+	rr := r.post("/deploy/grant", "the-job-token", grantBody)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("GET /deploy/{id} = %d %s, want 200", rr.Code, rr.Body.String())
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	want := deploy.GrantRequest{Owner: "acme", Repo: "api", RunID: 7, TaskID: "42",
+		Sha: "3f9c", Environment: "stage", Service: "api"}
+	if len(r.deploys.asked) != 1 || r.deploys.asked[0] != want {
+		t.Fatalf("the pipeline was asked %+v, want %+v", r.deploys.asked, want)
+	}
+	var grant deploy.Grant
+	if err := json.Unmarshal(rr.Body.Bytes(), &grant); err != nil || grant != r.deploys.grant {
+		t.Fatalf("answered %s", rr.Body.String())
+	}
+	// The one answer that carries a key.
+	if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
 	}
 }
 
-func TestDeployRefusals(t *testing.T) {
+func TestAGrantsRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		token  string
 		body   string
+		err    error
 		status int
 		code   string
 	}{
+		{name: "no token at all", body: grantBody, status: http.StatusUnauthorized, code: "not_a_job"},
+		{name: "a person's token", token: "a-persons-token", body: grantBody, status: http.StatusUnauthorized, code: "not_a_job"},
 		{
-			"no token at all",
-			"", `{"environment":"stage","service":"api","repository":"acme/api"}`,
-			http.StatusUnauthorized, "not_a_job",
+			name: "a job claiming another repository", token: "the-job-token",
+			body:   `{"repository":"acme/other","sha":"3f9c"}`,
+			status: http.StatusForbidden, code: "wrong_repository",
 		},
 		{
-			"a token Gitea does not know",
-			"nonsense", `{"environment":"stage","service":"api","repository":"acme/api"}`,
-			http.StatusUnauthorized, "not_a_job",
+			name: "a job that names no commit", token: "the-job-token",
+			body:   `{"repository":"acme/api"}`,
+			status: http.StatusBadRequest, code: "invalid_request",
+		},
+		{name: "a body that is not one", token: "the-job-token", body: `{`, status: http.StatusBadRequest, code: "invalid_request"},
+		{
+			name: "what the pipeline refuses, as it spelled it", token: "the-job-token", body: grantBody,
+			err:    deploy.Refuse(http.StatusForbidden, "untrusted_ref", "only the default branch's own workflow deploys"),
+			status: http.StatusForbidden, code: "untrusted_ref",
 		},
 		{
-			"a person's token, not a job's",
-			"a-persons-token", `{"environment":"stage","service":"api","repository":"acme/api"}`,
-			http.StatusUnauthorized, "not_a_job",
-		},
-		{
-			"a job claiming a repository it does not run in",
-			"the-job-token", `{"environment":"stage","service":"api","repository":"acme/other"}`,
-			http.StatusForbidden, "wrong_repository",
-		},
-		{
-			"an environment the group does not declare",
-			"the-job-token", `{"environment":"canary","service":"api","repository":"acme/api"}`,
-			http.StatusNotFound, "unknown_environment",
-		},
-		{
-			"a service the tier does not carry",
-			"the-job-token", `{"environment":"stage","service":"ghost","repository":"acme/api"}`,
-			http.StatusNotFound, "unknown_service",
-		},
-		{
-			"a managed service, which is never deployed to",
-			"the-job-token", `{"environment":"stage","service":"db","repository":"acme/api"}`,
-			http.StatusNotFound, "unknown_service",
-		},
-		{
-			"a body missing the repository",
-			"the-job-token", `{"environment":"stage","service":"api"}`,
-			http.StatusBadRequest, "invalid_request",
-		},
-		{
-			"a body that is not json",
-			"the-job-token", `{`,
-			http.StatusBadRequest, "invalid_request",
+			name: "a fault of the broker's own", token: "the-job-token", body: grantBody,
+			err:    errors.New("boom"),
+			status: http.StatusInternalServerError, code: "internal",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newDeployRig(t)
-			rr := r.post(tc.token, tc.body)
-			if rr.Code != tc.status {
-				t.Fatalf("POST /deploy = %d %s, want %d", rr.Code, rr.Body.String(), tc.status)
+			r.deploys.err = tc.err
+			rr := r.post("/deploy/grant", tc.token, tc.body)
+			if rr.Code != tc.status || errorOf(t, rr) != tc.code {
+				t.Fatalf("answered %d %s, want %d %s", rr.Code, rr.Body.String(), tc.status, tc.code)
 			}
-			if got := errorOf(t, rr); got != tc.code {
-				t.Fatalf("the refusal is %q, want %q", got, tc.code)
-			}
-			if len(r.deploys.asked) != 0 {
-				t.Fatalf("a refused request still queued %v", r.deploys.asked)
+			if strings.Contains(rr.Body.String(), "the-stage-key") {
+				t.Fatal("a refusal carried the key")
 			}
 		})
 	}
 }
 
-// TestDeployStatusAfterARestart is the contract's fallback: the broker keeps
-// deploys in memory, so an id it no longer holds is 404 and the action reads
-// the commit status instead.
-func TestDeployStatusAfterARestart(t *testing.T) {
+// TestAJobsReport — the report goes through the same proof, and carries the
+// repository Gitea proved rather than any the job could name for another's
+// deploy.
+func TestAJobsReport(t *testing.T) {
 	r := newDeployRig(t)
-	rr := r.post("the-job-token", `{"environment":"stage","service":"api","repository":"acme/api"}`)
-	if rr.Code != http.StatusAccepted {
-		t.Fatalf("POST /deploy = %d", rr.Code)
+	rr := r.post("/deploy/d_1/result", "the-job-token", `{"repository":"acme/api","status":"success","message":""}`)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
 	}
-	var record deploy.Record
-	_ = json.Unmarshal(rr.Body.Bytes(), &record)
-
-	// A restart: a fresh rig holds nothing, and the same id is gone.
-	restarted := newDeployRig(t)
-	rr = restarted.get("the-job-token", record.ID)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("GET /deploy/{id} after a restart = %d %s, want 404", rr.Code, rr.Body.String())
+	if len(r.deploys.reported) != 1 || r.deploys.reported[0] != "d_1 acme/api success " {
+		t.Fatalf("reported %v", r.deploys.reported)
 	}
-	if got := errorOf(t, rr); got != "unknown_deploy" {
-		t.Fatalf("the refusal is %q", got)
-	}
-}
-
-func TestDeployStatusProvesItsCaller(t *testing.T) {
-	r := newDeployRig(t)
-	rr := r.post("the-job-token", `{"environment":"stage","service":"api","repository":"acme/api"}`)
-	var record deploy.Record
-	_ = json.Unmarshal(rr.Body.Bytes(), &record)
 
 	for _, tc := range []struct {
 		name   string
 		token  string
+		body   string
+		err    error
 		status int
 		code   string
 	}{
-		{"no token", "", http.StatusUnauthorized, "not_a_job"},
-		{"a person's token", "a-persons-token", http.StatusUnauthorized, "not_a_job"},
+		{name: "a status that is neither", token: "the-job-token", body: `{"repository":"acme/api","status":"maybe"}`, status: http.StatusBadRequest, code: "invalid_request"},
+		{name: "a person's token", token: "a-persons-token", body: `{"repository":"acme/api","status":"success"}`, status: http.StatusUnauthorized, code: "not_a_job"},
+		{
+			name: "a grant the broker no longer holds", token: "the-job-token",
+			body:   `{"repository":"acme/api","status":"success"}`,
+			err:    deploy.Refuse(http.StatusNotFound, "unknown_deploy", "the broker no longer holds d_1"),
+			status: http.StatusNotFound, code: "unknown_deploy",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rr := r.get(tc.token, record.ID)
-			if rr.Code != tc.status {
-				t.Fatalf("GET /deploy/{id} = %d %s, want %d", rr.Code, rr.Body.String(), tc.status)
-			}
-			if got := errorOf(t, rr); got != tc.code {
-				t.Fatalf("the refusal is %q, want %q", got, tc.code)
+			r := newDeployRig(t)
+			r.deploys.err = tc.err
+			rr := r.post("/deploy/d_1/result", tc.token, tc.body)
+			if rr.Code != tc.status || errorOf(t, rr) != tc.code {
+				t.Fatalf("answered %d %s, want %d %s", rr.Code, rr.Body.String(), tc.status, tc.code)
 			}
 		})
 	}
 }
 
-// fakeRunners records the groups whose runner was asked for.
+// fakeRunners records which groups were asked for a runner.
 type fakeRunners struct {
 	asked []string
 	err   error
@@ -324,44 +247,4 @@ func TestAQueuedJobImportsTheGroupsFirstRunner(t *testing.T) {
 	if !r.zerops.Started("svc-runner") {
 		t.Fatal("the existing runner was not started")
 	}
-}
-
-// A workflow asks for a tier's name (zcp writes `environment: stage`) while
-// the app names the environment after the group (`todo-stage`): on the owner's
-// run of 2026-09-17 every job's deploy answered 404 and only the catch-up pass
-// deployed. A tier's name is its only environment; two of a tier need naming.
-func TestDeployTakesATiersNameForItsOnlyEnvironment(t *testing.T) {
-	const oneStage = `
-version: 1
-environments:
-  acme-stage:
-    tier: stage
-    project: p-stage
-    sources: [main]
-`
-	const twoStages = oneStage + `  acme-stage-2:
-    tier: stage
-    project: p-stage-2
-    sources: [main]
-`
-	t.Run("the tier's only environment", func(t *testing.T) {
-		r := newDeployRigWith(t, oneStage)
-		rr := r.post("the-job-token", `{"environment":"stage","service":"api","repository":"acme/api"}`)
-		if rr.Code != http.StatusAccepted {
-			t.Fatalf("POST /deploy = %d %s", rr.Code, rr.Body.String())
-		}
-		if len(r.deploys.asked) != 1 || r.deploys.asked[0] != "acme-stage/api" {
-			t.Fatalf("asked = %v, want acme-stage/api", r.deploys.asked)
-		}
-	})
-	t.Run("two environments of the tier", func(t *testing.T) {
-		r := newDeployRigWith(t, twoStages)
-		rr := r.post("the-job-token", `{"environment":"stage","service":"api","repository":"acme/api"}`)
-		if rr.Code != http.StatusNotFound || errorOf(t, rr) != "unknown_environment" {
-			t.Fatalf("POST /deploy = %d %s", rr.Code, rr.Body.String())
-		}
-		if !strings.Contains(rr.Body.String(), "acme-stage-2") || len(r.deploys.asked) != 0 {
-			t.Fatalf("the refusal names both and queues nothing: %s %v", rr.Body.String(), r.deploys.asked)
-		}
-	})
 }

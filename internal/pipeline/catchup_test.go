@@ -34,32 +34,36 @@ func TestTheLoopCatchesUp(t *testing.T) {
 	w.queue.Wait()
 
 	if result.Deploys != 1 {
-		t.Fatalf("the pass deployed %d services, want one", result.Deploys)
+		t.Fatalf("the pass found %d services behind, want one", result.Deploys)
 	}
-	versions := w.zerops.AppVersions("svc-stage-api")
-	if len(versions) != 1 {
-		t.Fatalf("stage holds %d app versions, want one", len(versions))
+	if got := w.dispatched("stage"); len(got) != 1 || got[0] != second {
+		t.Fatalf("the pass started jobs for %v, want one for the second sha", got)
 	}
-	if versions[0].Name != second {
-		t.Fatalf("stage deployed %q, want the second sha", versions[0].Name)
+	if len(w.zerops.AppVersions("svc-stage-api")) != 0 {
+		t.Fatal("the broker deployed something itself; since D27 a job does")
 	}
 
-	// A second pass finds the environment where it should be and deploys
-	// nothing.
+	// The job lands it. A second pass finds the environment where it should
+	// be and starts nothing.
+	w.land("svc-stage-api", second)
 	result, err = w.pipe.Pass(ctx)
 	if err != nil {
 		t.Fatalf("Pass: %v", err)
 	}
 	w.queue.Wait()
 	if result.Deploys != 0 {
-		t.Fatalf("a settled environment deployed %d services", result.Deploys)
+		t.Fatalf("a settled environment was found %d services behind", result.Deploys)
 	}
-	if len(w.zerops.AppVersions("svc-stage-api")) != 1 {
-		t.Fatal("a settled environment was deployed again")
+	if len(w.dispatched("stage")) != 1 {
+		t.Fatal("a settled environment got another job")
 	}
 }
 
-func TestAPushDeploysTheEnvironmentsItFeeds(t *testing.T) {
+// TestAPushToTheDefaultBranchIsTheRepositorysOwnJob — the workflow runs on a
+// push to the default branch by itself and deploys what that branch alone
+// feeds, so the broker starts nothing for it (D27); a second job for the same
+// commit would only be told "in progress".
+func TestAPushToTheDefaultBranchIsTheRepositorysOwnJob(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
 	ctx := context.Background()
@@ -69,15 +73,40 @@ func TestAPushDeploysTheEnvironmentsItFeeds(t *testing.T) {
 		t.Fatalf("Push: %v", err)
 	}
 	w.queue.Wait()
+	if got := w.gitea.Dispatches; len(got) != 0 {
+		t.Fatalf("the broker started %v for a push the repository's own workflow runs on", got)
+	}
+}
 
-	versions := w.zerops.AppVersions("svc-stage-api")
-	if len(versions) != 1 || versions[0].Name != second {
-		t.Fatalf("stage holds %+v, want one version of the second sha", versions)
+// TestAPushToAnotherSourceBranchGetsAJob — the workflow does not run on a
+// branch that is not the default one, so a stage that follows such a branch is
+// the broker's to start, on the default branch's workflow and at that branch's
+// commit.
+func TestAPushToAnotherSourceBranchGetsAJob(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	ctx := context.Background()
+	w.gitea.AddFile("acme/group", "main", "environments.yaml", `
+version: 1
+environments:
+  stage:
+    tier: stage
+    project: prj-stage
+    sources: [develop]
+`)
+	w.gitea.SetBranch("acme/api", "develop", second)
+
+	if err := w.pipe.Push(ctx, "acme", pushDelivery("acme/api", "refs/heads/develop")); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	w.queue.Wait()
+	if got := w.dispatched("stage"); len(got) != 1 || got[0] != second {
+		t.Fatalf("the broker started jobs for %v, want one for develop's head", got)
 	}
 	// A push to a source branch never reaches production: production deploys
 	// what an approved tag lists, and nothing else.
-	if len(w.zerops.AppVersions("svc-prod-api")) != 0 {
-		t.Fatal("a push deployed production")
+	if len(w.dispatched("production")) != 0 {
+		t.Fatal("a push started a production job")
 	}
 }
 
@@ -105,8 +134,8 @@ func TestPushesTheBrokerIgnores(t *testing.T) {
 				t.Fatalf("Push: %v", err)
 			}
 			w.queue.Wait()
-			if len(w.zerops.AppVersions("svc-stage-api")) != 0 {
-				t.Fatal("that push deployed something")
+			if len(w.gitea.Dispatches) != 0 {
+				t.Fatalf("that push started %v", w.gitea.Dispatches)
 			}
 		})
 	}
@@ -131,8 +160,8 @@ environments:
 		t.Fatalf("Push: %v", err)
 	}
 	w.queue.Wait()
-	if len(w.zerops.AppVersions("svc-stage-api")) != 0 {
-		t.Fatal("an on-request environment deployed on a push")
+	if len(w.gitea.Dispatches) != 0 {
+		t.Fatal("an on-request environment got a job on a push")
 	}
 
 	// Asked for by name, it deploys — and so does the catch-up pass, which is
@@ -142,12 +171,12 @@ environments:
 		t.Fatalf("Plan: %v", err)
 	}
 	env, _ := plan.File.Environment("stage")
-	if err := w.pipe.Deploy(ctx, plan, env, "api", nil); err != nil {
+	if err := w.pipe.Deploy(ctx, plan, env, "api"); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 	w.queue.Wait()
-	if len(w.zerops.AppVersions("svc-stage-api")) != 1 {
-		t.Fatal("an on-request environment did not deploy when it was asked")
+	if len(w.dispatched("stage")) != 1 {
+		t.Fatal("an on-request environment got no job when it was asked")
 	}
 }
 
@@ -187,10 +216,10 @@ func TestTheDeployedShaIsReadFromTheServicesEnvironment(t *testing.T) {
 	}
 	w.queue.Wait()
 	if result.Deploys != 0 {
-		t.Fatalf("the pass deployed %d services, want none", result.Deploys)
+		t.Fatalf("the pass found %d services behind, want none", result.Deploys)
 	}
-	if len(w.zerops.AppVersions("svc-stage-api")) != 1 {
-		t.Fatal("a service already at the head was deployed again")
+	if len(w.gitea.Dispatches) != 0 {
+		t.Fatal("a service already at the head got a job")
 	}
 
 	// A production-shaped name is read the same way: the sha is the first token.

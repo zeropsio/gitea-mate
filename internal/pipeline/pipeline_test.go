@@ -3,6 +3,7 @@ package pipeline_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,10 +90,8 @@ func newWorld(t *testing.T) *world {
 	g.AddFile("acme/group", "main", "3 — Stage/import.yaml", stageImport)
 	g.AddFile("acme/group", "main", "4 — Small Production/import.yaml", productionImport)
 	g.SetBranch("acme/api", "main", first)
-	for _, sha := range []string{first, second} {
-		g.AddFile("acme/api", sha, "zerops.yaml", apiZeropsYaml)
-		g.SetArchive("acme/api", sha, []byte("archive of "+sha))
-	}
+	// The workflow zcp writes, on the default branch: what the broker starts.
+	g.AddFile("acme/api", "main", ".gitea/workflows/zerops.yml", "on: [push, workflow_dispatch]\n")
 
 	z := zeropstest.New(t, orgID)
 	z.AddIdentity("broker", zeropstest.Identity{UserInfoID: "tok-broker", TokenID: "tok-broker", ClientID: orgID})
@@ -121,11 +120,8 @@ func newWorld(t *testing.T) *world {
 	client := g.Client()
 	zclient := z.Client("broker")
 	records := deploy.NewRecords(0)
-	executor := &deploy.Executor{
-		Zerops: zclient, Gitea: client, ClientID: orgID, Records: records,
-		PollInterval: time.Millisecond, Timeout: 5 * time.Second,
-	}
-	queue := deploy.NewQueue(context.Background(), executor.Run, nil)
+	dispatcher := &deploy.Dispatcher{Zerops: zclient, Gitea: client, ClientID: orgID}
+	queue := deploy.NewQueue(context.Background(), dispatcher.Run, nil)
 	return &world{
 		gitea: g, zerops: z, queue: queue,
 		pipe: &pipeline.Pipeline{
@@ -134,6 +130,28 @@ func newWorld(t *testing.T) *world {
 			Queue:    queue, Records: records,
 		},
 	}
+}
+
+// dispatched is the commits whose deploy job the broker started for one
+// environment, in order (D27: it starts jobs, it deploys nothing).
+func (w *world) dispatched(environment string) []string {
+	var shas []string
+	for _, line := range w.gitea.Dispatches {
+		if !strings.Contains(line, " environment="+environment+" ") {
+			continue
+		}
+		if _, sha, ok := strings.Cut(line, " sha="); ok {
+			shas = append(shas, sha)
+		}
+	}
+	return shas
+}
+
+// land is a job's `zcli push` settling: the service now runs that commit.
+func (w *world) land(serviceID, versionName string) {
+	w.zerops.AddAppVersion(zerops.AppVersion{
+		ID: "ver-" + serviceID + "-" + versionName[:4], ServiceStackID: serviceID, Status: zerops.AppVersionActive,
+	}, versionName)
 }
 
 func (w *world) statuses(t *testing.T, repo, sha string) map[string]string {
@@ -199,7 +217,7 @@ func TestAReleaseIsJudgedOnItsPusher(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("mate/release/v1.0.0 = %q, want %q", got, tc.want)
 			}
-			deployed := len(w.zerops.AppVersions("svc-prod-api")) > 0
+			deployed := len(w.dispatched("production")) > 0
 			if deployed != (tc.want == deploy.ReleaseApproved) {
 				t.Fatalf("production deployed = %v, with the verdict %q", deployed, got)
 			}
@@ -237,7 +255,7 @@ func TestARefusedTagStaysRefusedOnARedelivery(t *testing.T) {
 	if verdicts != 1 {
 		t.Fatalf("%d verdicts were written, want one", verdicts)
 	}
-	if len(w.zerops.AppVersions("svc-prod-api")) != 0 {
+	if len(w.dispatched("production")) != 0 {
 		t.Fatal("a refused tag deployed")
 	}
 }
@@ -314,7 +332,7 @@ func TestAReleaseIsJudgedOnThePeeledCommit(t *testing.T) {
 				t.Fatal("a verdict landed on the tag object instead of the commit")
 			}
 			// And the tag's commits deployed.
-			if len(w.zerops.AppVersions("svc-prod-api")) != 1 {
+			if len(w.dispatched("production")) != 1 {
 				t.Fatal("the approved release did not deploy")
 			}
 		})
@@ -358,7 +376,7 @@ func TestARefusedTagStaysRefusedAcrossBothPaths(t *testing.T) {
 	if verdicts != 1 {
 		t.Fatalf("%d verdicts were written, want one", verdicts)
 	}
-	if len(w.zerops.AppVersions("svc-prod-api")) != 0 {
+	if len(w.dispatched("production")) != 0 {
 		t.Fatal("a refused tag deployed")
 	}
 }

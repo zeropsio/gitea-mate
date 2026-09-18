@@ -54,6 +54,15 @@ type Pipeline struct {
 	// where it is. Zero means the client's default.
 	PollInterval time.Duration
 
+	// Base is the context work that outlives a request runs on — replacing a
+	// runner, above all. Nil means the background.
+	Base context.Context
+	// Patience is how long a granted deploy is left alone before another job
+	// may take the same commit; [deploy.DefaultPatience] when zero. Now is
+	// time.Now when nil.
+	Patience time.Duration
+	Now      func() time.Time
+
 	// seenRecipe is the blob sha of each tier's import.yaml the last pass saw,
 	// keyed "{slug}/{tier}". It is the only thing this package remembers, and
 	// a restart deliberately starts empty: the first pass after one reports
@@ -66,6 +75,8 @@ type Pipeline struct {
 	seenBlocks   map[string]map[string]string
 	reconciled   map[string]bool
 	runnerImport map[string]bool
+	// replacing is the runners being thrown away right now, by hostname.
+	replacing map[string]bool
 }
 
 func (p *Pipeline) log() *slog.Logger {
@@ -115,52 +126,28 @@ func (p *Pipeline) Plan(ctx context.Context, slug string) (deploy.Plan, error) {
 	return plan, nil
 }
 
-// Deploy resolves an environment and queues the work. service may be empty for
-// every runtime service of the tier. records are the deploy records the job
-// answers for.
+// Deploy resolves an environment and queues the work: since D27, the jobs that
+// deploy it (deploy.Dispatcher). service may be empty for every runtime
+// service of the tier.
 //
 // Nothing a caller passes reaches a commit: the shas come from the resolver,
 // which reads protected state alone.
-func (p *Pipeline) Deploy(ctx context.Context, plan deploy.Plan, env environments.Environment, service string, records []string) error {
+func (p *Pipeline) Deploy(ctx context.Context, plan deploy.Plan, env environments.Environment, service string) error {
 	targets, problems, err := p.Resolver.Resolve(ctx, plan, env, service)
 	for _, problem := range problems {
 		p.log().Warn("an environment could not be fully resolved", "group", plan.Slug, "problem", problem)
 	}
 	if err != nil {
 		if errors.Is(err, deploy.ErrNoRelease) {
-			p.Records.UpdateAll(records, func(r *deploy.Record) {
-				r.Status = deploy.StatusFailed
-				r.Message = "this group has no approved release yet"
-			})
 			return nil
 		}
-		p.Records.UpdateAll(records, func(r *deploy.Record) {
-			r.Status = deploy.StatusFailed
-			r.Message = err.Error()
-		})
 		return err
 	}
 	if len(targets) == 0 {
-		p.Records.UpdateAll(records, func(r *deploy.Record) {
-			r.Status = deploy.StatusFailed
-			r.Message = "nothing to deploy: " + summarise(problems)
-		})
+		p.log().Info("nothing to deploy", "group", plan.Slug, "environment", env.Name, "why", summarise(problems))
 		return nil
 	}
-
-	// The records carry the sha the resolver decided before the job is queued,
-	// so the 202 answers with the commit a caller could not have named.
-	p.Records.UpdateAll(records, func(r *deploy.Record) {
-		for _, target := range targets {
-			if r.Service == "" || r.Service == target.Service {
-				r.Sha = target.Sha
-				break
-			}
-		}
-	})
-	p.Queue.Submit(deploy.Job{
-		Slug: plan.Slug, Environment: env, Targets: targets, Records: records,
-	})
+	p.Queue.Submit(deploy.Job{Slug: plan.Slug, Environment: env, Targets: targets})
 	return nil
 }
 

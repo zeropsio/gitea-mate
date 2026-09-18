@@ -24,6 +24,13 @@ func (f *Fake) AddFile(fullName, ref, filePath, body string) {
 	f.files[fullName+"@"+ref+":"+strings.Trim(filePath, "/")] = body
 }
 
+// RemoveFile takes a file away at a ref, as a repository that never had it.
+func (f *Fake) RemoveFile(fullName, ref, filePath string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.files, fullName+"@"+ref+":"+filePath)
+}
+
 // SetBranch points a branch at a commit.
 func (f *Fake) SetBranch(fullName, branch, sha string) {
 	f.mu.Lock()

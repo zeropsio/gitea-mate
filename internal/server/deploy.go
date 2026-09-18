@@ -5,21 +5,19 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/zeropsio/gitea-mate/internal/deploy"
-	"github.com/zeropsio/gitea-mate/internal/environments"
 )
 
 // Deploys is the deploy side of the broker, as the two endpoints need it. It is
 // an interface so the routes are testable without the pipeline's whole world.
 type Deploys interface {
-	// Plan reads one group's declarations and tiers from its group repo.
-	Plan(ctx context.Context, slug string) (deploy.Plan, error)
-	// Deploy resolves an environment and queues the work. Nothing the caller
-	// passes ever reaches a commit.
-	Deploy(ctx context.Context, plan deploy.Plan, env environments.Environment, service string, records []string) error
+	// Grant decides whether a proved job may deploy, and hands it the
+	// environment's key when it may. A refusal is a *deploy.Refusal.
+	Grant(ctx context.Context, req deploy.GrantRequest) (deploy.Grant, error)
+	// Result is the job's report on a grant, by a job of repository.
+	Result(ctx context.Context, id, repository, outcome, message string) error
 }
 
 // RunnerImporter imports a group's Actions runner the first time one of its
@@ -38,6 +36,7 @@ const actionsPrefix = "@gitea-actions/"
 // job is a proved caller of the deploy endpoints.
 type job struct {
 	TaskID     string
+	RunID      int64
 	Repository string
 	Owner      string
 	Repo       string
@@ -81,117 +80,95 @@ func (s *Server) proveJob(w http.ResponseWriter, r *http.Request, claimed string
 		return job{}, false
 	}
 	return job{
-		TaskID: taskID, Repository: claimed, Owner: owner, Repo: repo,
+		TaskID: taskID, RunID: details.RunID, Repository: claimed, Owner: owner, Repo: repo,
 		HeadSHA: details.HeadSHA, HeadBranch: details.HeadBranch,
 	}, true
 }
 
 // ---------------------------------------------------------------------------
-// POST /deploy
+// POST /deploy/grant
 // ---------------------------------------------------------------------------
 
-type deployRequest struct {
+type grantRequest struct {
+	Repository  string `json:"repository"`
+	Sha         string `json:"sha"`
 	Environment string `json:"environment"`
 	Service     string `json:"service"`
-	Repository  string `json:"repository"`
 }
 
-// handleDeploy is docs/broker-api.md § POST /deploy. The caller picks the
-// environment and the service, never a commit and never a ref.
-func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
-	var body deployRequest
+// handleDeployGrant is docs/broker-api.md § POST /deploy/grant (D27). The job
+// says which commit it holds and, when it was dispatched, which environment;
+// it never picks a commit — the one it holds is deployed only if protected
+// state wants exactly that one.
+func (s *Server) handleDeployGrant(w http.ResponseWriter, r *http.Request) {
+	var body grantRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid_request",
-			`the body is {"environment": "…", "service": "…", "repository": "owner/name"}`)
+			`the body is {"repository": "owner/name", "sha": "…", "environment": "…", "service": "…"}`)
 		return
 	}
-	if body.Environment == "" || body.Service == "" || body.Repository == "" {
-		WriteError(w, http.StatusBadRequest, "invalid_request",
-			"an environment, a service and the job's repository are all required")
+	if body.Repository == "" || body.Sha == "" {
+		WriteError(w, http.StatusBadRequest, "invalid_request", "the job's repository and the commit it holds are both required")
 		return
 	}
-
 	caller, proved := s.proveJob(w, r, body.Repository)
 	if !proved {
 		return
 	}
-
-	// The repository's org names the group.
-	plan, err := s.deps.Deploys.Plan(r.Context(), caller.Owner)
+	grant, err := s.deps.Deploys.Grant(r.Context(), deploy.GrantRequest{
+		Owner: caller.Owner, Repo: caller.Repo, RunID: caller.RunID, TaskID: caller.TaskID,
+		Sha: body.Sha, Environment: body.Environment, Service: body.Service,
+	})
 	if err != nil {
-		s.log.Error("a group's plan could not be read", "group", caller.Owner, "err", err.Error())
-		WriteError(w, http.StatusBadGateway, "upstream", "the group's environments could not be read")
+		writeRefusal(w, s, err)
 		return
 	}
-	env, declared := plan.File.Environment(body.Environment)
-	if !declared {
-		// The workflow zcp writes asks for a tier's name — `stage` — and the
-		// app names an environment after its group (`todo-stage`): every
-		// job's deploy answered 404 on the owner's run of 2026-09-17 and the
-		// catch-up pass did the work. A tier's name is its only environment;
-		// several of a tier need naming.
-		switch ofTier := plan.File.OfTier(environments.Tier(body.Environment)); len(ofTier) {
-		case 0:
-			WriteError(w, http.StatusNotFound, "unknown_environment",
-				body.Environment+" is not an environment of "+caller.Owner)
-			return
-		case 1:
-			env, declared = ofTier[0], true
-		default:
-			names := make([]string, 0, len(ofTier))
-			for _, e := range ofTier {
-				names = append(names, e.Name)
-			}
-			WriteError(w, http.StatusNotFound, "unknown_environment",
-				body.Environment+" names "+strconv.Itoa(len(ofTier))+" environments of "+caller.Owner+" ("+strings.Join(names, ", ")+"); ask for one by name")
-			return
-		}
-	}
-
-	recipe, hasTier := plan.Recipes[env.Tier]
-	if !hasTier {
-		WriteError(w, http.StatusBadGateway, "upstream", "the group's "+string(env.Tier)+" tier could not be read")
-		return
-	}
-	service, known := recipe.Service(body.Service)
-	if !known || !service.Runtime() {
-		WriteError(w, http.StatusNotFound, "unknown_service",
-			body.Service+" is not a runtime service of "+body.Environment)
-		return
-	}
-
-	record := s.deps.Records.New(env.Name, service.Hostname, body.Repository, "")
-	if err := s.deps.Deploys.Deploy(r.Context(), plan, env, service.Hostname, []string{record.ID}); err != nil {
-		s.log.Error("a deploy could not be queued",
-			"group", caller.Owner, "environment", env.Name, "err", err.Error())
-	}
-	// The record carries the sha the resolver decided, and a refusal if the
-	// environment resolved to nothing.
-	answer, _ := s.deps.Records.Get(record.ID)
-	WriteJSON(w, http.StatusAccepted, answer)
+	// The one answer that carries a key: never cached by anything between.
+	w.Header().Set("Cache-Control", "no-store")
+	WriteJSON(w, http.StatusOK, grant)
 }
 
 // ---------------------------------------------------------------------------
-// GET /deploy/{id}
+// POST /deploy/{id}/result
 // ---------------------------------------------------------------------------
 
-// handleDeployStatus is docs/broker-api.md § GET /deploy/{id}: the same job, or
-// any job of the same repository. A restart forgets, and the action then reads
-// the commit status the broker wrote on every outcome instead.
-func (s *Server) handleDeployStatus(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	record, known := s.deps.Records.Get(id)
-	if !known {
-		// Refused before the caller is proved: an id the broker does not hold
-		// belongs to no repository, so there is nothing to prove against.
-		WriteError(w, http.StatusNotFound, "unknown_deploy",
-			"this broker holds no deploy "+id+"; read the commit status instead")
+type resultRequest struct {
+	Repository string `json:"repository"`
+	Status     string `json:"status"`
+	Message    string `json:"message"`
+}
+
+// handleDeployResult is docs/broker-api.md § POST /deploy/{id}/result: the job
+// says how its `zcli push` ended, and the broker writes what is true.
+func (s *Server) handleDeployResult(w http.ResponseWriter, r *http.Request) {
+	var body resultRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil ||
+		body.Repository == "" || (body.Status != "success" && body.Status != "failure") {
+		WriteError(w, http.StatusBadRequest, "invalid_request",
+			`the body is {"repository": "owner/name", "status": "success" | "failure", "message": "…"}`)
 		return
 	}
-	if _, proved := s.proveJob(w, r, record.Repository); !proved {
+	caller, proved := s.proveJob(w, r, body.Repository)
+	if !proved {
 		return
 	}
-	WriteJSON(w, http.StatusOK, record)
+	if err := s.deps.Deploys.Result(r.Context(), r.PathValue("id"), caller.Repository, body.Status, body.Message); err != nil {
+		writeRefusal(w, s, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// writeRefusal answers a *deploy.Refusal as it is, and anything else as a
+// fault of the broker's.
+func writeRefusal(w http.ResponseWriter, s *Server, err error) {
+	var refusal *deploy.Refusal
+	if errors.As(err, &refusal) {
+		WriteError(w, refusal.Status, refusal.Code, refusal.Message)
+		return
+	}
+	s.log.Error("a deploy request failed", "err", err.Error())
+	WriteError(w, http.StatusInternalServerError, "internal", "the broker could not answer")
 }
 
 // ---------------------------------------------------------------------------

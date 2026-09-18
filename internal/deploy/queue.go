@@ -8,13 +8,10 @@ import (
 
 // Queue is one queue per environment, newest wins.
 //
-// Two deploys of one environment never run at once — the platform would race
-// two app versions onto the same service — and an older request still waiting
-// when a newer one arrives is dropped, because deploying the older commit
-// after the newer one is exactly the wrong outcome. The dropped request's
-// deploy records are carried over to the newer job, so a workflow polling one
-// of them learns what the environment actually settled on rather than being
-// told its request vanished.
+// Two dispatches of one environment never run at once, and an older request
+// still waiting when a newer one arrives is dropped, because starting a job
+// for the older commit after the newer one is exactly the wrong outcome — its
+// grant would be refused as superseded anyway (D27).
 type Queue struct {
 	// base is the context every job runs on. It is the broker's own — never
 	// the caller's: Submit does not block, so a webhook dispatch or an HTTP
@@ -51,9 +48,7 @@ func (q *Queue) Submit(job Job) {
 
 	q.mu.Lock()
 	if waiting, ok := q.pending[key]; ok {
-		// Newest wins: the waiting request is dropped, and whoever was asking
-		// about it now follows this one.
-		job.Records = append(append([]string(nil), waiting.Records...), job.Records...)
+		// Newest wins: the waiting request is dropped.
 		q.log.Info("a queued deploy was superseded",
 			"environment", key, "dropped", waiting.Sha(), "kept", job.Sha())
 	}

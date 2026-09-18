@@ -97,11 +97,23 @@ func (p *Pipeline) Push(ctx context.Context, org string, payload []byte) error {
 		return nil
 	}
 
+	// The repository's own workflow runs on a push to its default branch and
+	// deploys whatever that branch alone feeds (D27): the broker starts a job
+	// only for what that run does not cover — another branch, or a stage mixed
+	// from several, whose commit is the merge the broker made.
+	defaultBranch := ""
+	if pushed, err := p.Gitea.GetRepo(ctx, owner, repo); err == nil {
+		defaultBranch = pushed.DefaultBranch
+	}
+
 	for _, env := range plan.File.Environments {
 		if env.Deploy != environments.OnPush || env.Release {
 			continue
 		}
 		if !feeds(env, branch) {
+			continue
+		}
+		if branch == defaultBranch && len(env.Sources) == 1 {
 			continue
 		}
 		recipe, has := plan.Recipes[env.Tier]
@@ -112,7 +124,7 @@ func (p *Pipeline) Push(ctx context.Context, org string, payload []byte) error {
 		if !found {
 			continue
 		}
-		if err := p.Deploy(ctx, plan, env, service.Hostname, nil); err != nil {
+		if err := p.Deploy(ctx, plan, env, service.Hostname); err != nil {
 			p.log().Warn("a push could not be deployed",
 				"group", group.Slug, "environment", env.Name, "err", err.Error())
 		}
@@ -192,7 +204,7 @@ func (p *Pipeline) Create(ctx context.Context, org string, payload []byte) error
 		return err
 	}
 	for _, env := range plan.File.OfTier(environments.TierProduction) {
-		if err := p.Deploy(ctx, plan, env, "", nil); err != nil {
+		if err := p.Deploy(ctx, plan, env, ""); err != nil {
 			p.log().Warn("an approved release could not be deployed",
 				"group", group.Slug, "environment", env.Name, "err", err.Error())
 		}
