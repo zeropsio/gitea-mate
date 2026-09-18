@@ -744,4 +744,62 @@ func (c *Client) RunnerRegistrationToken(ctx context.Context, org string) (strin
 	return out.Token, err
 }
 
+// Run is one workflow run, as GET /orgs/{org}/actions/runs answers it. The two
+// repositories are what tells a fork's run from the repository's own, and the
+// default branch rides on the repository, so one read says whether a run was
+// the reviewed workflow's or a branch's own (D27).
+type Run struct {
+	ID             int64     `json:"id"`
+	Event          string    `json:"event"`
+	HeadBranch     string    `json:"head_branch"`
+	HeadSHA        string    `json:"head_sha"`
+	Status         string    `json:"status"`
+	StartedAt      time.Time `json:"started_at"`
+	Repository     Repo      `json:"repository"`
+	HeadRepository Repo      `json:"head_repository"`
+}
+
+// maxRunPages bounds one read of an org's runs: fifty a page, newest first.
+const maxRunPages = 20
+
+// ListOrgRunsSince is GET /orgs/{org}/actions/runs, newest first, read until a
+// page holds nothing that started at or after since. A run that has not
+// started yet carries a zero time and is kept: it is the caller's to ignore.
+func (c *Client) ListOrgRunsSince(ctx context.Context, org string, since time.Time) ([]Run, error) {
+	var all []Run
+	for page := 1; page <= maxRunPages; page++ {
+		var out struct {
+			Runs []Run `json:"workflow_runs"`
+		}
+		if err := c.do(ctx, http.MethodGet, withPage("/orgs/"+esc(org)+"/actions/runs", page), nil, &out, authToken); err != nil {
+			return nil, err
+		}
+		recent := false
+		for _, run := range out.Runs {
+			if run.StartedAt.IsZero() || !run.StartedAt.Before(since) {
+				all = append(all, run)
+				recent = true
+			}
+		}
+		if len(out.Runs) < pageSize || !recent {
+			break
+		}
+	}
+	return all, nil
+}
+
+// DispatchWorkflow is POST /repos/{o}/{r}/actions/workflows/{file}/dispatches:
+// the workflow file as ref carries it, with the inputs it declares. A workflow
+// without a `workflow_dispatch` trigger, or without one of the inputs, is a
+// 4xx the caller reports — it is how a repository whose workflow predates D27
+// is told apart.
+func (c *Client) DispatchWorkflow(ctx context.Context, owner, repo, workflow, ref string, inputs map[string]string) error {
+	body := struct {
+		Ref    string            `json:"ref"`
+		Inputs map[string]string `json:"inputs,omitempty"`
+	}{Ref: ref, Inputs: inputs}
+	path := "/repos/" + esc(owner) + "/" + esc(repo) + "/actions/workflows/" + esc(workflow) + "/dispatches"
+	return c.do(ctx, http.MethodPost, path, body, nil, authToken)
+}
+
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }

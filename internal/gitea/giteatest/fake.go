@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,7 +61,11 @@ type Fake struct {
 	tagRules      map[string][]gitea.TagProtection
 	hooks         map[string][]gitea.Hook // org -> hooks
 	statuses      map[string][]gitea.CommitStatus
-	jobs          map[string]gitea.Job // "org/repo/jobID"
+	jobs          map[string]gitea.Job   // "org/repo/jobID"
+	runs          map[string][]gitea.Run // org -> its runs, newest first
+	// Dispatches is every workflow dispatch the fake accepted, as
+	// "org/repo workflow@ref key=value …" with the inputs in key order.
+	Dispatches []string
 
 	// The read side (contents.go): a repository's files at a ref, its branch
 	// heads, its tags and the archives of its commits.
@@ -320,6 +325,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		f.createOrg(w, r)
 	case r.Method == "GET" && path == "/orgs":
 		f.listOrgs(w)
+	case r.Method == "GET" && strings.HasPrefix(path, "/orgs/") && strings.HasSuffix(path, "/actions/runs"):
+		f.listRuns(w, r, seg(path, 2))
 	case r.Method == "POST" && strings.HasSuffix(path, "/actions/runners/registration-token"):
 		writeJSON(w, 200, map[string]string{"token": "fake-registration-token"})
 	case r.Method == "POST" && strings.HasSuffix(path, "/teams"):
@@ -745,6 +752,8 @@ func (f *Fake) repoRoutes(w http.ResponseWriter, r *http.Request, path string) {
 		f.branchProtection(w, r, full, strings.TrimPrefix(rest, "/branch_protections"))
 	case strings.HasPrefix(rest, "/tag_protections"):
 		f.tagProtection(w, r, full, strings.TrimPrefix(rest, "/tag_protections"))
+	case r.Method == "POST" && strings.HasPrefix(rest, "/actions/workflows/") && strings.HasSuffix(rest, "/dispatches"):
+		f.dispatch(w, r, full, strings.TrimSuffix(strings.TrimPrefix(rest, "/actions/workflows/"), "/dispatches"))
 	case strings.HasPrefix(rest, "/statuses/"):
 		f.status(w, r, full, strings.TrimPrefix(rest, "/statuses/"))
 	case strings.HasPrefix(rest, "/commits/") && strings.HasSuffix(rest, "/statuses"):
@@ -1006,4 +1015,70 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func fail(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"message": message})
+}
+
+// AddRun records a workflow run of an org; the newest is listed first, as
+// Gitea lists them.
+func (f *Fake) AddRun(org string, run gitea.Run) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.runs == nil {
+		f.runs = map[string][]gitea.Run{}
+	}
+	f.runs[org] = append([]gitea.Run{run}, f.runs[org]...)
+}
+
+func (f *Fake) listRuns(w http.ResponseWriter, r *http.Request, org string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 50
+	}
+	all := f.runs[org]
+	start := (page - 1) * limit
+	if start > len(all) {
+		start = len(all)
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	writeJSON(w, 200, map[string]any{"total_count": len(all), "workflow_runs": all[start:end]})
+}
+
+// dispatch is POST /repos/{o}/{r}/actions/workflows/{file}/dispatches. A
+// repository whose default branch carries no such workflow file answers 404,
+// as Gitea does.
+func (f *Fake) dispatch(w http.ResponseWriter, r *http.Request, full, workflow string) {
+	var body struct {
+		Ref    string            `json:"ref"`
+		Inputs map[string]string `json:"inputs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		fail(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ref := strings.TrimPrefix(body.Ref, "refs/heads/")
+	if _, has := f.files[full+"@"+ref+":.gitea/workflows/"+workflow]; !has {
+		fail(w, http.StatusNotFound, "workflow "+workflow+" does not exist on "+body.Ref)
+		return
+	}
+	keys := make([]string, 0, len(body.Inputs))
+	for key := range body.Inputs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	line := full + " " + workflow + "@" + ref
+	for _, key := range keys {
+		line += " " + key + "=" + body.Inputs[key]
+	}
+	f.Dispatches = append(f.Dispatches, line)
+	w.WriteHeader(http.StatusNoContent)
 }

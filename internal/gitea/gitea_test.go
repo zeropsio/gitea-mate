@@ -3,7 +3,9 @@ package gitea_test
 import (
 	"context"
 	"net/http"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/zeropsio/gitea-mate/internal/gitea"
 	"github.com/zeropsio/gitea-mate/internal/gitea/giteatest"
@@ -415,5 +417,54 @@ func TestPullRequestsAreListedByStateAndMergedByNumber(t *testing.T) {
 	}
 	if err := c.MergePullRequest(ctx, "acme", "group", 7, ""); gitea.Status(err) != 405 {
 		t.Errorf("merging a merged request = %v, want 405", err)
+	}
+}
+
+// TestListOrgRunsSince — the runner's trust is read from the org's runs: only
+// the ones that started since the runner was made, and the ones that have not
+// started yet, matter (D27).
+func TestListOrgRunsSince(t *testing.T) {
+	fake := giteatest.New(t)
+	made := time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC)
+	fake.AddRun("acme", gitea.Run{ID: 1, HeadBranch: "mate/mate-p1", StartedAt: made.Add(-time.Hour)})
+	fake.AddRun("acme", gitea.Run{ID: 2, HeadBranch: "main", StartedAt: made.Add(time.Minute)})
+	fake.AddRun("acme", gitea.Run{ID: 3, HeadBranch: "mate/mate-p1"})
+
+	runs, err := fake.Client().ListOrgRunsSince(context.Background(), "acme", made)
+	if err != nil {
+		t.Fatalf("ListOrgRunsSince: %v", err)
+	}
+	var ids []int64
+	for _, run := range runs {
+		ids = append(ids, run.ID)
+	}
+	if !slices.Equal(ids, []int64{3, 2}) {
+		t.Errorf("runs since the runner was made = %v, want the queued one and the one after it: [3 2]", ids)
+	}
+}
+
+// TestDispatchWorkflow — the dispatch names the file, the ref and the inputs;
+// a repository whose default branch carries no such workflow is a 404 the
+// caller can report.
+func TestDispatchWorkflow(t *testing.T) {
+	fake := giteatest.New(t)
+	fake.AddRepo("acme/api", "main")
+	fake.AddFile("acme/api", "main", ".gitea/workflows/zerops.yml", "on: workflow_dispatch\n")
+	fake.AddRepo("acme/old", "main")
+
+	client := fake.Client()
+	err := client.DispatchWorkflow(context.Background(), "acme", "api", "zerops.yml", "main",
+		map[string]string{"sha": "3f9c", "environment": "acme-stage", "service": "api"})
+	if err != nil {
+		t.Fatalf("DispatchWorkflow: %v", err)
+	}
+	want := "acme/api zerops.yml@main environment=acme-stage service=api sha=3f9c"
+	if len(fake.Dispatches) != 1 || fake.Dispatches[0] != want {
+		t.Errorf("dispatched %v, want [%s]", fake.Dispatches, want)
+	}
+
+	err = client.DispatchWorkflow(context.Background(), "acme", "old", "zerops.yml", "main", nil)
+	if !gitea.IsNotFound(err) {
+		t.Errorf("a repository with no such workflow must answer not found, got %v", err)
 	}
 }
