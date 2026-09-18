@@ -170,19 +170,19 @@ func TestNothingToDoIsNotAFailure(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name string
-		arm  func(*world)
+		arm  func(*testing.T, *world)
 		sha  string
 		want string
 	}{
 		{name: "an older commit than the branch's head", sha: first, want: deploy.GrantSuperseded},
 		{
 			name: "a commit already live",
-			arm:  func(w *world) { w.land("svc-stage-api", second) },
+			arm:  func(_ *testing.T, w *world) { w.land("svc-stage-api", second) },
 			sha:  second, want: deploy.GrantLive,
 		},
 		{
 			name: "a repository whose branch feeds no environment",
-			arm: func(w *world) {
+			arm: func(_ *testing.T, w *world) {
 				w.gitea.AddFile("acme/group", "main", "environments.yaml",
 					"version: 1\nenvironments:\n  stage:\n    tier: stage\n    project: prj-stage\n    sources: [develop]\n")
 			},
@@ -192,15 +192,44 @@ func TestNothingToDoIsNotAFailure(t *testing.T) {
 			// The push that lands a group's first code, before anybody added a
 			// stage: it failed every such workflow red until D27 (primer, open 21).
 			name: "a group that has declared no environment yet",
-			arm:  func(w *world) { w.gitea.RemoveFile("acme/group", "main", "environments.yaml") },
+			arm:  func(_ *testing.T, w *world) { w.gitea.RemoveFile("acme/group", "main", "environments.yaml") },
 			sha:  second, want: deploy.GrantNothing,
+		},
+		{
+			// A project that is Mates and a production with nothing between
+			// (D28). Its production is what a release lists — main's head, the
+			// very commit this push carries — and a push still deploys nothing
+			// to it: a production follows the tag and never a branch, whether
+			// or not the group has a stage.
+			name: "a group whose only environment is a production, pushed to main",
+			arm: func(_ *testing.T, w *world) {
+				w.gitea.AddFile("acme/group", "main", "environments.yaml",
+					"version: 1\nenvironments:\n  production:\n    tier: production\n    project: prj-prod\n    sources: release\n")
+			},
+			sha: second, want: deploy.GrantNothing,
+		},
+		{
+			// The same, with the release already approved and listing this very
+			// commit: only the broker's dispatch names a production, and it does
+			// that for the tag, never for the push.
+			name: "a production whose approved release lists the pushed commit",
+			arm: func(t *testing.T, w *world) {
+				w.gitea.AddFile("acme/group", "main", "environments.yaml",
+					"version: 1\nenvironments:\n  production:\n    tier: production\n    project: prj-prod\n    sources: release\n")
+				w.tag(t, "v1.0.0", "commit-1", "api "+second, time.Date(2026, 9, 18, 8, 0, 0, 0, time.UTC))
+				if err := w.pipe.Create(context.Background(), "acme", tagDelivery("v1.0.0", "commit-1", roles.Login(ownerUser))); err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				w.queue.Wait()
+			},
+			sha: second, want: deploy.GrantNothing,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			w := granting(t)
 			if tc.arm != nil {
-				tc.arm(w)
+				tc.arm(t, w)
 			}
 			grant, err := w.pipe.Grant(context.Background(), pushJob(tc.sha))
 			if err != nil {
