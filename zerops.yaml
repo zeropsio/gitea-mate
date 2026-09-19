@@ -30,6 +30,7 @@ zerops:
         - gitea/init.sh
         - gitea/start.sh
         - gitea/admin-init.sh
+        - gitea/verify-admin.sh
         - gitea/dump.sh
         - gitea/wait-for-url.sh
     run:
@@ -64,8 +65,9 @@ zerops:
         # git for the repositories, postgresql-client for init.sh's role and
         # database creation, ca-certificates for the broker's discovery URL.
         # Nothing is downloaded at runtime.
-        # curl is admin-init.sh's wait for the broker's discovery URL; nothing
-        # here downloads anything at runtime.
+        # curl is admin-init.sh's wait for the broker's discovery URL and
+        # verify-admin.sh's one authenticated call; nothing here downloads
+        # anything at runtime.
         - sudo apt-get install -y --no-install-recommends git ca-certificates postgresql-client curl
         - sudo mkdir -p /etc/gitea
         - sudo chown root:zerops /etc/gitea

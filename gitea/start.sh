@@ -52,5 +52,13 @@ sudo install -m 660 -o root -g zerops /tmp/app.ini "$CONF"
 # the first boot's secret wait took four restarts three seconds apart).
 require_zerops_source || { sleep 5; exit 1; }
 
+# Proving the published pair takes a Gitea that is listening, which is the one
+# thing admin-init.sh never has — so it runs alongside the server it needs,
+# and re-mints when Gitea refuses (gitea/verify-admin.sh). Backgrounded and
+# detached from this shell: `exec` replaces it a line later, and a boot must
+# never wait on a check.
+echo "start.sh: proving the site admin's token in the background ..."
+setsid ./gitea/verify-admin.sh >/dev/null 2>&1 < /dev/null &
+
 echo "start.sh: starting gitea ..."
 exec "$GITEA_BIN" web --config "$CONF"

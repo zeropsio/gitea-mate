@@ -53,38 +53,48 @@ zsc envReplace --silent gitea/app.ini /tmp/app.ini
 sudo install -m 660 -o root -g zerops /tmp/app.ini "$CONF"
 "$GITEA_BIN" migrate --config "$CONF"
 
+# A credential this container generated or a CLI returned whole, never one
+# scraped out of prose.
+#
+# Gitea's own `create` subcommand can print a generated password and token in
+# sentences, and those sentences are Gitea's to change. A run of 2026-09-19 on
+# Gitea 1.27.2 published a pair the same Gitea then refused on every call —
+# 401 from the broker's first request onward, for the life of the account —
+# with no abort, because the `sed` that reads them produced something
+# non-empty. Both values are now known by construction: the password is made
+# here and passed in, and the token comes back from `--raw`, which prints the
+# token and nothing else.
+mint_credentials() {
+  password="$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | cut -c1-28)"
+  # --password and --token-name are argv-only on these subcommands; there is no
+  # file or stdin form. Values are generated here and never printed.
+  if "$GITEA_BIN" admin user list --config "$CONF" 2>/dev/null | awk 'NR>1{print $2}' | grep -qx "$USERNAME"; then
+    echo "admin-init.sh: $USERNAME exists, re-minting its credentials ..."
+    "$GITEA_BIN" admin user change-password --config "$CONF" --username "$USERNAME" \
+      --password "$password" --must-change-password=false
+    echo "admin-init.sh: NOTE the previous access token is still valid — revoke it if you are rotating after a leak"
+  else
+    echo "admin-init.sh: creating the site admin $USERNAME ..."
+    "$GITEA_BIN" admin user create --config "$CONF" \
+      --admin --username "$USERNAME" --email "$EMAIL" \
+      --password "$password" --must-change-password=false
+  fi
+  token="$("$GITEA_BIN" admin user generate-access-token --config "$CONF" --username "$USERNAME" \
+    --token-name "automation-$(date +%s)" --scopes all --raw)"
+}
+
 provision_admin() {
-  if [ -n "${GITEA_ADMIN_TOKEN:-}" ]; then
+  local password token
+  # `resolved`, not `-n`: a reference the platform has not filled in reaches
+  # this container as the literal `${…}` and is not empty, so `-n` would call
+  # an unpublished pair "already provisioned" and never mint one. The broker
+  # applies the same rule to the same pair (internal/siteadmin, `Arrived`).
+  if resolved "${GITEA_ADMIN_TOKEN:-}" && resolved "${GITEA_ADMIN_PASSWORD:-}"; then
     echo "admin-init.sh: the site admin is already provisioned"
     return 0
   fi
 
-  local password token created
-  if "$GITEA_BIN" admin user list --config "$CONF" 2>/dev/null | awk 'NR>1{print $2}' | grep -qx "$USERNAME"; then
-    # The user survived but the variable did not. A token's value is readable
-    # only at creation, so it cannot be recovered — mint a new one and reset
-    # the password.
-    echo "admin-init.sh: $USERNAME exists, re-minting its credentials ..."
-    password="$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | cut -c1-28)"
-    # --password is argv-only on this subcommand; there is no file or stdin
-    # form. The value is generated here and never printed.
-    "$GITEA_BIN" admin user change-password --config "$CONF" --username "$USERNAME" \
-      --password "$password" --must-change-password=false
-    token="$("$GITEA_BIN" admin user generate-access-token --config "$CONF" --username "$USERNAME" \
-      --token-name "automation-$(date +%s)" --scopes all --raw)"
-    echo "admin-init.sh: NOTE the previous access token is still valid — revoke it if you are rotating after a leak"
-  else
-    # --random-password and --access-token both print their value, which is why
-    # neither is passed as an argument: the output is captured here and never
-    # echoed.
-    echo "admin-init.sh: creating the site admin $USERNAME ..."
-    created="$("$GITEA_BIN" admin user create --config "$CONF" \
-      --admin --username "$USERNAME" --email "$EMAIL" \
-      --random-password --must-change-password=false \
-      --access-token --access-token-name automation --access-token-scopes all)"
-    password="$(printf '%s' "$created" | sed -n "s/^generated random password is '\(.*\)'\$/\1/p")"
-    token="$(printf '%s' "$created" | sed -n 's/^Access token was successfully created\.\.\. //p')"
-  fi
+  mint_credentials
 
   if [ -z "${password:-}" ] || [ -z "${token:-}" ]; then
     echo "admin-init.sh: could not read the generated credentials, aborting"

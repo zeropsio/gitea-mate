@@ -460,3 +460,106 @@ func TestTheDeployActionRefusesACheckoutThatMoved(t *testing.T) {
 		t.Fatalf("reported %v", r.results)
 	}
 }
+
+// TestAdminInitNeverParsesProse: the site admin's credentials are known by
+// construction, never scraped out of a CLI's sentences.
+//
+// The run of 2026-09-19 published a pair Gitea then refused on every call, for
+// the life of the account, with no abort — the `sed` that read
+// `admin user create`'s output produced something non-empty and wrong. Those
+// sentences are Gitea's to change; the password is generated here and passed
+// in, and the token comes back from `--raw`.
+func TestAdminInitNeverParsesProse(t *testing.T) {
+	raw, err := os.ReadFile("gitea/admin-init.sh")
+	if err != nil {
+		t.Fatalf("reading admin-init.sh: %v", err)
+	}
+	script := string(raw)
+	for _, prose := range []string{
+		"Access token was successfully created",
+		"generated random password is",
+		"--random-password",
+		"--access-token-name",
+	} {
+		if strings.Contains(script, prose) {
+			t.Errorf("admin-init.sh still reads a credential out of prose: %q", prose)
+		}
+	}
+	if !strings.Contains(script, "generate-access-token") || !strings.Contains(script, "--raw") {
+		t.Error("admin-init.sh no longer mints the token with --raw")
+	}
+}
+
+// TestAdminInitGuardsWithResolved: `-n` calls an unresolved `${…}` reference a
+// provisioned pair. The broker applies the same rule to the same two variables
+// (internal/siteadmin, Arrived), and this file already carried the helper.
+func TestAdminInitGuardsWithResolved(t *testing.T) {
+	raw, err := os.ReadFile("gitea/admin-init.sh")
+	if err != nil {
+		t.Fatalf("reading admin-init.sh: %v", err)
+	}
+	script := string(raw)
+	if strings.Contains(script, `if [ -n "${GITEA_ADMIN_TOKEN:-}" ]; then`) {
+		t.Error("provision_admin still guards on non-emptiness alone")
+	}
+	if !strings.Contains(script, `resolved "${GITEA_ADMIN_TOKEN:-}"`) {
+		t.Error("provision_admin does not guard GITEA_ADMIN_TOKEN with resolved")
+	}
+}
+
+// TestStartRunsTheVerifier: admin-init.sh runs before the web server exists,
+// so it can publish a pair but never try one. The proof runs beside the server
+// it needs, and before the exec that replaces this shell.
+func TestStartRunsTheVerifier(t *testing.T) {
+	raw, err := os.ReadFile("gitea/start.sh")
+	if err != nil {
+		t.Fatalf("reading start.sh: %v", err)
+	}
+	script := string(raw)
+	verify := strings.Index(script, "verify-admin.sh")
+	exec := strings.Index(script, `exec "$GITEA_BIN" web`)
+	if verify < 0 {
+		t.Fatal("start.sh never runs verify-admin.sh")
+	}
+	if exec < 0 {
+		t.Fatal("start.sh no longer execs gitea")
+	}
+	if verify > exec {
+		t.Error("start.sh runs the verifier after the exec that replaces it")
+	}
+	if !strings.Contains(script, "&") {
+		t.Error("start.sh does not background the verifier")
+	}
+}
+
+// TestVerifierOnlyRemintsOnARefusal: a connection error or a 5xx is this boot
+// being early, not a bad credential. Re-minting on one would rotate the pair
+// every time Gitea is slow to listen.
+func TestVerifierOnlyRemintsOnARefusal(t *testing.T) {
+	raw, err := os.ReadFile("gitea/verify-admin.sh")
+	if err != nil {
+		t.Fatalf("reading verify-admin.sh: %v", err)
+	}
+	script := string(raw)
+	if !strings.Contains(script, "401|403) return 1 ;;") {
+		t.Error("verify-admin.sh does not treat 401/403 alone as a refusal")
+	}
+	if !strings.Contains(script, "*) return 2 ;;") {
+		t.Error("verify-admin.sh does not hold its peace on an inconclusive answer")
+	}
+	if !strings.Contains(script, "zsc setEnv --sensitive GITEA_ADMIN_TOKEN -") {
+		t.Error("verify-admin.sh does not republish the token it proved")
+	}
+}
+
+// TestGiteaRuntimeShipsTheVerifier: deployFiles is a list, so a script that is
+// not named is not there.
+func TestGiteaRuntimeShipsTheVerifier(t *testing.T) {
+	raw, err := os.ReadFile("zerops.yaml")
+	if err != nil {
+		t.Fatalf("reading zerops.yaml: %v", err)
+	}
+	if !strings.Contains(string(raw), "- gitea/verify-admin.sh") {
+		t.Error("zerops.yaml does not deploy gitea/verify-admin.sh")
+	}
+}
