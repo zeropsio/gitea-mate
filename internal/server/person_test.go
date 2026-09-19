@@ -284,3 +284,30 @@ func TestPersonTokenIsNotServedWithoutAProver(t *testing.T) {
 	var out gitea.User
 	_ = out
 }
+
+// The run of 2026-09-19: a fresh account's Gitea published a site-admin pair
+// it then refused, so every call the broker made as site admin came back 401.
+// The app showed the person "Gitea refused: invalid username, password or
+// token" — about credentials that were never theirs, on a sign-in that was
+// perfectly good. A 401 or 403 on this path is the broker's own credential, and
+// is answered as that.
+func TestGiteaRefusingTheBrokersOwnCredentialIsNotThePersonsRefusal(t *testing.T) {
+	r := newPeopleRig(t)
+	r.server.deps.Gitea = r.gitea.TokenOnly("not-the-site-admins-token")
+
+	rr := r.personToken("throwaway-jan", "https://app.example")
+	if rr.Code != http.StatusFailedDependency {
+		t.Fatalf("POST /person/token = %d, want 424: %s", rr.Code, rr.Body.String())
+	}
+	var body struct{ Error, Message string }
+	_ = json.Unmarshal(rr.Body.Bytes(), &body)
+	if body.Error != "gitea_admin_refused" {
+		t.Errorf("error = %q, want gitea_admin_refused", body.Error)
+	}
+	if strings.Contains(body.Message, "invalid username, password or token") {
+		t.Errorf("message relays Gitea's words at the person: %q", body.Message)
+	}
+	if !strings.Contains(body.Message, "administrator credentials") {
+		t.Errorf("message = %q, want it to name whose credentials failed", body.Message)
+	}
+}

@@ -133,6 +133,18 @@ func (s *Server) handlePersonToken(w http.ResponseWriter, r *http.Request) {
 func (s *Server) answerGiteaFailure(w http.ResponseWriter, what, login string, err error) {
 	s.log.Error(what, "login", login, "err", err.Error())
 	if status := gitea.Status(err); status >= 400 && status < 500 {
+		// A 401 or 403 here is not a refusal of what the person asked for: every
+		// call this path makes is the broker acting as the site admin, so those
+		// two mean Gitea would not take the broker's OWN credential. Relaying
+		// Gitea's words for them tells a person their sign-in was rejected —
+		// which is how the run of 2026-09-19 presented an account whose Gitea
+		// had published an admin token it then refused: the person saw "invalid
+		// username, password or token" about credentials that were never theirs.
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			WriteError(w, http.StatusFailedDependency, "gitea_admin_refused",
+				"This account's Gitea is not accepting its own administrator credentials. It mints a new pair the next time the Gitea service starts.")
+			return
+		}
 		WriteError(w, http.StatusFailedDependency, "gitea_refused", "Gitea refused: "+giteaWords(err))
 		return
 	}
