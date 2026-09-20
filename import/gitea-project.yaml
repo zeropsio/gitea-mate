@@ -68,6 +68,15 @@ services:
       OIDC_CLIENT_SECRET:
         value: ${broker_OIDC_CLIENT_SECRET}
         sensitive: true
+      # The db service's superuser, which `init.sh` uses once to create the
+      # gitea role and database. Here rather than in `zerops.yaml`, for the
+      # same reason: `envVariables` carries no sensitivity, so the reference
+      # materialised the superuser's password in clear on this service while
+      # `db` itself kept it back (measured 2026-09-20).
+      DB_ADMIN_USER: ${db_superUser}
+      DB_ADMIN_PASSWORD:
+        value: ${db_superUserPassword}
+        sensitive: true
 
   - hostname: broker
     type: ubuntu@26.04

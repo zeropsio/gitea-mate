@@ -50,9 +50,12 @@ zerops:
         DB_NAME: giteadb
         DB_USER: gitea
         # The db service's superuser, used once by init.sh to create the gitea
-        # role and database.
-        DB_ADMIN_USER: ${db_superUser}
-        DB_ADMIN_PASSWORD: ${db_superUserPassword}
+        # role and database, is NOT declared here: `envVariables` carries no
+        # sensitivity, and a reference written here materialises in clear on
+        # this service even though `db` keeps the same value back
+        # (measured 2026-09-20 — readable off `web` by any token that can read
+        # the project). It comes from the import's vault instead, marked
+        # sensitive, and reaches this container the same way.
         DB_ADMIN_DB: ${db_dbName}
         # docs/vocabulary.md: the site admin is `admin`, never `mate`. It signs
         # in through Zerops like everyone else; its token and password are what
