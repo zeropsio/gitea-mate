@@ -61,8 +61,13 @@ services:
       BROKER_PUBLIC_URL: https://broker-${zeropsSubdomainHost}-8080.__REGION__.zerops.app
       # Gitea's client secret for the `zerops` login source. The broker
       # generates nothing: the two services reference one another's values, so
-      # the secret exists in exactly one place.
-      OIDC_CLIENT_SECRET: ${broker_OIDC_CLIENT_SECRET}
+      # the secret exists in exactly one place. Sensitive on both sides of that
+      # reference: the broker marked its copy and this one did not, so the same
+      # secret the broker kept back was readable in clear off `web` by anyone
+      # whose token can read the project (measured 2026-09-19).
+      OIDC_CLIENT_SECRET:
+        value: ${broker_OIDC_CLIENT_SECRET}
+        sensitive: true
 
   - hostname: broker
     type: ubuntu@26.04
