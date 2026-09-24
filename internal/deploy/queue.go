@@ -48,9 +48,11 @@ func (q *Queue) Submit(job Job) {
 
 	q.mu.Lock()
 	if waiting, ok := q.pending[key]; ok {
-		// Newest wins: the waiting request is dropped.
+		// Newest wins: the waiting request is dropped, but a person's ask it
+		// carried is not.
 		q.log.Info("a queued deploy was superseded",
 			"environment", key, "dropped", waiting.Sha(), "kept", job.Sha())
+		job.Requested = job.Requested || waiting.Requested
 	}
 	if q.running[key] {
 		q.pending[key] = &job

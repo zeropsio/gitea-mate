@@ -261,7 +261,7 @@ func (p *Pipeline) Result(ctx context.Context, id, repository, outcome, message 
 		if message == "" {
 			message = "the job's zcli push failed"
 		}
-		deploy.WriteStatus(ctx, p.Gitea, p.log(), target, record.Environment, "failure", message)
+		deploy.WriteStatus(ctx, p.Gitea, p.log(), target, record.Environment, "failure", deploy.DescriptionFailed+": "+message)
 		p.Records.Update(id, func(r *deploy.Record) { r.Status, r.Message = deploy.StatusFailed, message })
 		return nil
 	}
@@ -270,9 +270,21 @@ func (p *Pipeline) Result(ctx context.Context, id, repository, outcome, message 
 	if err != nil {
 		return deploy.Refuse(http.StatusBadGateway, "upstream", "the service could not be read")
 	}
+	if service.Deploying() && zerops.VersionSha(service.DeployedName()) == record.Sha {
+		// The platform names the reported commit's version but does not run
+		// it yet: not a verdict. The status stays pending, and the pass writes
+		// live once the service runs the commit. A service building another
+		// commit has answered: it will not run this one.
+		p.log().Info("a job reported success before its version went live",
+			"environment", record.Environment, "service", record.Service, "sha", record.Sha)
+		return nil
+	}
 	if service.DeployedSha() != record.Sha {
 		why := fmt.Sprintf("the job reported success, but %s runs %q", record.Service, service.DeployedSha())
-		deploy.WriteStatus(ctx, p.Gitea, p.log(), target, record.Environment, "failure", why)
+		if service.Deploying() {
+			why = fmt.Sprintf("the job reported success, but %s builds %q", record.Service, zerops.VersionSha(service.DeployedName()))
+		}
+		deploy.WriteStatus(ctx, p.Gitea, p.log(), target, record.Environment, "failure", deploy.DescriptionFailed+": "+why)
 		p.Records.Update(id, func(r *deploy.Record) { r.Status, r.Message = deploy.StatusFailed, why })
 		return nil
 	}

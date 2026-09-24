@@ -94,17 +94,21 @@ func (d *Dispatcher) one(ctx context.Context, job Job, target Target, serviceID 
 		d.fail(ctx, job, target, fmt.Sprintf("the service could not be read: %v", err))
 		return
 	}
-	status, has, err := LatestStatus(ctx, d.Gitea, target, job.Environment.Name)
+	history, err := ReadHistory(ctx, d.Gitea, target, job.Environment.Name)
 	if err != nil {
 		log.Warn("a commit's statuses could not be read, so nothing was dispatched", "err", err.Error())
 		return
 	}
+	status, has := history.Latest, history.Has
 	if service.DeployedSha() == target.Sha {
 		// Where almost every pass ends. A job that died after its push landed
-		// never reported, and its status would say "deploying" for ever.
-		if has && status.State == "pending" {
-			WriteStatus(ctx, d.Gitea, d.log(), target, job.Environment.Name, "success", "live")
-		}
+		// never reported, and its status would say "deploying" for ever; one
+		// that reported a failure the platform then settled would say failed.
+		MarkLive(ctx, d.Gitea, d.log(), target, job.Environment.Name, history)
+		return
+	}
+	if history.Failed() && !job.Requested {
+		log.Info("a deploy of this commit failed, and only a person starts it again", "status", status.Description)
 		return
 	}
 	if has && status.State == "pending" && d.now().Sub(status.CreatedAt) < d.patience() {
@@ -137,6 +141,15 @@ func (d *Dispatcher) one(ctx context.Context, job Job, target Target, serviceID 
 	}
 	WriteStatus(ctx, d.Gitea, d.log(), target, job.Environment.Name, "pending", DescriptionDispatched)
 	log.Info("a deploy job was dispatched", "repository", target.Owner+"/"+target.Repo, "ref", repo.DefaultBranch)
+}
+
+// MarkLive closes the status of a commit the service verifiably runs: whatever
+// a job or a pass wrote before — pending, or a failure the platform then
+// settled — the commit is live.
+func MarkLive(ctx context.Context, g *gitea.Client, log *slog.Logger, target Target, environment string, history History) {
+	if history.Has && history.Latest.State != "success" {
+		WriteStatus(ctx, g, log, target, environment, "success", "live")
+	}
 }
 
 // fail records why one service got no job: the commit status and a log line.

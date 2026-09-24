@@ -53,6 +53,45 @@ func TestQueueNewestWins(t *testing.T) {
 	}
 }
 
+// TestQueueKeepsAPersonsAskThroughASupersedingJob — a pass's job that replaces
+// a waiting release still carries the person's ask, or a release that queued
+// behind another job would be dropped by the failure it was meant to retry.
+func TestQueueKeepsAPersonsAskThroughASupersedingJob(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var ran []deploy.Job
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+
+	queue := deploy.NewQueue(context.Background(), func(_ context.Context, j deploy.Job) {
+		mu.Lock()
+		ran = append(ran, j)
+		first := len(ran) == 1
+		mu.Unlock()
+		if first {
+			started <- struct{}{}
+			<-release
+		}
+	}, nil)
+
+	queue.Submit(job("acme", "production", "aaa"))
+	<-started
+
+	requested := job("acme", "production", "bbb")
+	requested.Requested = true
+	queue.Submit(requested)
+	queue.Submit(job("acme", "production", "bbb"))
+	close(release)
+	queue.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(ran) != 2 || !ran[1].Requested {
+		t.Fatalf("the queue ran %+v, want the superseding job to carry the person's ask", ran)
+	}
+}
+
 func TestQueueRunsTwoEnvironmentsAtOnce(t *testing.T) {
 	t.Parallel()
 

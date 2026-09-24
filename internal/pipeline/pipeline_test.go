@@ -421,3 +421,52 @@ func TestAMatesRecipePullRequestNudgesTheLoop(t *testing.T) {
 		})
 	}
 }
+
+// TestANewApprovedTagOnThatShaDispatchesOnce — a job's own failure report is
+// not started again by a pass, but a person tagging a new release of the same
+// commit is asking again: that tag dispatches once, and its redelivery and the
+// passes after it do not.
+func TestANewApprovedTagOnThatShaDispatchesOnce(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	ctx := context.Background()
+	production := deploy.Target{Service: "api", Owner: "acme", Repo: "api", Sha: first}
+	fail := func() {
+		deploy.WriteStatus(ctx, w.gitea.Client(), nil, production, "production", "pending", deploy.DescriptionDeploying+" · job 7")
+		deploy.WriteStatus(ctx, w.gitea.Client(), nil, production, "production", "failure", deploy.DescriptionFailed+": zcli push exited 1")
+	}
+	pass := func() {
+		t.Helper()
+		if _, err := w.pipe.Pass(ctx); err != nil {
+			t.Fatalf("Pass: %v", err)
+		}
+		w.queue.Wait()
+	}
+	release := func(tag string) {
+		t.Helper()
+		if err := w.pipe.Create(ctx, "acme", tagDelivery(tag, "commit-"+tag, roles.Login(ownerUser))); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		w.queue.Wait()
+	}
+
+	w.tag(t, "v1.0.0", "commit-v1.0.0", "api "+first+"\n", time.Now().Add(-time.Hour))
+	release("v1.0.0")
+	fail()
+	pass()
+	if got := len(w.dispatched("production")); got != 1 {
+		t.Fatalf("production was dispatched %d times after a failure and a pass, want once", got)
+	}
+
+	w.tag(t, "v1.0.1", "commit-v1.0.1", "api "+first+"\n", time.Now())
+	release("v1.0.1")
+	if got := len(w.dispatched("production")); got != 2 {
+		t.Fatalf("a new approved tag on the failed commit dispatched %d times in all, want 2", got)
+	}
+	fail()
+	release("v1.0.1")
+	pass()
+	if got := len(w.dispatched("production")); got != 2 {
+		t.Fatalf("a redelivery and a pass dispatched again: %d in all, want 2", got)
+	}
+}

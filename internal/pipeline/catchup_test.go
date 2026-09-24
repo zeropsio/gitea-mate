@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
 
@@ -171,7 +172,7 @@ environments:
 		t.Fatalf("Plan: %v", err)
 	}
 	env, _ := plan.File.Environment("stage")
-	if err := w.pipe.Deploy(ctx, plan, env, "api"); err != nil {
+	if err := w.pipe.Deploy(ctx, plan, env, "api", false); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 	w.queue.Wait()
@@ -236,5 +237,42 @@ func TestTheDeployedShaIsReadFromTheServicesEnvironment(t *testing.T) {
 	w.queue.Wait()
 	if result.Deploys != 0 {
 		t.Fatalf("a version named {sha} {tag} {tagger} was not read as its sha: %+v", result)
+	}
+}
+
+// TestARunningShaTurnsAnEarlierFailureIntoLive — the status says what is true:
+// a job that reported a failure (or never reported) while the platform went on
+// to run its commit is corrected by the next pass, and nothing is dispatched.
+func TestARunningShaTurnsAnEarlierFailureIntoLive(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		state string
+	}{
+		{"a failure", "failure"},
+		{"a job that never reported", "pending"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			ctx := context.Background()
+			stage := deploy.Target{Service: "api", Owner: "acme", Repo: "api", Sha: first}
+			deploy.WriteStatus(ctx, w.gitea.Client(), nil, stage, "stage", "pending", deploy.DescriptionDispatched)
+			if tc.state != "pending" {
+				deploy.WriteStatus(ctx, w.gitea.Client(), nil, stage, "stage", tc.state, "zcli push exited 1")
+			}
+			w.land("svc-stage-api", first)
+
+			if _, err := w.pipe.Pass(ctx); err != nil {
+				t.Fatalf("Pass: %v", err)
+			}
+			w.queue.Wait()
+			if got := w.statuses(t, "acme/api", first)["mate/deploy/stage/api"]; got != "success" {
+				t.Fatalf("the commit's status is %q, want success", got)
+			}
+			if got := w.dispatched("stage"); len(got) != 0 {
+				t.Fatalf("a commit already running was dispatched: %v", got)
+			}
+		})
 	}
 }

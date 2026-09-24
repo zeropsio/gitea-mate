@@ -80,7 +80,8 @@ func (p *Pipeline) Pass(ctx context.Context) (PassResult, error) {
 }
 
 // catchUp deploys the difference between one environment's desired heads and
-// the shas in its live app versions' names.
+// the shas its services verifiably run, and closes the status of each commit
+// that runs already.
 func (p *Pipeline) catchUp(ctx context.Context, plan deploy.Plan, env environments.Environment) (int, []string) {
 	targets, problems, err := p.Resolver.Resolve(ctx, plan, env, "")
 	for i, problem := range problems {
@@ -105,7 +106,16 @@ func (p *Pipeline) catchUp(ctx context.Context, plan deploy.Plan, env environmen
 	for _, target := range targets {
 		if live[target.Service] != target.Sha {
 			behind = append(behind, target)
+			continue
 		}
+		// Running is the verdict: a job that failed or never reported while
+		// the platform went on to run its commit left a status to correct.
+		history, err := deploy.ReadHistory(ctx, p.Gitea, target, env.Name)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s/%s: %s's statuses: %v", plan.Slug, env.Name, target.Service, err))
+			continue
+		}
+		deploy.MarkLive(ctx, p.Gitea, p.log(), target, env.Name, history)
 	}
 	if len(behind) == 0 {
 		return 0, problems
@@ -117,8 +127,10 @@ func (p *Pipeline) catchUp(ctx context.Context, plan deploy.Plan, env environmen
 	return len(behind), problems
 }
 
-// liveShas is the commit each service of a project is running: the first token
-// of the appVersionName entry in the service's own environment.
+// liveShas is the commit each service of a project verifiably runs
+// ([zerops.ServiceDetail.DeployedSha]). A service whose deploy is on its way
+// runs no named commit yet, so it reads as behind, and the status of that
+// deploy keeps the pass from starting it twice.
 //
 // It is read service by service through the direct GET, never from the app
 // version list — the list carries no name at all (measured 2026-09-16), and

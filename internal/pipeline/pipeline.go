@@ -128,11 +128,12 @@ func (p *Pipeline) Plan(ctx context.Context, slug string) (deploy.Plan, error) {
 
 // Deploy resolves an environment and queues the work: since D27, the jobs that
 // deploy it (deploy.Dispatcher). service may be empty for every runtime
-// service of the tier.
+// service of the tier. requested is a person's explicit ask — a newly approved
+// release — which dispatches once even over a deploy that failed.
 //
 // Nothing a caller passes reaches a commit: the shas come from the resolver,
 // which reads protected state alone.
-func (p *Pipeline) Deploy(ctx context.Context, plan deploy.Plan, env environments.Environment, service string) error {
+func (p *Pipeline) Deploy(ctx context.Context, plan deploy.Plan, env environments.Environment, service string, requested bool) error {
 	targets, problems, err := p.Resolver.Resolve(ctx, plan, env, service)
 	for _, problem := range problems {
 		p.log().Warn("an environment could not be fully resolved", "group", plan.Slug, "problem", problem)
@@ -147,7 +148,7 @@ func (p *Pipeline) Deploy(ctx context.Context, plan deploy.Plan, env environment
 		p.log().Info("nothing to deploy", "group", plan.Slug, "environment", env.Name, "why", summarise(problems))
 		return nil
 	}
-	p.Queue.Submit(deploy.Job{Slug: plan.Slug, Environment: env, Targets: targets})
+	p.Queue.Submit(deploy.Job{Slug: plan.Slug, Environment: env, Targets: targets, Requested: requested})
 	return nil
 }
 

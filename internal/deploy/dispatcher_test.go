@@ -2,6 +2,7 @@ package deploy_test
 
 import (
 	"context"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -200,5 +201,82 @@ func TestAServiceTheProjectDoesNotHaveIsReported(t *testing.T) {
 	status := statusOf(t, w.gitea, "3f9c", "mate/deploy/stage/worker")
 	if status.State != "failure" || !strings.Contains(status.Description, "has no service worker") {
 		t.Fatalf("the status is %+v", status)
+	}
+}
+
+// TestAJobsOwnFailureReportIsFinalAcrossPasses — a job that ran and reported
+// a failure is the verdict on that commit for that service: a pass never
+// starts it again, however long it waits. Only a person asks again (a new
+// release, a re-run of the job).
+func TestAJobsOwnFailureReportIsFinalAcrossPasses(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	ctx := context.Background()
+	w.dispatcher.Run(ctx, stageJob())
+	deploy.WriteStatus(ctx, w.gitea.Client(), nil, stageJob().Targets[0], "stage", "pending", deploy.DescriptionDeploying+" · job 7")
+	deploy.WriteStatus(ctx, w.gitea.Client(), nil, stageJob().Targets[0], "stage", "failure", deploy.DescriptionFailed+": zcli push exited 1")
+
+	w.dispatcher.Run(ctx, stageJob())
+	w.ahead = deploy.DefaultPatience + time.Minute
+	w.dispatcher.Run(ctx, stageJob())
+
+	if len(w.gitea.Dispatches) != 1 {
+		t.Fatalf("a failed deploy was dispatched again: %v", w.gitea.Dispatches)
+	}
+	if status := statusOf(t, w.gitea, "3f9c", "mate/deploy/stage/api"); status.State != "failure" {
+		t.Fatalf("the commit's status is %+v, want the failure left alone", status)
+	}
+}
+
+// TestATransientRepoReadFailureAfterAStaleDeployingPendingIsDispatchedAgain —
+// a job that was handed the key and died leaves "deploying" behind; a refusal
+// the broker writes over it (here a repository read that failed) is no
+// verdict on the commit, so a pass past the patience dispatches it again.
+func TestATransientRepoReadFailureAfterAStaleDeployingPendingIsDispatchedAgain(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	ctx := context.Background()
+	deploy.WriteStatus(ctx, w.gitea.Client(), nil, stageJob().Targets[0], "stage", "pending", deploy.DescriptionDeploying+" · job 7")
+	w.ahead = deploy.DefaultPatience + time.Minute
+
+	w.gitea.Fail["GET /repos/acme/api"] = http.StatusBadGateway
+	w.dispatcher.Run(ctx, stageJob())
+	if status := statusOf(t, w.gitea, "3f9c", "mate/deploy/stage/api"); status.State != "failure" {
+		t.Fatalf("the commit's status is %+v, want the refusal written", status)
+	}
+	delete(w.gitea.Fail, "GET /repos/acme/api")
+	w.dispatcher.Run(ctx, stageJob())
+
+	if len(w.gitea.Dispatches) != 1 {
+		t.Fatalf("the refused deploy was not dispatched again: %v", w.gitea.Dispatches)
+	}
+}
+
+// TestARefusalNamingAnOwnerThatStartsWithFailedIsDispatchedAgain — a refusal
+// the broker writes can open with the repository's owner, a name a person
+// chose; only a job's own report ([deploy.DescriptionFailed] and its colon)
+// is final, so an owner called "failed-x" leaves the refusal retryable.
+func TestARefusalNamingAnOwnerThatStartsWithFailedIsDispatchedAgain(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	ctx := context.Background()
+	w.gitea.AddRepo("failed-x/api", "main")
+	job := stageJob()
+	job.Targets[0].Owner = "failed-x"
+
+	w.dispatcher.Run(ctx, job)
+	var last gitea.CommitStatus
+	for _, s := range w.gitea.Statuses("failed-x/api", "3f9c") {
+		last = s
+	}
+	if last.State != "failure" || !strings.HasPrefix(last.Description, "failed-x/api") {
+		t.Fatalf("the status is %+v, want the refusal naming failed-x/api", last)
+	}
+	w.gitea.AddFile("failed-x/api", "main", ".gitea/workflows/zerops.yml", "on: [push, workflow_dispatch]\n")
+	w.ahead = deploy.DefaultPatience + time.Minute
+	w.dispatcher.Run(ctx, job)
+
+	if len(w.gitea.Dispatches) != 1 {
+		t.Fatalf("the refused deploy was not dispatched again: %v", w.gitea.Dispatches)
 	}
 }

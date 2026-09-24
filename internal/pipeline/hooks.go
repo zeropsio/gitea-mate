@@ -124,7 +124,7 @@ func (p *Pipeline) Push(ctx context.Context, org string, payload []byte) error {
 		if !found {
 			continue
 		}
-		if err := p.Deploy(ctx, plan, env, service.Hostname); err != nil {
+		if err := p.Deploy(ctx, plan, env, service.Hostname, false); err != nil {
 			p.log().Warn("a push could not be deployed",
 				"group", group.Slug, "environment", env.Name, "err", err.Error())
 		}
@@ -204,7 +204,7 @@ func (p *Pipeline) Create(ctx context.Context, org string, payload []byte) error
 		return err
 	}
 	for _, env := range plan.File.OfTier(environments.TierProduction) {
-		if err := p.Deploy(ctx, plan, env, ""); err != nil {
+		if err := p.Deploy(ctx, plan, env, "", true); err != nil {
 			p.log().Warn("an approved release could not be deployed",
 				"group", group.Slug, "environment", env.Name, "err", err.Error())
 		}

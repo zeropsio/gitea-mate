@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -325,6 +326,34 @@ func TestARunnerThatRanABranchsWorkflowGetsNoKey(t *testing.T) {
 	})
 }
 
+// TestATaintedRunnerRefusalAfterADispatchIsDispatchedAgain — the refusal says
+// the deploy is started again on the new runner, and it is: no job ran the
+// commit, so the next pass dispatches it, even over the "deploying" an earlier
+// job that died left behind.
+func TestATaintedRunnerRefusalAfterADispatchIsDispatchedAgain(t *testing.T) {
+	t.Parallel()
+	w := granting(t)
+	ctx := context.Background()
+	stage := deploy.Target{Service: "api", Owner: "acme", Repo: "api", Sha: second}
+	deploy.WriteStatus(ctx, w.gitea.Client(), nil, stage, "stage", "pending", deploy.DescriptionDeploying+" · job 40")
+	deploy.WriteStatus(ctx, w.gitea.Client(), nil, stage, "stage", "pending", deploy.DescriptionDispatched)
+	w.gitea.AddRun("acme", gitea.Run{ID: 9, Event: "push", HeadBranch: "mate/mate-p1",
+		StartedAt: runnerMade.Add(30 * time.Minute), Repository: apiRepo, HeadRepository: apiRepo})
+
+	_, err := w.pipe.Grant(ctx, pushJob(second))
+	if refusal := refusalOf(t, err); refusal.Code != "runner_tainted" {
+		t.Fatalf("refused with %+v, want runner_tainted", refusal)
+	}
+	if _, err := w.pipe.Pass(ctx); err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	w.queue.Wait()
+
+	if got := w.dispatched("stage"); !slices.Equal(got, []string{second}) {
+		t.Fatalf("stage was dispatched %v after the refusal, want %s once", got, second)
+	}
+}
+
 // TestProductionIsGrantedWhatTheReleaseLists — a dispatched job names the
 // environment; the commit must be the one the newest approved tag lists, the
 // stage must already run it, and the version carries the tag and the tagger.
@@ -359,12 +388,16 @@ func TestProductionIsGrantedWhatTheReleaseLists(t *testing.T) {
 }
 
 // TestTheJobsReport — the status says what is true: a reported success is
-// checked against what the service runs.
+// checked against what the service runs, and a service whose version of the
+// reported commit is not active yet has not said — the pass settles it once
+// it is. A service building another commit has said: not this one.
 func TestTheJobsReport(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name      string
-		land      bool
+		name string
+		land bool
+		// start is the commit whose build the service has started.
+		start     string
 		outcome   string
 		message   string
 		wantState string
@@ -373,6 +406,8 @@ func TestTheJobsReport(t *testing.T) {
 	}{
 		{name: "success, and the service runs the commit", land: true, outcome: "success", wantState: "success", wantPart: "live", subdomain: true},
 		{name: "success, but the service runs something else", outcome: "success", wantState: "failure", wantPart: "reported success"},
+		{name: "success, while the new version is not active yet", start: second, outcome: "success", wantState: "pending", wantPart: deploy.DescriptionDeploying},
+		{name: "success, while the service builds another commit", start: first, outcome: "success", wantState: "failure", wantPart: "api builds \"" + first + "\""},
 		{name: "failure, in the job's words", outcome: "failure", message: "the build failed: npm ci", wantState: "failure", wantPart: "npm ci"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -385,6 +420,9 @@ func TestTheJobsReport(t *testing.T) {
 			}
 			if tc.land {
 				w.land("svc-stage-api", second)
+			}
+			if tc.start != "" {
+				w.zerops.StartBuild("svc-stage-api", tc.start)
 			}
 			if err := w.pipe.Result(ctx, grant.ID, "acme/api", tc.outcome, tc.message); err != nil {
 				t.Fatalf("Result: %v", err)

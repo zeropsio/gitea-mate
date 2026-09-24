@@ -51,6 +51,9 @@ type Job struct {
 	Environment environments.Environment
 	// Targets are its services, in the tier's priority order.
 	Targets []Target
+	// Requested is a person's explicit ask — a newly approved release tag. It
+	// dispatches once even over a deploy of the same commit that failed.
+	Requested bool
 }
 
 // Key is the queue this job belongs to: one per environment.
@@ -71,14 +74,19 @@ func StatusContext(environment, service string) string {
 	return "mate/deploy/" + environment + "/" + service
 }
 
-// The two descriptions a pending deploy status carries. They are how a pass
-// tells a job it started from one that already holds the key, and both from a
-// status nobody is behind any more.
+// The descriptions the broker gives a deploy status. The two pending ones are
+// how a pass tells a job it started from one that already holds the key, and
+// both from a status nobody is behind any more; the failed one is how it tells
+// a job's own report from the broker's refusals.
 const (
 	// DescriptionDispatched is written when the broker dispatched the job.
 	DescriptionDispatched = "dispatched"
 	// DescriptionDeploying prefixes the status a grant writes.
 	DescriptionDeploying = "deploying"
+	// DescriptionFailed, then ": ", prefixes a failure a job reported on its
+	// grant, or a success the service it deployed contradicts. The colon keeps
+	// it apart from a refusal that opens with an owner named "failed…".
+	DescriptionFailed = "failed"
 )
 
 // WriteStatus writes a deploy's state where it survives a restart. Gitea caps
@@ -102,25 +110,43 @@ func WriteStatus(ctx context.Context, g *gitea.Client, log *slog.Logger, target 
 }
 
 // LatestStatus is the newest status of one context on a commit, and whether
-// there is one. Gitea lists a commit's statuses in an order its API lets a
-// caller change, so the newest is found by id.
+// there is one.
 func LatestStatus(ctx context.Context, g *gitea.Client, target Target, environment string) (gitea.CommitStatus, bool, error) {
+	history, err := ReadHistory(ctx, g, target, environment)
+	return history.Latest, history.Has, err
+}
+
+// History is what a commit's statuses say about one service of one
+// environment: the newest.
+type History struct {
+	Latest gitea.CommitStatus
+	Has    bool
+}
+
+// Failed reports a deploy that ran and failed: the newest status is a job's
+// own failure report ([DescriptionFailed]). It is final for that commit on
+// that service: no pass starts it again, only a person does. Every other
+// failure is the broker's own refusal — a tainted runner, a gate not met yet,
+// a read that failed — and a pass retries it.
+func (h History) Failed() bool {
+	return h.Has && h.Latest.State == "failure" && strings.HasPrefix(h.Latest.Description, DescriptionFailed+": ")
+}
+
+// ReadHistory reads one context's statuses on a commit. Gitea lists them in an
+// order its API lets a caller change, so the newest is found by id.
+func ReadHistory(ctx context.Context, g *gitea.Client, target Target, environment string) (History, error) {
 	statuses, err := g.ListStatuses(ctx, target.Owner, target.Repo, target.Sha)
 	if err != nil {
-		return gitea.CommitStatus{}, false, err
+		return History{}, err
 	}
 	want := StatusContext(environment, target.Service)
-	var newest gitea.CommitStatus
-	found := false
+	var out History
 	for _, status := range statuses {
-		if status.Context != want {
-			continue
-		}
-		if !found || status.ID > newest.ID {
-			newest, found = status, true
+		if status.Context == want && (!out.Has || status.ID > out.Latest.ID) {
+			out.Latest, out.Has = status, true
 		}
 	}
-	return newest, found, nil
+	return out, nil
 }
 
 // GateMet enforces environments.yaml's `requireOnStage`: production runs
