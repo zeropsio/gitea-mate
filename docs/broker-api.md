@@ -45,7 +45,7 @@ the way it makes teams and bots true:
    container holds is not the bot's newest generation (compared through Gitea's `token_last_eight`
    against the value the platform returns in clear), the loop mints generation *n+1* (scopes
    `write:repository,read:user`). Without the second clause a crash between mint and write would
-   leave the container on generation *n* while the grace rule revokes it ten minutes later.
+   leave the container on generation *n* for good.
 3. **The Mate's environment** — with the broker's Zerops token, which the app granted `BASIC_USER`
    on the Mate's project when it registered it, the loop finds the project's `zcp@1` service and
    writes three service variables on it: `GITEA_URL` and `MATE_BROKER_URL` (plain) and
@@ -67,9 +67,17 @@ What the loop cannot do it reports and retries: a Mate project the broker's toke
 platform refusal. None of these stops the pass for the other Mates.
 
 Rotation — a compromised Mate, a leaver — is the same mechanism: the loop mints generation *n+1*
-and writes it; older generations are revoked by the loop only once the newest is ten minutes old,
-never on the same pass, so a crash between mint and write leaves two live tokens for ten minutes
-and never a dead Mate.
+and writes it. The newest generation is never revoked, nor the one the container's `GITEA_TOKEN`
+ends in (`token_last_eight`, the held one), even on a pass that mints too: a crash between mint and
+write never leaves a dead Mate, and a pile never grows. A generation older than the held one is
+revoked once the held one — what replaced it in the container — is ten minutes old, so a Mate
+still running on a generation it just left keeps the full rollover window; a successor minted but
+never written (an ambiguous write, a broker down) starts no clock. A generation newer than the held
+one was never written and nobody uses it, so it — like any generation of a container whose token
+matches none — is revoked once its own successor is ten minutes old. A creation time the rule
+needs and Gitea did not give blocks the revocation and is reported. A bot whose container the pass
+could not read loses nothing. One bot's revocations are one action, counted once against its group's
+cap and applied whole.
 
 ## `POST /mate/repository` — a service repository for a Mate (guide 1.5, 2.1)
 

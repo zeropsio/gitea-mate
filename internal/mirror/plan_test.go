@@ -423,47 +423,82 @@ func TestIntegrationTokensAreNotPeople(t *testing.T) {
 	}
 }
 
+// A generation older than the one the container holds goes once the held one
+// — what replaced it there — is past the grace; one newer than the held one,
+// or any when the container holds none, goes once its own successor is past
+// the grace. The newest and the held one never go, a needed creation time that
+// is missing blocks the deletion and is reported, and a bot whose container
+// was not read loses nothing — which generation it holds is unknown.
 func TestOlderTokenGenerationsWaitForTheGrace(t *testing.T) {
 	reg, problems := oneGroup(t)
+	undated := func(generation int, last8 string) gitea.AccessToken {
+		return gitea.AccessToken{Name: mirror.TokenName("mate-p-fen", generation), TokenLastEight: last8}
+	}
 
 	cases := []struct {
 		name       string
-		newestAge  time.Duration
+		tokens     []gitea.AccessToken
+		held       string
+		unread     bool
 		wantDelete []string
+		wantNote   string
 	}{
-		{name: "the newest is a minute old: nothing goes", newestAge: time.Minute},
-		{name: "the newest is nine minutes old: nothing goes", newestAge: 9 * time.Minute},
-		{name: "the newest is eleven minutes old: the older ones go", newestAge: 11 * time.Minute,
-			wantDelete: []string{"mate/mate-p-fen/1", "mate/mate-p-fen/2"}},
+		{name: "the held one replaced the older ones nine minutes ago: nothing goes",
+			tokens: []gitea.AccessToken{liveToken(1, "11111111", 3*time.Hour), liveToken(2, "22222222", 2*time.Hour), liveToken(3, "33333333", 9*time.Minute)},
+			held:   "tok-33333333"},
+		{name: "the held one is eleven minutes old: every older generation goes",
+			tokens: []gitea.AccessToken{liveToken(1, "11111111", 3*time.Hour), liveToken(2, "22222222", 2*time.Hour), liveToken(3, "33333333", 11*time.Minute)},
+			held:   "tok-33333333", wantDelete: []string{"mate/mate-p-fen/1", "mate/mate-p-fen/2"}},
+		{name: "an older generation keeps the full grace from when the held one replaced it",
+			tokens: []gitea.AccessToken{liveToken(1, "11111111", 30*24*time.Hour), liveToken(2, "22222222", 15*time.Minute), liveToken(3, "33333333", time.Minute)},
+			held:   "tok-33333333"},
+		{name: "a generation newer than the held one goes once its successor is past the grace",
+			tokens: []gitea.AccessToken{liveToken(1, "11111111", 30*24*time.Hour), liveToken(2, "22222222", time.Hour), liveToken(3, "33333333", 15*time.Minute), liveToken(4, "44444444", time.Minute)},
+			held:   "tok-11111111", wantDelete: []string{"mate/mate-p-fen/2"}},
+		{name: "a container holding none: each goes once its successor is past the grace",
+			tokens: []gitea.AccessToken{liveToken(1, "11111111", 3*time.Hour), liveToken(2, "22222222", 11*time.Minute), liveToken(3, "33333333", time.Minute)},
+			held:   "tok-99999999", wantDelete: []string{"mate/mate-p-fen/1"}},
+		{name: "a missing creation time is reported",
+			tokens: []gitea.AccessToken{liveToken(1, "11111111", 3*time.Hour), liveToken(2, "22222222", 2*time.Hour), undated(3, "33333333")},
+			held:   "tok-33333333", wantNote: "generation 3 has no creation time"},
+		{name: "a successor's missing creation time is reported",
+			tokens: []gitea.AccessToken{liveToken(1, "11111111", 3*time.Hour), undated(2, "22222222"), liveToken(3, "33333333", time.Minute)},
+			held:   "tok-99999999", wantNote: "generation 2 has no creation time"},
+		{name: "the container was not read: nothing goes",
+			tokens: []gitea.AccessToken{liveToken(1, "11111111", 3*time.Hour), liveToken(2, "22222222", 2*time.Hour), liveToken(3, "33333333", 11*time.Minute)},
+			held:   "tok-33333333", unread: true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := applied(t)
-			g.BotTokens = map[string][]gitea.AccessToken{"mate-p-fen": {
-				liveToken(1, "11111111", 3*time.Hour),
-				liveToken(2, "22222222", 2*time.Hour),
-				liveToken(3, "33333333", tc.newestAge),
-				{Name: "some-hand-made-token", CreatedAt: now.Add(-4 * time.Hour)},
-			}}
+			g.BotTokens = map[string][]gitea.AccessToken{"mate-p-fen": append(tc.tokens,
+				gitea.AccessToken{Name: "some-hand-made-token", CreatedAt: now.Add(-4 * time.Hour)})}
 			state := mirror.State{
 				Registry: reg, Problems: problems,
 				Mates:        map[string]string{"p-fen": "Fen"},
 				Members:      settled(),
 				Gitea:        g,
-				MateServices: served("tok-33333333"),
+				MateServices: served(tc.held),
+			}
+			if tc.unread {
+				state.MateServices = nil
+				state.MateProblems = map[string]string{"p-fen": "its container's variables could not be read: 502"}
 			}
 			plan := mirror.Compute(state, opts())
 
 			var deleted []string
 			for _, a := range plan.Actions {
-				if a.Kind == mirror.DeleteBotToken {
-					deleted = append(deleted, a.TokenName)
+				if a.Kind == mirror.DeleteBotTokens {
+					deleted = append(deleted, a.TokenNames...)
 				}
 			}
 			sort.Strings(deleted)
 			if strings.Join(deleted, ",") != strings.Join(tc.wantDelete, ",") {
 				t.Errorf("deleted = %v, want %v", deleted, tc.wantDelete)
+			}
+			if tc.wantNote != "" && !mentions(plan.Problems, tc.wantNote) {
+				t.Errorf("problems = %v, want one mentioning %q", plan.Problems, tc.wantNote)
 			}
 		})
 	}
@@ -478,9 +513,52 @@ func TestOneGenerationIsNeverRevoked(t *testing.T) {
 		Members: settled(), Gitea: g, MateServices: served("tok-11111111"),
 	}, opts())
 	for _, a := range plan.Actions {
-		if a.Kind == mirror.DeleteBotToken {
+		if a.Kind == mirror.DeleteBotTokens {
 			t.Errorf("the only live token was revoked: %s", a)
 		}
+	}
+}
+
+// A rotated generation keeps the full grace after its successor is minted:
+// generation 1, held for hours, is written over by generation 2, and a Mate
+// still running on 1 keeps it until 2 is past the grace — 1's own age buys it
+// nothing.
+func TestARotatedGenerationKeepsTheFullGraceAfterItsSuccessorIsMinted(t *testing.T) {
+	reg, problems := oneGroup(t)
+
+	cases := []struct {
+		name       string
+		successor  time.Duration
+		wantDelete []string
+	}{
+		{name: "the successor is a minute old: generation 1 stays", successor: time.Minute},
+		{name: "the successor is nine minutes old: generation 1 stays", successor: 9 * time.Minute},
+		{name: "the successor is eleven minutes old: generation 1 goes", successor: 11 * time.Minute,
+			wantDelete: []string{"mate/mate-p-fen/1"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := applied(t)
+			g.BotTokens = map[string][]gitea.AccessToken{"mate-p-fen": {
+				liveToken(1, "11111111", 30*24*time.Hour),
+				liveToken(2, "22222222", tc.successor),
+			}}
+			plan := mirror.Compute(mirror.State{
+				Registry: reg, Problems: problems, Mates: map[string]string{"p-fen": "Fen"},
+				Members: settled(), Gitea: g, MateServices: served("tok-22222222"),
+			}, opts())
+
+			var deleted []string
+			for _, a := range plan.Actions {
+				if a.Kind == mirror.DeleteBotTokens {
+					deleted = append(deleted, a.TokenNames...)
+				}
+			}
+			if strings.Join(deleted, ",") != strings.Join(tc.wantDelete, ",") {
+				t.Errorf("deleted = %v, want %v", deleted, tc.wantDelete)
+			}
+		})
 	}
 }
 
@@ -666,38 +744,50 @@ func TestAMateWithNoContainerReadIsReported(t *testing.T) {
 	}
 }
 
-// A pass that mints revokes nothing of that bot: the older generations wait
-// for a pass without a mint, so a crash between mint and write never leaves a
-// Mate with a dead token and no live one.
-func TestARevocationWaitsForAPassWithoutAMint(t *testing.T) {
+// A bot the pass mints for still loses what nobody can hold: every generation
+// whose successor is past the grace, except the newest and the one the
+// container holds. A pile
+// minted while the env write was refused (measured 2026-09-24) then never
+// grows again, and a crash between mint and write still leaves the container
+// its token.
+func TestAMintingBotStillLosesGenerationsPastTheGraceExceptTheNewestAndTheContainers(t *testing.T) {
 	reg, problems := oneGroup(t)
 	g := applied(t)
 	g.BotTokens = map[string][]gitea.AccessToken{"mate-p-fen": {
 		liveToken(1, "11111111", 3*time.Hour),
-		liveToken(2, "22222222", 11*time.Minute),
+		liveToken(2, "22222222", 2*time.Hour),
+		liveToken(3, "33333333", time.Hour),
+		liveToken(4, "44444444", 20*time.Minute),
+		liveToken(5, "55555555", time.Minute),
 	}}
-	services := served("tok-11111111")
-	delete(services["p-fen"].Vars, mirror.VarGiteaToken)
 
 	plan := mirror.Compute(mirror.State{
 		Registry: reg, Problems: problems, Mates: map[string]string{"p-fen": "Fen"},
-		Members: settled(), Gitea: g, MateServices: services,
+		Members: settled(), Gitea: g, MateServices: served("tok-22222222"),
 	}, opts())
 
-	var minted, revoked bool
+	var minted bool
+	var cleanups []mirror.Action
 	for _, a := range plan.Actions {
 		switch a.Kind {
 		case mirror.DeliverMateAccess:
 			minted = a.Mint
-		case mirror.DeleteBotToken:
-			revoked = true
+		case mirror.DeleteBotTokens:
+			cleanups = append(cleanups, a)
 		}
 	}
 	if !minted {
-		t.Fatal("no generation is minted for a container without a token")
+		t.Fatal("no generation is minted for a container holding an older one")
 	}
-	if revoked {
-		t.Errorf("a generation was revoked on the same pass as a mint:\n%s", mirror.Describe(plan))
+	if len(cleanups) != 1 {
+		t.Fatalf("cleanups = %v, want one:\n%s", cleanups, mirror.Describe(plan))
+	}
+	c := cleanups[0]
+	want := []string{mirror.TokenName("mate-p-fen", 1), mirror.TokenName("mate-p-fen", 3)}
+	got := append([]string(nil), c.TokenNames...)
+	sort.Strings(got)
+	if c.Org != "acme" || c.Login != "mate-p-fen" || strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("cleanup = %+v, want %v in acme", c, want)
 	}
 }
 

@@ -47,16 +47,7 @@ func newRig(t *testing.T) *rig {
 		ID: "cu-jan", UserID: "u-jan", Status: "ACTIVE", RoleCode: "READ_ONLY", CanCreateProjects: true,
 		User: zerops.UserLight{ID: "u-jan", Email: "jan@example", FullName: "Jan"},
 	})
-	z.SetProjects(
-		zerops.Project{ID: giteaPrjID, Name: "gitea", TagList: []string{
-			"mate:tool:gitea",
-			"mate:gn:g-acme:acme",
-			"mate:gm:g-acme:p-fen:mate",
-			"mate:gm:g-acme:p-prod:production",
-		}},
-		zerops.Project{ID: "p-fen", Name: "Fen", UserRoles: []zerops.UserRole{{ClientUserID: "cu-jan", RoleCode: "OWNER"}}},
-		zerops.Project{ID: "p-prod", Name: "Acme production"},
-	)
+	z.SetProjects(rigProjects(rigTags())...)
 	// Fen's project: its zcp container, and the platform's own core stack,
 	// which is never the one written to.
 	z.SetServices("p-fen",
@@ -86,6 +77,29 @@ func newRig(t *testing.T) *rig {
 		},
 	}
 }
+
+// rigTags is the registry the rig starts with: one group, acme, with Fen as
+// its Mate and a production.
+func rigTags() []string {
+	return []string{
+		"mate:tool:gitea",
+		"mate:gn:g-acme:acme",
+		"mate:gm:g-acme:p-fen:mate",
+		"mate:gm:g-acme:p-prod:production",
+	}
+}
+
+// rigProjects is the org's project list with the Gitea project carrying tags.
+func rigProjects(tags []string) []zerops.Project {
+	return []zerops.Project{
+		{ID: giteaPrjID, Name: "gitea", TagList: tags},
+		{ID: "p-fen", Name: "Fen", UserRoles: []zerops.UserRole{{ClientUserID: "cu-jan", RoleCode: "OWNER"}}},
+		{ID: "p-prod", Name: "Acme production"},
+	}
+}
+
+// registry replaces the registry the Gitea project carries.
+func (r *rig) registry(tags ...string) { r.zerops.SetProjects(rigProjects(tags)...) }
 
 // vars reads Fen's container back as key -> entry.
 func (r *rig) vars() map[string]zerops.ServiceUserData {
@@ -709,5 +723,118 @@ func TestAnExistingBranchRuleIsEditedIntoShape(t *testing.T) {
 	}
 	if third.Planned != 0 {
 		t.Errorf("the third pass plans:\n%s", mirror.Describe(third.Plan))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The cap, per group
+// ---------------------------------------------------------------------------
+
+// overTheCapInAcme builds acme, puts four accounts nobody grants anything into
+// its read team — four removals against a cap of three — and registers a
+// second group, beta, which the next pass has to build.
+func overTheCapInAcme(t *testing.T, r *rig) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := r.mirror.Pass(ctx); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	teams, err := r.gitea.Client().ListTeams(ctx, "acme")
+	if err != nil {
+		t.Fatalf("teams: %v", err)
+	}
+	var read int64
+	for _, tm := range teams {
+		if tm.Name == "read" {
+			read = tm.ID
+		}
+	}
+	for _, login := range []string{"stranger-a", "stranger-b", "stranger-c", "stranger-d"} {
+		r.gitea.AddUser(gitea.User{Login: login, Active: true})
+		if err := r.gitea.Client().AddTeamMember(ctx, read, login); err != nil {
+			t.Fatalf("adding %s: %v", login, err)
+		}
+	}
+	r.registry(append(rigTags(), "mate:gn:g-beta:beta")...)
+	r.mirror.Cap = 3
+}
+
+// A group whose own plan takes away more than the cap is held; every other
+// group of the org is served on the same pass (measured on the KRLS org
+// 2026-09-23: one group's burst stopped rights for every group, pass after
+// pass).
+func TestAGroupOverTheCapDoesNotStopOtherGroupsActions(t *testing.T) {
+	r := newRig(t)
+	overTheCapInAcme(t, r)
+
+	if _, err := r.mirror.Pass(context.Background()); err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if got := r.gitea.Repos("beta"); !contains(got, "group") {
+		t.Errorf("beta was not built while acme was over the cap: repos %v", got)
+	}
+}
+
+// A bot's superseded generations — measured 2026-09-24: two Mates whose env
+// write was refused for hours minted one generation every pass — are cleaned
+// as one destructive unit of its group, whole, in one pass: never one unit per
+// generation, which would hold the group once the pile outgrew the cap.
+func TestABotWith40SupersededGenerationsIsCleanedInOnePassAndDoesNotHoldItsGroup(t *testing.T) {
+	r := newRig(t)
+	r.gitea.AddUser(giteaUser(roles.Login("u-jan")))
+	r.gitea.AddUser(gitea.User{Login: "mate-p-fen", Active: true, Restricted: true})
+	var newest string
+	for gen := 1; gen <= 40; gen++ {
+		name := mirror.TokenName("mate-p-fen", gen)
+		newest = "value-" + name
+		r.gitea.AddTokenCreated("mate-p-fen", name, newest, now.Add(-time.Duration(41-gen)*time.Hour), mirror.BotScopes...)
+	}
+	r.zerops.SetUserData(zcpService,
+		zerops.ServiceUserData{Key: mirror.VarGiteaURL, Content: giteaPublicURL},
+		zerops.ServiceUserData{Key: mirror.VarBrokerURL, Content: brokerPublicURL},
+		zerops.ServiceUserData{Key: mirror.VarGiteaToken, Content: newest, Sensitive: true},
+	)
+
+	result, err := r.mirror.Pass(context.Background())
+	if err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if got := r.gitea.TeamMembers("acme", "write"); !contains(got, roles.Login("u-jan")) {
+		t.Errorf("acme was held by its bot's cleanup: write team %v, problems %v", got, result.Problems)
+	}
+	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 1 || got[0] != mirror.TokenName("mate-p-fen", 40) {
+		t.Errorf("the bot keeps %v, want the newest alone", got)
+	}
+	if result.Destructive != 1 {
+		t.Errorf("destructive = %d, want the cleanup counted as one unit", result.Destructive)
+	}
+}
+
+// The held group gets none of its plan — not its removals, not its additions
+// — and the pass names it as a problem, by group, never by token.
+func TestAGroupOverTheCapAppliesNothingAndIsReported(t *testing.T) {
+	r := newRig(t)
+	overTheCapInAcme(t, r)
+	// Jan signs in: acme's plan also puts him in its write team.
+	r.gitea.AddUser(giteaUser(roles.Login("u-jan")))
+
+	result, err := r.mirror.Pass(context.Background())
+	if err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if got := r.gitea.TeamMembers("acme", "read"); !contains(got, "stranger-a") {
+		t.Errorf("a held group lost a member: read team %v", got)
+	}
+	if got := r.gitea.TeamMembers("acme", "write"); contains(got, roles.Login("u-jan")) {
+		t.Errorf("a held group gained a member: write team %v", got)
+	}
+	var reported bool
+	for _, p := range result.Problems {
+		if strings.Contains(p, "acme") && strings.Contains(p, "cap") {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Errorf("problems = %v, want one naming acme and the cap", result.Problems)
 	}
 }

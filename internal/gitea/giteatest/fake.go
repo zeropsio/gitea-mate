@@ -162,6 +162,20 @@ func (f *Fake) AddToken(login, name, value string, scopes ...string) {
 	})
 }
 
+// AddTokenCreated registers a token with the time Gitea says it was made —
+// what a generation older than the grace looks like.
+func (f *Fake) AddTokenCreated(login, name, value string, created time.Time, scopes ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tokens = append(f.tokens, tokenRow{
+		AccessToken: gitea.AccessToken{
+			ID: f.id(), Name: name, Scopes: scopes, Value: value,
+			TokenLastEight: last8(value), CreatedAt: created,
+		},
+		Owner: login,
+	})
+}
+
 // AddJob registers an Actions job readable with the given token value.
 func (f *Fake) AddJob(owner, repo, jobID string, job gitea.Job) {
 	f.mu.Lock()

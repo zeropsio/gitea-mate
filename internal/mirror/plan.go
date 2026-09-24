@@ -3,9 +3,9 @@
 //
 // It is two halves on purpose. [Compute] is pure — a state in, a list of writes
 // out — so every rule is a table test; [Mirror.Apply] performs them in order.
-// Between the two sits the cap: a pass that would disable, remove or delete
-// more than a configured number of things stops and reports instead of
-// applying.
+// Between the two sits the cap: a group whose plan would disable, remove or
+// delete more than a configured number of things is held and reported instead
+// of applied, and so is the whole pass when that many belong to no group.
 //
 // The read side has its own rule, and it is the important one: a member list,
 // project list or registry read that fails or comes back partial ends the pass
@@ -47,9 +47,8 @@ const AppTokenPrefix = "mate-app/"
 // outlives it, and a copied value dies with it.
 const DefaultAppTokenTTL = 12 * time.Hour
 
-// DefaultTokenGrace is how long the newest generation of a bot's token must
-// have existed before the loop revokes the older ones. A crash between mint
-// and write then leaves two live tokens for a while, never a dead Mate.
+// DefaultTokenGrace is how long a superseded generation of a bot's token
+// lives before the loop revokes it.
 const DefaultTokenGrace = 10 * time.Minute
 
 // BotLogin is a Mate's bot user: mate-{projectId} (docs/vocabulary.md).
@@ -174,7 +173,10 @@ const (
 	DemoteSiteAdmin    Kind = "demote_site_admin"
 	DeactivatePerson   Kind = "deactivate_person"
 	DeletePersonTokens Kind = "delete_person_tokens"
-	DeleteBotToken     Kind = "delete_bot_token"
+	// DeleteBotTokens deletes a bot's superseded generations, all of them in
+	// one action, so the cap counts one bot's cleanup once however long its
+	// pile is.
+	DeleteBotTokens Kind = "delete_bot_tokens"
 	// DeletePersonToken retires one of a person's app tokens by age. The
 	// app re-mints silently on the 401 that follows, so this takes nothing
 	// from anybody and the cap does not count it.
@@ -196,6 +198,8 @@ type Action struct {
 
 	FullName  string
 	TokenName string
+	// TokenNames are the generations a DeleteBotTokens deletes.
+	TokenNames []string
 
 	BranchRule *gitea.BranchProtection
 	TagRule    *gitea.TagProtection
@@ -212,10 +216,12 @@ type Action struct {
 }
 
 // Destructive reports whether this action takes something away. The cap counts
-// exactly these.
+// exactly these. One bot's cleanup of its superseded generations is one, in
+// its group, however many generations it deletes: counted per generation, a
+// pile longer than the cap would hold the group on every pass.
 func (a Action) Destructive() bool {
 	switch a.Kind {
-	case RemoveTeamMember, DemoteSiteAdmin, DeactivatePerson, DeletePersonTokens, DeleteBotToken:
+	case RemoveTeamMember, DemoteSiteAdmin, DeactivatePerson, DeletePersonTokens, DeleteBotTokens:
 		return true
 	}
 	return false
@@ -227,7 +233,7 @@ func (a Action) String() string {
 	b.WriteString(string(a.Kind))
 	for _, f := range []struct{ k, v string }{
 		{"org", a.Org}, {"repo", a.Repo}, {"team", a.Team},
-		{"login", a.Login}, {"token", a.TokenName},
+		{"login", a.Login}, {"token", a.TokenName}, {"tokens", strings.Join(a.TokenNames, ",")},
 		{"project", a.Project}, {"service", a.Service},
 	} {
 		if f.v != "" {
@@ -330,14 +336,14 @@ func (p *planner) plan() {
 	// The order is what Gitea will accept: structure, then the bots, then the
 	// people and the bots into their teams (a team member who does not exist
 	// yet is a 404), then departures, then each Mate's access, then token
-	// generations — which skip any bot the pass mints for.
+	// generations.
 	p.planStructure()
 	p.planRecipePullRequests()
 	p.planBots()
 	p.planPeople()
 	p.planDepartures()
-	minting := p.planMateAccess()
-	p.planBotTokens(minting)
+	p.planMateAccess()
+	p.planBotTokens()
 	p.planAppTokens()
 }
 
@@ -584,15 +590,37 @@ func (p *planner) planDepartures() {
 	}
 }
 
-// planBotTokens: older generations of a bot's token go only once the newest has
-// existed for the grace period, and never on a pass that mints for the bot. A
-// crash between mint and write then leaves two live tokens for ten minutes,
-// never a Mate with none.
-func (p *planner) planBotTokens(minting map[string]bool) {
+// planBotTokens: a bot's superseded generations go, except the newest and the
+// one whose tail the container's GITEA_TOKEN ends in (the held one). A
+// generation older than the held one goes once the held one — what replaced it
+// in the container — is past the grace; one newer than the held one was never
+// written and nobody uses it, so it, like any generation of a container that
+// holds none, goes once its own successor is past the grace. The clock never
+// starts at a successor minted but never written (an ambiguous write, a broker
+// down), so a Mate that left a generation keeps it for the full rollover
+// window, while a pile of old generations still goes in one pass. That holds on
+// a pass that mints for the bot too, so a pile minted while a container refused
+// its writes never grows again, and a crash between mint and write still
+// leaves the container the token it holds. A needed creation time that is
+// missing blocks the deletion and is reported. A bot whose container the pass
+// could not read loses nothing: what it holds is unknown.
+func (p *planner) planBotTokens() {
+	groupOf := map[string]string{}
+	projectOf := map[string]string{}
+	for _, g := range p.state.Registry.Groups {
+		for _, prj := range g.Projects {
+			if prj.Kind == roles.KindMate {
+				groupOf[BotLogin(prj.ID)] = g.Slug
+				projectOf[BotLogin(prj.ID)] = prj.ID
+			}
+		}
+	}
 	for _, bot := range sortedTokenKeys(p.state.Gitea.BotTokens) {
-		if minting[bot] {
+		svc, read := p.state.MateServices[projectOf[bot]]
+		if !read {
 			continue
 		}
+		value := svc.Vars[VarGiteaToken].Content
 		type gen struct {
 			n     int
 			token gitea.AccessToken
@@ -603,21 +631,43 @@ func (p *planner) planBotTokens(minting map[string]bool) {
 				gens = append(gens, gen{n: n, token: t})
 			}
 		}
-		if len(gens) < 2 {
-			continue
-		}
 		sort.Slice(gens, func(i, j int) bool { return gens[i].n > gens[j].n })
-		newest := gens[0]
-		if newest.token.CreatedAt.IsZero() {
-			p.note("bot %s: the newest token generation has no creation time; nothing revoked", bot)
+		held := -1
+		for i, g := range gens {
+			if value != "" && g.token.TokenLastEight != "" && strings.HasSuffix(value, g.token.TokenLastEight) {
+				held = i
+				break
+			}
+		}
+		undated := map[int]bool{}
+		pastGrace := func(g gen) bool {
+			if g.token.CreatedAt.IsZero() {
+				if !undated[g.n] {
+					undated[g.n] = true
+					p.note("bot %s: generation %d has no creation time; nothing older revoked", bot, g.n)
+				}
+				return false
+			}
+			return p.opts.Now.Sub(g.token.CreatedAt) >= p.opts.TokenGrace
+		}
+		var names []string
+		for i := 1; i < len(gens); i++ {
+			if i == held {
+				continue
+			}
+			replacedBy := gens[i-1]
+			if held >= 0 && i > held {
+				replacedBy = gens[held]
+			}
+			if pastGrace(replacedBy) {
+				names = append(names, gens[i].token.Name)
+			}
+		}
+		if len(names) == 0 {
 			continue
 		}
-		if p.opts.Now.Sub(newest.token.CreatedAt) < p.opts.TokenGrace {
-			continue
-		}
-		for _, older := range gens[1:] {
-			p.do(Action{Kind: DeleteBotToken, Login: bot, TokenName: older.token.Name})
-		}
+		sort.Strings(names)
+		p.do(Action{Kind: DeleteBotTokens, Org: groupOf[bot], Login: bot, TokenNames: names})
 	}
 }
 
@@ -706,6 +756,15 @@ func sortedUserKeys(m map[string]gitea.User) []string {
 }
 
 func sortedTokenKeys(m map[string][]gitea.AccessToken) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedCountKeys(m map[string]int) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)

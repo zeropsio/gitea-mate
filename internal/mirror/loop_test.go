@@ -156,7 +156,7 @@ func TestOutcomeIsLoggedAsCounts(t *testing.T) {
 	p := &counter{result: mirror.Result{
 		Planned: 4, Applied: 4, Destructive: 1,
 		Plan: mirror.Plan{Actions: []mirror.Action{
-			{Kind: mirror.DeleteBotToken, Login: "mate-p-fen", TokenName: "mate/mate-p-fen/1"},
+			{Kind: mirror.DeleteBotTokens, Org: "acme", Login: "mate-p-fen", TokenNames: []string{"mate/mate-p-fen/1"}},
 		}},
 	}}
 	loop := mirror.NewLoop(p, slog.New(slog.NewJSONHandler(&buf, nil)), time.Hour, time.Hour)
@@ -174,7 +174,7 @@ func TestOutcomeIsLoggedAsCounts(t *testing.T) {
 			t.Errorf("the log lacks %s: %s", want, line)
 		}
 	}
-	for _, unwanted := range []string{"mate/mate-p-fen/1", "mate-p-fen", "delete_bot_token"} {
+	for _, unwanted := range []string{"mate/mate-p-fen/1", "mate-p-fen", "delete_bot_tokens"} {
 		if strings.Contains(line, unwanted) {
 			t.Errorf("the log names %q: %s", unwanted, line)
 		}

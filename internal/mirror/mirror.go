@@ -16,7 +16,8 @@ import (
 )
 
 // ErrCapped is returned by a pass whose plan would take away more than the cap
-// allows. Nothing is written; the plan is in the result for a person to read.
+// allows among the actions that belong to no group. Nothing is written; the
+// plan is in the result for a person to read.
 var ErrCapped = errors.New("the plan exceeds the destructive cap")
 
 // ErrUnreadable is returned when a pass could not read the org. Nothing is
@@ -43,7 +44,8 @@ type Mirror struct {
 	// given as GITEA_URL and MATE_BROKER_URL.
 	GiteaPublicURL  string
 	BrokerPublicURL string
-	// Cap is the most destructive actions one pass may apply.
+	// Cap is the most destructive actions one pass may apply to one group, or
+	// to what belongs to no group.
 	Cap int
 	// TokenGrace overrides DefaultTokenGrace.
 	TokenGrace time.Duration
@@ -114,6 +116,31 @@ func (m *Mirror) Pass(ctx context.Context) (Result, error) {
 		TokenGrace:      m.TokenGrace,
 		AppTokenTTL:     m.AppTokenTTL,
 	})
+	cap := m.Cap
+	if cap <= 0 {
+		cap = 10
+	}
+	// The cap is per group: a group whose own plan takes away more than the
+	// cap gets nothing of its plan this pass, and every other group is served
+	// (measured on the KRLS org 2026-09-23, where one group's burst stopped
+	// rights for every group, pass after pass). What belongs to no group — a
+	// person leaving the org, a site admin demoted — is one scope of its own,
+	// and a burst there stops the whole pass: that is what a misread member
+	// list looks like.
+	perGroup := map[string]int{}
+	for _, a := range plan.Actions {
+		if a.Destructive() {
+			perGroup[a.Org]++
+		}
+	}
+	for _, org := range sortedCountKeys(perGroup) {
+		if org != "" && perGroup[org] > cap {
+			plan.Problems = append(plan.Problems, fmt.Sprintf(
+				"group %s: %d actions take something away, the cap is %d; nothing of the group is applied this pass",
+				org, perGroup[org], cap))
+		}
+	}
+
 	// What the pass noticed and will not act on is said once per pass, so a
 	// Mate the broker cannot serve yet is in the log by name. Never a token.
 	for _, problem := range plan.Problems {
@@ -127,15 +154,18 @@ func (m *Mirror) Pass(ctx context.Context) (Result, error) {
 		AwaitingSignIn: len(plan.AwaitingSignIn),
 		Plan:           plan,
 	}
-	cap := m.Cap
-	if cap <= 0 {
-		cap = 10
+	if n := perGroup[""]; n > cap {
+		return result, fmt.Errorf("%w: %d actions that belong to no group take something away, the cap is %d", ErrCapped, n, cap)
 	}
-	if result.Destructive > cap {
-		return result, fmt.Errorf("%w: %d actions take something away, the cap is %d", ErrCapped, result.Destructive, cap)
+	apply := plan
+	apply.Actions = nil
+	for _, a := range plan.Actions {
+		if a.Org == "" || perGroup[a.Org] <= cap {
+			apply.Actions = append(apply.Actions, a)
+		}
 	}
 
-	applied, failures := m.Apply(ctx, plan)
+	applied, failures := m.Apply(ctx, apply)
 	result.Applied = applied
 	result.Failures = failures
 	return result, nil
@@ -505,7 +535,16 @@ func (m *Mirror) perform(ctx context.Context, a Action) error {
 			}
 		}
 		return nil
-	case DeleteBotToken, DeletePersonToken:
+	case DeleteBotTokens:
+		// Whole: a generation that will not go does not keep the others.
+		var errs []error
+		for _, name := range a.TokenNames {
+			if err := m.Gitea.DeleteToken(ctx, a.Login, name); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			}
+		}
+		return errors.Join(errs...)
+	case DeletePersonToken:
 		return m.Gitea.DeleteToken(ctx, a.Login, a.TokenName)
 	case DeliverMateAccess:
 		return m.deliverMateAccess(ctx, a)

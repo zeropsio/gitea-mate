@@ -69,7 +69,8 @@ type Config struct {
 	// MirrorInterval is how often the rights loop runs a pass.
 	MirrorInterval time.Duration
 	// MirrorCap is the most people, tokens or memberships one pass may
-	// disable, remove or delete before it stops and reports instead.
+	// disable, remove or delete in one group — or among what belongs to no
+	// group — before that scope is held and reported instead.
 	MirrorCap int
 	// GiteaOIDCSourceID is the id of Gitea's `zerops` login source, which the
 	// recipe adds once at first boot: the first and only source, so 1. A

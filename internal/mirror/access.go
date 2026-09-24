@@ -102,13 +102,10 @@ func unreachable(what string, err error) string {
 // three variables, or whose token is not its bot's newest live generation. A
 // GITEA_URL naming another Gitea means the token there is not ours; a token
 // that is not the newest generation is one a crash between mint and write
-// left behind, and the grace rule will revoke it — so both mint anew. A
+// left behind — planBotTokens keeps it while the container holds it, so the
+// container is minted anew and converges on the newest. Both mint anew. A
 // broker URL alone is put right without a mint.
-//
-// The bots it will mint for are returned, so the same pass revokes nothing of
-// theirs.
-func (p *planner) planMateAccess() map[string]bool {
-	minting := map[string]bool{}
+func (p *planner) planMateAccess() {
 	for _, g := range p.state.Registry.Groups {
 		for _, prj := range g.Projects {
 			if prj.Kind != roles.KindMate {
@@ -135,16 +132,12 @@ func (p *planner) planMateAccess() map[string]bool {
 			if !write {
 				continue
 			}
-			if mint {
-				minting[bot] = true
-			}
 			p.do(Action{
 				Kind: DeliverMateAccess, Org: g.Slug, Login: bot, FullName: p.state.Mates[prj.ID],
 				Project: prj.ID, Service: svc.ServiceID, Mint: mint,
 			})
 		}
 	}
-	return minting
 }
 
 // newestGeneration is the bot token with the highest generation in its name,
