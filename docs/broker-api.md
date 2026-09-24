@@ -64,7 +64,12 @@ later (an older project tagged into a group) is served on the next pass the same
 
 What the loop cannot do it reports and retries: a Mate project the broker's token does not reach
 (the app has not granted it yet), a project with no `zcp@1` service (nothing to write to), a
-platform refusal. None of these stops the pass for the other Mates.
+platform refusal. None of these stops the pass for the other Mates. The plain variables are written
+first, and a generation is minted only after them; when `GITEA_TOKEN`'s own write is then refused
+(a 4xx), the generation just minted is deleted again. That rollback, not the plain writes (a
+variable already holding its value is not written), is what keeps a container that refuses writes
+from piling up generations. An ambiguous error — a 5xx, a timeout — may follow a write the platform
+committed, so the generation stays and the grace rule bounds it.
 
 Rotation — a compromised Mate, a leaver — is the same mechanism: the loop mints generation *n+1*
 and writes it. The newest generation is never revoked, nor the one the container's `GITEA_TOKEN`

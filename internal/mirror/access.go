@@ -153,14 +153,17 @@ func newestGeneration(bot string, tokens []gitea.AccessToken) (gitea.AccessToken
 	return newest, best > 0
 }
 
-// deliverMateAccess performs one delivery: the bot is made true, a new
-// generation is minted when the plan says so, and each of the three variables
-// is created when missing, updated when different, and left alone when it
-// already holds the value. The container is never restarted.
+// deliverMateAccess performs one delivery: the bot is made true, the two
+// plain variables are written, and only after them is a new generation minted
+// when the plan says so and written as GITEA_TOKEN. Each variable is created
+// when missing, updated when different, and left alone when it already holds
+// the value. The container is never restarted.
 //
-// The variables are read before anything is minted, so a container that
-// cannot be read costs no generation; a write that fails after the mint
-// leaves a token nobody holds, which the next pass supersedes.
+// A plain write that fails stops the delivery before a mint. A plain variable
+// already holding its value is not written, so that proves nothing: what
+// keeps a refusing container from piling generations up is the rollback — a
+// generation whose GITEA_TOKEN write is refused (4xx) is deleted again. On an
+// ambiguous error the container may hold it, so it stays.
 func (m *Mirror) deliverMateAccess(ctx context.Context, a Action) error {
 	if err := m.EnsureBot(ctx, a.Org, a.Login, a.FullName); err != nil {
 		return fmt.Errorf("the bot: %w", err)
@@ -174,39 +177,63 @@ func (m *Mirror) deliverMateAccess(ctx context.Context, a Action) error {
 		byKey[v.Key] = v
 	}
 
-	want := []zerops.UserDataSpec{
+	for _, spec := range []zerops.UserDataSpec{
 		{Key: VarGiteaURL, Content: m.GiteaPublicURL},
 		{Key: VarBrokerURL, Content: m.BrokerPublicURL},
+	} {
+		if err := m.writeVar(ctx, a.Service, byKey, spec); err != nil {
+			return err
+		}
 	}
-	if a.Mint {
-		tokens, err := m.Gitea.ListTokens(ctx, a.Login)
-		if err != nil {
-			return fmt.Errorf("the bot's tokens: %w", err)
-		}
-		newest := 0
-		for _, t := range tokens {
-			if n, ok := ParseTokenName(a.Login, t.Name); ok && n > newest {
-				newest = n
-			}
-		}
-		minted, err := m.Gitea.MintToken(ctx, a.Login, TokenName(a.Login, newest+1), BotScopes)
-		if err != nil {
-			return fmt.Errorf("minting generation %d: %w", newest+1, err)
-		}
-		want = append(want, zerops.UserDataSpec{Key: VarGiteaToken, Content: minted.Value, Sensitive: true})
+	if !a.Mint {
+		return nil
 	}
 
-	for _, spec := range want {
-		cur, exists := byKey[spec.Key]
-		switch {
-		case !exists:
-			if _, err := m.Zerops.CreateUserData(ctx, a.Service, spec); err != nil {
-				return fmt.Errorf("creating %s: %w", spec.Key, err)
-			}
-		case cur.Content != spec.Content:
-			if err := m.Zerops.UpdateUserData(ctx, cur.ID, spec.Key, spec.Content); err != nil {
-				return fmt.Errorf("updating %s: %w", spec.Key, err)
-			}
+	tokens, err := m.Gitea.ListTokens(ctx, a.Login)
+	if err != nil {
+		return fmt.Errorf("the bot's tokens: %w", err)
+	}
+	newest := 0
+	for _, t := range tokens {
+		if n, ok := ParseTokenName(a.Login, t.Name); ok && n > newest {
+			newest = n
+		}
+	}
+	name := TokenName(a.Login, newest+1)
+	minted, err := m.Gitea.MintToken(ctx, a.Login, name, BotScopes)
+	if err != nil {
+		return fmt.Errorf("minting generation %d: %w", newest+1, err)
+	}
+	if err := m.writeVar(ctx, a.Service, byKey, zerops.UserDataSpec{Key: VarGiteaToken, Content: minted.Value, Sensitive: true}); err != nil {
+		// A 4xx is a definite refusal: nobody holds the generation just
+		// minted, and it goes again. This, not the plain writes, keeps a
+		// refusing container from piling generations up; a delete that
+		// fails too is returned. Anything else — a 5xx, a timeout — may
+		// follow a write the platform committed, so the generation stays and
+		// the grace cleanup bounds it.
+		if status := zerops.Status(err); status < 400 || status > 499 {
+			return err
+		}
+		if rollback := m.Gitea.DeleteToken(ctx, a.Login, name); rollback != nil {
+			return fmt.Errorf("%w; deleting the unheld generation %d: %w", err, newest+1, rollback)
+		}
+		return err
+	}
+	return nil
+}
+
+// writeVar makes one variable of a container hold spec: created when missing,
+// updated when different, left alone when it already does.
+func (m *Mirror) writeVar(ctx context.Context, service string, byKey map[string]zerops.ServiceUserData, spec zerops.UserDataSpec) error {
+	cur, exists := byKey[spec.Key]
+	switch {
+	case !exists:
+		if _, err := m.Zerops.CreateUserData(ctx, service, spec); err != nil {
+			return fmt.Errorf("creating %s: %w", spec.Key, err)
+		}
+	case cur.Content != spec.Content:
+		if err := m.Zerops.UpdateUserData(ctx, cur.ID, spec.Key, spec.Content); err != nil {
+			return fmt.Errorf("updating %s: %w", spec.Key, err)
 		}
 	}
 	return nil

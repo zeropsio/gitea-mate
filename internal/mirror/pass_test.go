@@ -577,10 +577,10 @@ func TestAnUnservableMateIsReportedNotFatal(t *testing.T) {
 	}
 }
 
-// A delivery whose write fails is a failure of that action, not of the pass;
-// the next pass mints again because the container does not hold the newest
+// A delivery whose write fails is a failure of that action, not of the pass,
+// and mints nothing; the next pass delivers again and mints the first
 // generation.
-func TestAFailedWriteIsRetriedByMintingAgain(t *testing.T) {
+func TestAFailedWriteIsRetriedOnTheNextPass(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
 	r.zerops.Fail["POST /service-stack/"+zcpService+"/user-data"] = http.StatusInternalServerError
@@ -592,8 +592,8 @@ func TestAFailedWriteIsRetriedByMintingAgain(t *testing.T) {
 	if len(first.Failures) != 1 || !strings.Contains(first.Failures[0], "deliver_mate_access") {
 		t.Fatalf("failures = %v, want the delivery alone", first.Failures)
 	}
-	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 1 {
-		t.Fatalf("tokens = %v", got)
+	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 0 {
+		t.Fatalf("tokens = %v, want none minted for a write that failed", got)
 	}
 
 	delete(r.zerops.Fail, "POST /service-stack/"+zcpService+"/user-data")
@@ -604,11 +604,11 @@ func TestAFailedWriteIsRetriedByMintingAgain(t *testing.T) {
 	if len(second.Failures) != 0 {
 		t.Fatalf("failures = %v", second.Failures)
 	}
-	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 2 {
-		t.Errorf("tokens = %v, want generation 2 beside the orphaned 1", got)
+	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 1 {
+		t.Errorf("tokens = %v, want generation 1 alone", got)
 	}
-	if got := r.vars()[mirror.VarGiteaToken].Content; !strings.HasSuffix(got, "mate/mate-p-fen/2") {
-		t.Errorf("GITEA_TOKEN holds %q, want generation 2", got)
+	if got := r.vars()[mirror.VarGiteaToken].Content; !strings.HasSuffix(got, "mate/mate-p-fen/1") {
+		t.Errorf("GITEA_TOKEN holds %q, want generation 1", got)
 	}
 }
 
@@ -1054,5 +1054,133 @@ func TestADeletedMateInsideALiveGroupNeverHoldsIt(t *testing.T) {
 	}
 	if u, _ := r.gitea.User(dead); !u.ProhibitLogin {
 		t.Errorf("%s may still sign in after the second pass", dead)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Mint only after the plain variables; an unheld generation is deleted again
+// ---------------------------------------------------------------------------
+
+// A container the broker may not write — measured 2026-09-24: a Mate made by
+// an org ADMIN, whose project the broker's token was never granted, answered
+// every pass "creating GITEA_URL: zerops api: 403" — costs no generation.
+func TestA403OnTheEnvWriteMintsNoToken(t *testing.T) {
+	r := newRig(t)
+	r.zerops.Fail["POST /service-stack/"+zcpService+"/user-data"] = http.StatusForbidden
+
+	for i := range 3 {
+		result := r.passAt(t, now.Add(time.Duration(i)*mirror.DefaultInterval))
+		if len(result.Failures) != 1 {
+			t.Fatalf("pass %d: failures %v, want the delivery alone", i, result.Failures)
+		}
+	}
+	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 0 {
+		t.Errorf("tokens = %v, want none minted for a container that refuses writes", got)
+	}
+}
+
+// tokenWriteFails is Fen's container holding the two plain variables and
+// answering status to the GITEA_TOKEN write, so the token's write is the
+// delivery's first.
+func tokenWriteFails(r *rig, status int) {
+	r.zerops.SetUserData(zcpService,
+		zerops.ServiceUserData{Key: mirror.VarGiteaURL, Content: giteaPublicURL},
+		zerops.ServiceUserData{Key: mirror.VarBrokerURL, Content: brokerPublicURL},
+	)
+	r.zerops.Fail["POST /service-stack/"+zcpService+"/user-data"] = status
+}
+
+// A definite refusal — the ADMIN-made Mate — means the platform took nothing:
+// the generation just minted is deleted again, pass after pass, so nobody
+// holds a token nobody was given and none pile up.
+func TestA403OnTheTokenWriteDeletesIt(t *testing.T) {
+	r := newRig(t)
+	tokenWriteFails(r, http.StatusForbidden)
+
+	for i := range 3 {
+		result := r.passAt(t, now.Add(time.Duration(i)*mirror.DefaultInterval))
+		if len(result.Failures) != 1 || !strings.Contains(result.Failures[0], mirror.VarGiteaToken) {
+			t.Fatalf("pass %d: failures = %v, want the token write", i, result.Failures)
+		}
+	}
+	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 0 {
+		t.Errorf("tokens = %v, want every minted generation deleted again", got)
+	}
+}
+
+// An ambiguous answer — a 5xx, a timeout, a connection lost with no answer at
+// all — may come after the platform committed the write, and then the
+// container holds the generation just minted: it is kept, and the grace
+// cleanup bounds what is left unheld.
+func TestAnAmbiguousErrorOnTheTokenWriteKeepsTheMintedToken(t *testing.T) {
+	cases := []struct {
+		name string
+		fail func(r *rig)
+	}{
+		{name: "500", fail: func(r *rig) { tokenWriteFails(r, http.StatusInternalServerError) }},
+		{name: "504", fail: func(r *rig) { tokenWriteFails(r, http.StatusGatewayTimeout) }},
+		{name: "no answer after the platform took the write", fail: func(r *rig) {
+			r.zerops.SetUserData(zcpService,
+				zerops.ServiceUserData{Key: mirror.VarGiteaURL, Content: giteaPublicURL},
+				zerops.ServiceUserData{Key: mirror.VarBrokerURL, Content: brokerPublicURL},
+			)
+			r.mirror.Zerops = zerops.New(r.zerops.URL(), "broker", &http.Client{
+				Transport: answerLost{method: http.MethodPost, suffix: "/user-data"},
+			})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			tc.fail(r)
+
+			result := r.passAt(t, now)
+			if len(result.Failures) != 1 || !strings.Contains(result.Failures[0], mirror.VarGiteaToken) {
+				t.Fatalf("failures = %v, want the token write", result.Failures)
+			}
+			if got := r.gitea.Tokens("mate-p-fen"); len(got) != 1 || got[0] != mirror.TokenName("mate-p-fen", 1) {
+				t.Errorf("tokens = %v, want the minted generation kept", got)
+			}
+		})
+	}
+}
+
+// answerLost delivers every request, and for one route drops the answer: the
+// platform took the write, the broker sees a transport error and no status.
+type answerLost struct{ method, suffix string }
+
+func (a answerLost) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil || req.Method != a.method || !strings.HasSuffix(req.URL.Path, a.suffix) {
+		return resp, err
+	}
+	resp.Body.Close()
+	return nil, errors.New("connection reset by peer")
+}
+
+// Rotation refused: a Mate holding generation n whose write of n+1 is refused
+// loses n+1 alone — n stays in Gitea and in its container, so it keeps
+// working.
+func TestARefusedRotationDeletesTheNewGenerationAndKeepsTheHeldOne(t *testing.T) {
+	r := newRig(t)
+	r.gitea.AddUser(gitea.User{Login: "mate-p-fen", Active: true, Restricted: true})
+	held := "value-1"
+	r.gitea.AddToken("mate-p-fen", mirror.TokenName("mate-p-fen", 1), held, mirror.BotScopes...)
+	r.zerops.SetUserData(zcpService,
+		zerops.ServiceUserData{ID: "ud-url", Key: mirror.VarGiteaURL, Content: "https://elsewhere.example"},
+		zerops.ServiceUserData{ID: "ud-broker", Key: mirror.VarBrokerURL, Content: brokerPublicURL},
+		zerops.ServiceUserData{ID: "ud-tok", Key: mirror.VarGiteaToken, Content: held, Sensitive: true},
+	)
+	r.zerops.Fail["PUT /user-data/ud-tok"] = http.StatusForbidden
+
+	result := r.passAt(t, now)
+	if len(result.Failures) != 1 || !strings.Contains(result.Failures[0], mirror.VarGiteaToken) {
+		t.Fatalf("failures = %v, want the token write", result.Failures)
+	}
+	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 1 || got[0] != mirror.TokenName("mate-p-fen", 1) {
+		t.Errorf("tokens = %v, want generation 1 alone", got)
+	}
+	if got := r.vars()[mirror.VarGiteaToken].Content; got != held {
+		t.Errorf("GITEA_TOKEN holds %q, want generation 1's value", got)
 	}
 }
