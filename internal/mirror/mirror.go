@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zeropsio/gitea-mate/internal/gitea"
@@ -53,6 +54,15 @@ type Mirror struct {
 	AppTokenTTL time.Duration
 	// Now is injectable for tests; nil means time.Now.
 	Now func() time.Time
+	// DeadAfter is how far apart two projectNotFound answers must be before a
+	// registered project reads as deleted; zero means DefaultInterval.
+	DeadAfter time.Duration
+
+	// notFoundSince is when each registered project that is missing from the
+	// project list first answered projectNotFound. It lives in memory: a
+	// restart only delays a retirement, it never causes one.
+	notFoundMu    sync.Mutex
+	notFoundSince map[string]time.Time
 
 	// hookSecret is the HMAC secret the broker puts on the hooks it creates.
 	// It is unexported and write-only (SetHookSecret) so no call site can pass
@@ -179,6 +189,7 @@ func (m *Mirror) Gather(ctx context.Context) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
+	m.excludeDeleted(ctx, &state)
 	giteaState, err := m.gatherGitea(ctx, state.Registry)
 	if err != nil {
 		return State{}, fmt.Errorf("%w: Gitea: %w", ErrUnreadable, err)
@@ -188,6 +199,62 @@ func (m *Mirror) Gather(ctx context.Context) (State, error) {
 	// pass's: it is reported, skipped and read again next time.
 	state.MateServices, state.MateProblems = m.gatherMates(ctx, state.Registry)
 	return state, nil
+}
+
+// excludeDeleted takes out of the registry every entry whose project is
+// deleted in Zerops: missing from the project list, and answering GET
+// /project/{id} with code projectNotFound on two passes at least DeadAfter
+// apart (a deleted project answers 400 projectNotFound, measured). Any other
+// answer — the project, a 403, a 5xx, a network error — is not deleted, and
+// the entry stays: this fails closed. An excluded entry is never planned or
+// counted; a deleted Mate's bot is retired by its project id (DeadMates), and
+// a group whose every entry is deleted drops out. The tags stay, because the
+// broker cannot write them.
+func (m *Mirror) excludeDeleted(ctx context.Context, state *State) {
+	now := m.now()
+	after := m.DeadAfter
+	if after <= 0 {
+		after = DefaultInterval
+	}
+	m.notFoundMu.Lock()
+	defer m.notFoundMu.Unlock()
+	sightings := map[string]time.Time{}
+	deleted := func(projectID string) bool {
+		if _, listed := state.Mates[projectID]; listed {
+			return false
+		}
+		if _, err := m.Zerops.Project(ctx, projectID); zerops.Code(err) != "projectNotFound" {
+			return false
+		}
+		first, seen := m.notFoundSince[projectID]
+		if !seen {
+			first = now
+		}
+		sightings[projectID] = first
+		return now.Sub(first) >= after
+	}
+
+	groups := make([]registry.Group, 0, len(state.Registry.Groups))
+	for _, g := range state.Registry.Groups {
+		live := g
+		live.Projects = nil
+		for _, prj := range g.Projects {
+			if !deleted(prj.ID) {
+				live.Projects = append(live.Projects, prj)
+				continue
+			}
+			m.log().Info("the rights loop leaves out a deleted project", "group", g.Slug, "project", prj.ID)
+			if prj.Kind == roles.KindMate {
+				state.DeadMates = append(state.DeadMates, prj.ID)
+			}
+		}
+		if len(g.Projects) > 0 && len(live.Projects) == 0 {
+			continue
+		}
+		groups = append(groups, live)
+	}
+	state.Registry.Groups = groups
+	m.notFoundSince = sightings
 }
 
 // ReadOrg reads the Zerops half of a pass: who the org's people are, what they
@@ -548,6 +615,21 @@ func (m *Mirror) perform(ctx context.Context, a Action) error {
 		return m.Gitea.DeleteToken(ctx, a.Login, a.TokenName)
 	case DeliverMateAccess:
 		return m.deliverMateAccess(ctx, a)
+	case RetireBot:
+		// Tokens first: a bot whose login is prohibited is never planned
+		// again, so it must hold none by then.
+		tokens, err := m.Gitea.ListTokens(ctx, a.Login)
+		if err != nil {
+			return err
+		}
+		for _, t := range tokens {
+			if err := m.Gitea.DeleteToken(ctx, a.Login, t.Name); err != nil {
+				return err
+			}
+		}
+		yes := true
+		_, err = m.Gitea.EditUser(ctx, a.Login, gitea.UserEdit{ProhibitLogin: &yes})
+		return err
 	default:
 		return fmt.Errorf("unknown action %q", a.Kind)
 	}

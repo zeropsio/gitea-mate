@@ -213,7 +213,9 @@ func (m *Mirror) deliverMateAccess(ctx context.Context, a Action) error {
 }
 
 // EnsureBot makes a Mate's bot true on its own: created if missing, shaped
-// (restricted, creating nothing), and in its group's read team. It is
+// (restricted, creating nothing, allowed to sign in — a bot retired while its
+// project read as deleted comes back once the project is listed again), and in
+// its group's read team. It is
 // idempotent, and it is what a delivery does first, so a Mate is served even
 // on a pass where the bot's own actions were planned and one of them failed.
 func (m *Mirror) EnsureBot(ctx context.Context, org, bot, mateName string) error {
@@ -231,6 +233,7 @@ func (m *Mirror) EnsureBot(ctx context.Context, org, bot, mateName string) error
 	yes, no, zero := true, false, 0
 	if _, err := m.Gitea.EditUser(ctx, bot, gitea.UserEdit{
 		Active: &yes, Restricted: &yes, MaxRepoCreation: &zero, AllowCreateOrganization: &no,
+		ProhibitLogin: &no,
 	}); err != nil {
 		return err
 	}

@@ -516,9 +516,10 @@ func (f *Fake) listUsers(w http.ResponseWriter) {
 
 func (f *Fake) editUser(w http.ResponseWriter, r *http.Request, login string) {
 	var in struct {
-		Active     *bool `json:"active"`
-		Restricted *bool `json:"restricted"`
-		Admin      *bool `json:"admin"`
+		Active        *bool `json:"active"`
+		Restricted    *bool `json:"restricted"`
+		Admin         *bool `json:"admin"`
+		ProhibitLogin *bool `json:"prohibit_login"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	f.mu.Lock()
@@ -536,6 +537,9 @@ func (f *Fake) editUser(w http.ResponseWriter, r *http.Request, login string) {
 	}
 	if in.Admin != nil {
 		u.IsAdmin = *in.Admin
+	}
+	if in.ProhibitLogin != nil {
+		u.ProhibitLogin = *in.ProhibitLogin
 	}
 	writeJSON(w, 200, u)
 }

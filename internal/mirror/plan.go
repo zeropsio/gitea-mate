@@ -98,6 +98,9 @@ type State struct {
 	// why not. A Mate in neither is one the state was built without.
 	MateServices map[string]MateService
 	MateProblems map[string]string
+	// DeadMates are the registered Mates whose project is deleted in Zerops.
+	// Their entries are out of Registry; their bots are retired.
+	DeadMates []string
 }
 
 // Member is one person in the org, as the planner needs them.
@@ -185,6 +188,10 @@ const (
 	// (D23): a merge, nothing taken away.
 	MergeRecipePullRequest Kind = "merge_recipe_pull_request"
 	DeliverMateAccess      Kind = "deliver_mate_access"
+	// RetireBot deletes every token of a deleted Mate's bot and prohibits its
+	// login. The platform's projectNotFound is the guard, so the cap does not
+	// count it.
+	RetireBot Kind = "retire_bot"
 )
 
 // Action is one Gitea write. Only the fields its Kind needs are set.
@@ -345,6 +352,7 @@ func (p *planner) plan() {
 	p.planMateAccess()
 	p.planBotTokens()
 	p.planAppTokens()
+	p.planRetirements()
 }
 
 // planStructure: an org, its three teams, its group repository and its
@@ -523,6 +531,13 @@ func (p *planner) planPeople() {
 		}
 	}
 
+	// A deleted Mate's bot is retired, not moved: taking it out of its team
+	// would be a removal counted against the group for a bot that can no
+	// longer sign in.
+	retired := map[string]bool{}
+	for _, projectID := range p.state.DeadMates {
+		retired[BotLogin(projectID)] = true
+	}
 	for _, g := range p.state.Registry.Groups {
 		for _, team := range []string{TeamRead, TeamWrite, TeamRelease} {
 			current := p.state.Gitea.Teams[g.Slug][team].Members
@@ -535,7 +550,7 @@ func (p *planner) planPeople() {
 				if desired[g.Slug][team][login] {
 					continue
 				}
-				if login == p.opts.AdminLogin {
+				if login == p.opts.AdminLogin || retired[login] {
 					continue
 				}
 				p.do(Action{Kind: RemoveTeamMember, Org: g.Slug, Team: team, Login: login})
@@ -668,6 +683,19 @@ func (p *planner) planBotTokens() {
 		}
 		sort.Strings(names)
 		p.do(Action{Kind: DeleteBotTokens, Org: groupOf[bot], Login: bot, TokenNames: names})
+	}
+}
+
+// planRetirements: the bot of a Mate whose project is deleted is retired once;
+// a bot already prohibited from signing in is left alone.
+func (p *planner) planRetirements() {
+	dead := append([]string(nil), p.state.DeadMates...)
+	sort.Strings(dead)
+	for _, projectID := range dead {
+		login := BotLogin(projectID)
+		if bot, exists := p.state.Gitea.Users[login]; exists && !bot.ProhibitLogin {
+			p.do(Action{Kind: RetireBot, Login: login, Project: projectID})
+		}
 	}
 }
 

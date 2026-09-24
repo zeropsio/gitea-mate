@@ -25,6 +25,8 @@ type User struct {
 	Restricted bool   `json:"restricted"`
 	Active     bool   `json:"active"`
 	Visibility string `json:"visibility"`
+	// ProhibitLogin is set on a retired bot: it may not sign in, token or not.
+	ProhibitLogin bool `json:"prohibit_login"`
 }
 
 // NewUser creates a user. Its password is generated here, never returned and
@@ -99,6 +101,7 @@ type UserEdit struct {
 	AllowCreateOrganization *bool
 	FullName                *string
 	Admin                   *bool
+	ProhibitLogin           *bool
 }
 
 type editUserOption struct {
@@ -112,6 +115,7 @@ type editUserOption struct {
 	AllowCreateOrganization *bool   `json:"allow_create_organization,omitempty"`
 	FullName                *string `json:"full_name,omitempty"`
 	Admin                   *bool   `json:"admin,omitempty"`
+	ProhibitLogin           *bool   `json:"prohibit_login,omitempty"`
 }
 
 // EditUser is PATCH /admin/users/{login}.
@@ -124,6 +128,7 @@ func (c *Client) EditUser(ctx context.Context, login string, e UserEdit) (User, 
 		AllowCreateOrganization: e.AllowCreateOrganization,
 		FullName:                e.FullName,
 		Admin:                   e.Admin,
+		ProhibitLogin:           e.ProhibitLogin,
 	}
 	var out User
 	err := c.do(ctx, http.MethodPatch, "/admin/users/"+esc(login), in, &out, authToken)

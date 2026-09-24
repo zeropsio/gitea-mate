@@ -466,6 +466,9 @@ func (f *Fake) projectSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"items": items, "totalHits": total, "limit": filter.Limit, "offset": filter.Offset})
 }
 
+// project is GET /project/{id}. A project that is not there answers 400
+// projectNotFound, never 404 — what the platform answers for a deleted project
+// (measured 2026-09-16 and 2026-09-20).
 func (f *Fake) project(w http.ResponseWriter, path string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -476,7 +479,7 @@ func (f *Fake) project(w http.ResponseWriter, path string) {
 			return
 		}
 	}
-	writeErr(w, http.StatusNotFound, "projectNotFound", "no such project")
+	writeErr(w, http.StatusBadRequest, "projectNotFound", "no such project")
 }
 
 func (f *Fake) updateProject(w http.ResponseWriter, r *http.Request, path string) {

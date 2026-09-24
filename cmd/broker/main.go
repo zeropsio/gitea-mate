@@ -88,6 +88,8 @@ func run(log *slog.Logger) error {
 		BrokerPublicURL: cfg.BrokerPublicURL,
 		Cap:             cfg.MirrorCap,
 		AppTokenTTL:     cfg.AppTokenTTL,
+		// A deleted project is confirmed on two passes an interval apart.
+		DeadAfter: cfg.MirrorInterval,
 	}
 	rights.SetHookSecret(cfg.GiteaWebhookSecret.Reveal())
 	loop := mirror.NewLoop(rights, log, cfg.MirrorInterval, mirror.DefaultNudgeDelay)

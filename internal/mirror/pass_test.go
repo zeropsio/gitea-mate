@@ -838,3 +838,221 @@ func TestAGroupOverTheCapAppliesNothingAndIsReported(t *testing.T) {
 		t.Errorf("problems = %v, want one naming acme and the cap", result.Problems)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// A project deleted in Zerops
+// ---------------------------------------------------------------------------
+
+// deleteFen deletes Fen's project in Zerops after a first pass served it: it
+// leaves the project list, GET /project/p-fen answers 400 projectNotFound
+// (measured), and its registry entry stays, because only the app writes tags.
+func deleteFen(t *testing.T, r *rig) {
+	t.Helper()
+	if _, err := r.mirror.Pass(context.Background()); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	projects := rigProjects(rigTags())
+	var kept []zerops.Project
+	for _, p := range projects {
+		if p.ID != "p-fen" {
+			kept = append(kept, p)
+		}
+	}
+	r.zerops.SetProjects(kept...)
+	r.zerops.SetServices("p-fen")
+}
+
+// passAt runs a pass on the mirror's clock set to at.
+func (r *rig) passAt(t *testing.T, at time.Time) mirror.Result {
+	t.Helper()
+	r.mirror.Now = func() time.Time { return at }
+	result, err := r.mirror.Pass(context.Background())
+	if err != nil {
+		t.Fatalf("pass at %s: %v", at, err)
+	}
+	return result
+}
+
+func TestAProjectMissingFromSearchAndNotFoundTwiceIsExcludedAndItsBotRetired(t *testing.T) {
+	r := newRig(t)
+	deleteFen(t, r)
+
+	r.passAt(t, now)
+	second := r.passAt(t, now.Add(mirror.DefaultInterval))
+
+	for _, p := range second.Problems {
+		if strings.Contains(p, "p-fen") {
+			t.Errorf("a dead Mate is still planned for: %s", p)
+		}
+	}
+	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 0 {
+		t.Errorf("the dead Mate's bot keeps tokens %v", got)
+	}
+	if bot, _ := r.gitea.User("mate-p-fen"); !bot.ProhibitLogin {
+		t.Errorf("the dead Mate's bot may still sign in: %+v", bot)
+	}
+	third := r.passAt(t, now.Add(2*mirror.DefaultInterval))
+	if third.Planned != 0 {
+		t.Errorf("a retired bot is planned again:\n%s", mirror.Describe(third.Plan))
+	}
+}
+
+// Only projectNotFound counts. A refusal, an outage or a network error says
+// nothing about whether the project exists, so the entry stays and nothing is
+// retired, however long it lasts.
+func TestA403OnTheProjectReadIsNeverTreatedAsDead(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusInternalServerError, http.StatusBadGateway} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			r := newRig(t)
+			deleteFen(t, r)
+			r.zerops.Fail["GET /project/p-fen"] = status
+
+			for i := range 3 {
+				r.passAt(t, now.Add(time.Duration(i)*mirror.DefaultInterval))
+			}
+			if got := r.gitea.Tokens("mate-p-fen"); len(got) == 0 {
+				t.Error("the bot's tokens were deleted on a read that never said the project is gone")
+			}
+			if bot, _ := r.gitea.User("mate-p-fen"); bot.ProhibitLogin {
+				t.Error("the bot was retired on a read that never said the project is gone")
+			}
+		})
+	}
+}
+
+// One projectNotFound is not enough, and neither are two inside an interval:
+// the search index and the write path disagree for a moment around a
+// project's birth and death.
+func TestASingleProjectNotFoundIsNotEnough(t *testing.T) {
+	r := newRig(t)
+	deleteFen(t, r)
+
+	r.passAt(t, now)
+	r.passAt(t, now.Add(mirror.DefaultInterval-time.Second))
+	if got := r.gitea.Tokens("mate-p-fen"); len(got) == 0 {
+		t.Error("the bot's tokens were deleted before a second sighting an interval later")
+	}
+	if bot, _ := r.gitea.User("mate-p-fen"); bot.ProhibitLogin {
+		t.Error("the bot was retired before a second sighting an interval later")
+	}
+}
+
+// Retirement is not one-way: a project listed again with its zcp container is
+// alive, and its bot signs in again with the token the pass delivers.
+func TestARetiredBotWhoseProjectReappearsCanSignInAgain(t *testing.T) {
+	r := newRig(t)
+	deleteFen(t, r)
+	r.passAt(t, now)
+	r.passAt(t, now.Add(mirror.DefaultInterval))
+	if bot, _ := r.gitea.User("mate-p-fen"); !bot.ProhibitLogin {
+		t.Fatalf("precondition: the bot was not retired: %+v", bot)
+	}
+
+	r.zerops.SetProjects(rigProjects(rigTags())...)
+	r.zerops.SetServices("p-fen", zerops.Service{ID: zcpService, ProjectID: "p-fen", Name: "zcp", Status: "ACTIVE",
+		TypeInfo: zerops.ServiceTypeInfo{VersionName: "zcp@1"}})
+	r.passAt(t, now.Add(2*mirror.DefaultInterval))
+
+	if bot, _ := r.gitea.User("mate-p-fen"); bot.ProhibitLogin {
+		t.Errorf("the bot of a project that is back may not sign in: %+v", bot)
+	}
+	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 1 {
+		t.Errorf("tokens = %v, want the one generation delivered", got)
+	}
+}
+
+// The 2026-09-23 incident on the KRLS org, replayed: seven Mates deleted in
+// Zerops, their registry entries left behind in three groups, each bot
+// holding a pile of token generations long past the grace — beside two live
+// groups. The live groups are served on the first pass, the org is never
+// capped as a whole, and by the second pass an interval later every dead bot
+// is retired.
+func TestTheDeletedMatesIncidentOf20260923(t *testing.T) {
+	r := newRig(t)
+	dead := map[string][]string{
+		"old1": {"p-d1", "p-d2", "p-d3"},
+		"old2": {"p-d4", "p-d5"},
+		"old3": {"p-d6", "p-d7"},
+	}
+	tags := append(rigTags(), "mate:gn:g-beta:beta", "mate:gm:g-beta:p-bee:mate")
+	for slug, ids := range dead {
+		tags = append(tags, "mate:gn:g-"+slug+":"+slug)
+		for _, id := range ids {
+			tags = append(tags, "mate:gm:g-"+slug+":"+id+":mate")
+			bot := mirror.BotLogin(id)
+			r.gitea.AddUser(gitea.User{Login: bot, Active: true, Restricted: true})
+			for gen := 1; gen <= 7; gen++ {
+				name := mirror.TokenName(bot, gen)
+				r.gitea.AddTokenCreated(bot, name, "value-"+name, now.Add(-time.Duration(8-gen)*time.Hour), mirror.BotScopes...)
+			}
+		}
+	}
+	r.zerops.SetProjects(append(rigProjects(tags), zerops.Project{ID: "p-bee", Name: "Bee"})...)
+	r.zerops.SetServices("p-bee", zerops.Service{ID: "s-bee-zcp", ProjectID: "p-bee", Name: "zcp", Status: "ACTIVE",
+		TypeInfo: zerops.ServiceTypeInfo{VersionName: "zcp@1"}})
+
+	first := r.passAt(t, now)
+	for _, slug := range []string{"acme", "beta"} {
+		if got := r.gitea.Repos(slug); !contains(got, "group") {
+			t.Errorf("live group %s was not built on the first pass: repos %v", slug, got)
+		}
+	}
+	for _, svc := range []string{zcpService, "s-bee-zcp"} {
+		var held bool
+		for _, v := range r.zerops.UserData(svc) {
+			held = held || v.Key == mirror.VarGiteaToken
+		}
+		if !held {
+			t.Errorf("live Mate container %s holds no GITEA_TOKEN after the first pass; failures %v", svc, first.Failures)
+		}
+	}
+
+	second := r.passAt(t, now.Add(mirror.DefaultInterval))
+	for _, ids := range dead {
+		for _, id := range ids {
+			bot := mirror.BotLogin(id)
+			if got := r.gitea.Tokens(bot); len(got) != 0 {
+				t.Errorf("%s keeps %d tokens after the second pass", bot, len(got))
+			}
+			if u, _ := r.gitea.User(bot); !u.ProhibitLogin {
+				t.Errorf("%s may still sign in after the second pass", bot)
+			}
+		}
+	}
+	for _, p := range second.Problems {
+		if strings.Contains(p, "p-d") || strings.Contains(p, "old") {
+			t.Errorf("a deleted Mate is still reported: %s", p)
+		}
+	}
+	if len(second.Failures) != 0 {
+		t.Errorf("failures on the second pass: %v", second.Failures)
+	}
+}
+
+// The incident's other shape: a deleted Mate registered in a live group. Its
+// pile of old generations falls due on the first pass, while it still reads
+// as alive, and still never holds the group; by the second pass it is retired.
+func TestADeletedMateInsideALiveGroupNeverHoldsIt(t *testing.T) {
+	r := newRig(t)
+	r.gitea.AddUser(giteaUser(roles.Login("u-jan")))
+	r.registry(append(rigTags(), "mate:gm:g-acme:p-d8:mate")...)
+	dead := mirror.BotLogin("p-d8")
+	r.gitea.AddUser(gitea.User{Login: dead, Active: true, Restricted: true})
+	for gen := 1; gen <= 12; gen++ {
+		name := mirror.TokenName(dead, gen)
+		r.gitea.AddTokenCreated(dead, name, "value-"+name, now.Add(-time.Duration(13-gen)*time.Hour), mirror.BotScopes...)
+	}
+
+	first := r.passAt(t, now)
+	if got := r.gitea.TeamMembers("acme", "write"); !contains(got, roles.Login("u-jan")) {
+		t.Errorf("acme was not served on the first pass: write team %v, problems %v", got, first.Problems)
+	}
+
+	r.passAt(t, now.Add(mirror.DefaultInterval))
+	if got := r.gitea.Tokens(dead); len(got) != 0 {
+		t.Errorf("%s keeps tokens %v after the second pass", dead, got)
+	}
+	if u, _ := r.gitea.User(dead); !u.ProhibitLogin {
+		t.Errorf("%s may still sign in after the second pass", dead)
+	}
+}
