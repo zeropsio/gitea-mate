@@ -20,7 +20,10 @@ import (
 // AppVersionRecord is one app version the fake holds. Name is kept here and
 // never served on an app-version route: the platform echoes it nowhere, and
 // the fake would be lying if it did. It reaches a client exactly where the
-// platform puts it — the service's own userData, while the version is ACTIVE.
+// platform puts it — the service's own userData, from the moment its build
+// starts (measured 2026-09-24, three runs: userData names the new version
+// about 7 s into a deploy, activeAppVersion only once it is live, 60-70 s
+// later).
 type AppVersionRecord struct {
 	zerops.AppVersion
 	// Name is what the create was called with.
@@ -33,7 +36,8 @@ type AppVersionRecord struct {
 }
 
 // AddAppVersion seeds an existing app version on a service — what a service
-// that has already deployed looks like.
+// that has already deployed looks like. One seeded ACTIVE is what the service
+// runs, and what its userData names.
 func (f *Fake) AddAppVersion(v zerops.AppVersion, name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -42,8 +46,47 @@ func (f *Fake) AddAppVersion(v zerops.AppVersion, name string) {
 	}
 	f.versions[v.ID] = &AppVersionRecord{AppVersion: v, Name: name, Archive: []byte("seeded " + name)}
 	if v.Status == zerops.AppVersionActive {
-		f.deployed[v.ServiceStackID] = true
+		f.activate(v.ID)
 	}
+}
+
+// StartBuild seeds a deploy that is on its way: the service's userData names
+// the new version at once, while activeAppVersion stays on what runs until
+// [Fake.Activate].
+func (f *Fake) StartBuild(serviceID, name string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sequence++
+	v := &AppVersionRecord{
+		AppVersion: zerops.AppVersion{
+			ID: "ver-" + itoa(f.sequence), ServiceStackID: serviceID, Status: "BUILDING", Sequence: f.sequence,
+		},
+		Name: name,
+	}
+	f.versions[v.ID] = v
+	f.named[serviceID] = v.ID
+	return v.ID
+}
+
+// Activate is a started deploy going live.
+func (f *Fake) Activate(versionID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.activate(versionID)
+}
+
+// activate is called with the lock held: the version runs, the one it
+// replaces flips to BACKUP, and the service's userData names it.
+func (f *Fake) activate(versionID string) {
+	v := f.versions[versionID]
+	v.Status = zerops.AppVersionActive
+	for _, other := range f.versions {
+		if other.ServiceStackID == v.ServiceStackID && other.ID != v.ID && other.Status == zerops.AppVersionActive {
+			other.Status = zerops.AppVersionBackup
+		}
+	}
+	f.named[v.ServiceStackID] = v.ID
+	f.deployed[v.ServiceStackID] = true
 }
 
 // AppVersions reads back one service's versions, newest first.
@@ -134,9 +177,9 @@ func (f *Fake) createAppVersion(w http.ResponseWriter, r *http.Request, serviceI
 }
 
 // service is GET /service-stack/{id}: the service, its own environment and the
-// version it runs. appVersionName is served for the ACTIVE version alone,
-// exactly as the platform does — an older version flips to BACKUP and its name
-// is gone for good.
+// version it runs. userData names the version whose build started last —
+// appVersionId and appVersionName — and activeAppVersion is the one that runs;
+// the two differ while a deploy is on its way, and after a build that failed.
 func (f *Fake) service(w http.ResponseWriter, serviceID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -147,16 +190,18 @@ func (f *Fake) service(w http.ResponseWriter, serviceID string) {
 			}
 			detail := zerops.ServiceDetail{Service: s}
 			for _, record := range f.versionsOf(serviceID) {
-				if record.Status != zerops.AppVersionActive {
-					continue
+				if record.Status == zerops.AppVersionActive {
+					active := record.AppVersion
+					detail.ActiveAppVersion = &active
+					break
 				}
-				active := record.AppVersion
-				detail.ActiveAppVersion = &active
+			}
+			if named, ok := f.versions[f.named[serviceID]]; ok {
 				detail.UserData = []zerops.ServiceUserData{
 					{Key: "hostname", Content: s.Name},
-					{Key: zerops.AppVersionNameKey, Content: record.Name},
+					{Key: zerops.AppVersionIDKey, Content: named.ID},
+					{Key: zerops.AppVersionNameKey, Content: named.Name},
 				}
-				break
 			}
 			writeJSON(w, 200, detail)
 			return
@@ -210,6 +255,7 @@ func (f *Fake) buildAndDeploy(w http.ResponseWriter, r *http.Request, versionID 
 		return
 	}
 	v.Yaml, v.Setup = in.Yaml, in.Setup
+	f.named[v.ServiceStackID] = v.ID
 
 	f.sequence++
 	proc := zerops.Process{
@@ -220,13 +266,7 @@ func (f *Fake) buildAndDeploy(w http.ResponseWriter, r *http.Request, versionID 
 		proc.Status = zerops.ProcessFailed
 		v.Status = zerops.AppVersionBuildFailed
 	} else {
-		v.Status = zerops.AppVersionActive
-		for _, other := range f.versions {
-			if other.ServiceStackID == v.ServiceStackID && other.ID != v.ID && other.Status == zerops.AppVersionActive {
-				other.Status = zerops.AppVersionBackup
-			}
-		}
-		f.deployed[v.ServiceStackID] = true
+		f.activate(v.ID)
 	}
 	f.processes[proc.ID] = proc
 	writeJSON(w, 200, proc)

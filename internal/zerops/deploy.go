@@ -22,9 +22,9 @@ import (
 // /service-stack/{id}/app-version does not echo it, the items of GET
 // /service-stack/{id}/app-version have no name key, GET /app-version/{id} has
 // none either, and POST /app-version/search is 404. The one place it survives
-// is the service's own environment, as [AppVersionNameKey] — for the ACTIVE
-// version alone. So a version list is good for statuses and nothing else, and
-// what is deployed is read from [ServiceDetail.DeployedSha].
+// is the service's own environment, as [AppVersionNameKey] — for the version
+// whose build started last. So a version list is good for statuses and nothing
+// else, and what is deployed is read from [ServiceDetail.DeployedSha].
 type AppVersion struct {
 	ID             string    `json:"id"`
 	ServiceStackID string    `json:"serviceStackId"`
@@ -96,10 +96,15 @@ type ServiceUserData struct {
 	Sensitive bool   `json:"sensitive"`
 }
 
-// AppVersionNameKey is the userData entry that carries the name of the version
-// a service is running — the only place the name a deploy sent survives, and
-// only while that version is ACTIVE (measured 2026-09-16).
-const AppVersionNameKey = "appVersionName"
+// AppVersionNameKey and AppVersionIDKey are the userData entries that name the
+// version whose build started last — the only place the name a deploy sent
+// survives. They switch to a new version when its build starts, about 7 s into
+// a deploy, while activeAppVersion switches only once it runs, 60-70 s later
+// (measured 2026-09-24, three runs).
+const (
+	AppVersionNameKey = "appVersionName"
+	AppVersionIDKey   = "appVersionId"
+)
 
 // ServiceDetail is GET /service-stack/{id}: one service with its own
 // environment and the version it is running. It is the direct read, not the
@@ -112,21 +117,42 @@ type ServiceDetail struct {
 	ActiveAppVersion *AppVersion       `json:"activeAppVersion"`
 }
 
-// DeployedName is the name of the version the service is running, or empty
-// when it has never deployed.
-func (d ServiceDetail) DeployedName() string {
+// DeployedName is the name userData carries: the version whose build started
+// last, which is not the one running while [ServiceDetail.Deploying]. Empty
+// when the service has never deployed.
+func (d ServiceDetail) DeployedName() string { return d.userData(AppVersionNameKey) }
+
+// DeployedSha is the commit the service is verifiably running: the first token
+// of [ServiceDetail.DeployedName], and only while the version userData names is
+// the active one. A deploy on its way, one whose build failed, a service that
+// has never deployed and one deployed by something other than the broker have
+// none — none of them is known to run anything by name.
+func (d ServiceDetail) DeployedSha() string {
+	if !d.settled() {
+		return ""
+	}
+	return VersionSha(d.DeployedName())
+}
+
+// Deploying reports that userData names a version the service does not run: a
+// deploy on its way, or one that never went live. Neither is a verdict on it.
+func (d ServiceDetail) Deploying() bool {
+	return d.userData(AppVersionIDKey) != "" && !d.settled()
+}
+
+func (d ServiceDetail) settled() bool {
+	named := d.userData(AppVersionIDKey)
+	return named != "" && d.ActiveAppVersion != nil && d.ActiveAppVersion.ID == named
+}
+
+func (d ServiceDetail) userData(key string) string {
 	for _, entry := range d.UserData {
-		if entry.Key == AppVersionNameKey {
+		if entry.Key == key {
 			return entry.Content
 		}
 	}
 	return ""
 }
-
-// DeployedSha is the commit the service is running: the first token of
-// [ServiceDetail.DeployedName]. A service that has never deployed, or one
-// deployed by something other than the broker, has none.
-func (d ServiceDetail) DeployedSha() string { return VersionSha(d.DeployedName()) }
 
 // Service is GET /service-stack/{id}.
 func (c *Client) Service(ctx context.Context, serviceID string) (ServiceDetail, error) {

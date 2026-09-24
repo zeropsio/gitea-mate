@@ -89,7 +89,9 @@ type Fake struct {
 	deployed   map[string]bool
 	subdomains map[string]bool
 	doomed     map[string]bool
-	sequence   int
+	// named is the version each service's userData names, by service id.
+	named    map[string]string
+	sequence int
 }
 
 // Import is one recorded service-stack import.
@@ -117,6 +119,7 @@ func New(t *testing.T, clientID string) *Fake {
 		deployed:   map[string]bool{},
 		subdomains: map[string]bool{},
 		doomed:     map[string]bool{},
+		named:      map[string]string{},
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)

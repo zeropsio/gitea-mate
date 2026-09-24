@@ -321,6 +321,37 @@ func TestOnlyTheActiveVersionsNameSurvives(t *testing.T) {
 	}
 }
 
+// TestAppVersionNameIsNotTheRunningVersionWhileTheIDsDiffer is the platform's
+// timeline (measured 2026-09-24, three runs): userData names a new version when
+// its build starts, activeAppVersion switches only when it runs. Until the two
+// agree nothing is known to run the new commit — and the old one is not
+// named any more, so no sha is reported at all.
+func TestAppVersionNameIsNotTheRunningVersionWhileTheIDsDiffer(t *testing.T) {
+	t.Parallel()
+	f, client := deployFake(t)
+	ctx := context.Background()
+	f.AddAppVersion(zerops.AppVersion{ID: "ver-old", ServiceStackID: "svc-api", Status: zerops.AppVersionActive}, "1111")
+	started := f.StartBuild("svc-api", "2222")
+
+	detail, err := client.Service(ctx, "svc-api")
+	if err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+	if detail.DeployedSha() != "" || !detail.Deploying() {
+		t.Fatalf("while the build runs the service reports %q (deploying %v), want no sha and deploying",
+			detail.DeployedSha(), detail.Deploying())
+	}
+
+	f.Activate(started)
+	detail, err = client.Service(ctx, "svc-api")
+	if err != nil {
+		t.Fatalf("Service: %v", err)
+	}
+	if detail.DeployedSha() != "2222" || detail.Deploying() {
+		t.Fatalf("once active the service reports %q (deploying %v), want 2222", detail.DeployedSha(), detail.Deploying())
+	}
+}
+
 func TestAServiceThatNeverDeployedRunsNothing(t *testing.T) {
 	t.Parallel()
 	_, client := deployFake(t)
