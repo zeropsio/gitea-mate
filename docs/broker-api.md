@@ -215,11 +215,12 @@ them with the site admin's basic auth (Gitea's token routes take nothing else �
 The token is the person's: Gitea enforces the mirrored rights on every call, and the app can widen
 nothing by holding it. Gitea gives a token no expiry, so the rights loop retires every `mate-app/*`
 token older than `APP_TOKEN_TTL` (12 h); the app keeps the value in memory for the tab's life and
-mints again on the first `401`. `502 upstream` when Zerops cannot be reached, `502 gitea` when
-Gitea cannot; `424 gitea_refused` with Gitea's own words when Gitea said no — a login source that
-does not exist, a name it will not take — so the app shows the reason once instead of retrying.
-(The platform's edge replaces an upstream `502` with its own HTML page, measured 2026-09-17, so a
-`502` carries no words of the broker's; a refusal must not be one.) CORS: the `POST` and its preflight are answered for every origin (`*`), as is Gitea's
+mints again on the first `401`. `503 upstream` when Zerops cannot be reached (the member list is
+read once per call, and a Zerops `400`/`5xx` on it is retried after 250, 500 and 1000 ms first),
+`503 gitea` when Gitea cannot, both with `Retry-After`; `424 gitea_refused` with Gitea's own words
+when Gitea said no — a login source that does not exist, a name it will not take — so the app
+shows the reason once instead of retrying. Never `502`: the platform's edge replaces an upstream
+`502` with its own HTML page and no CORS headers (measured 2026-09-17). CORS: the `POST` and its preflight are answered for every origin (`*`), as is Gitea's
 own API — the throwaway in the header is the proof and no cookie is involved, so the app drives
 both from mate.zerops.io, a developer's localhost or a shell alike (D22).
 

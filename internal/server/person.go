@@ -76,14 +76,14 @@ func (s *Server) handlePersonToken(w http.ResponseWriter, r *http.Request) {
 		return
 	case err != nil:
 		s.log.Error("the throwaway could not be checked", "err", err.Error())
-		WriteError(w, http.StatusBadGateway, "upstream", "Zerops could not be reached")
+		writeUnavailable(w, "upstream", "Zerops could not be reached")
 		return
 	}
 
 	rights, err := s.deps.Rights.For(ctx, caller)
 	if err != nil {
 		s.log.Error("the caller's rights could not be read", "err", err.Error())
-		WriteError(w, http.StatusBadGateway, "upstream", "Zerops could not be reached")
+		writeUnavailable(w, "upstream", "Zerops could not be reached")
 		return
 	}
 	if !rights.Active {
@@ -124,12 +124,10 @@ func (s *Server) handlePersonToken(w http.ResponseWriter, r *http.Request) {
 // answerGiteaFailure tells Gitea saying no from Gitea being away. A 4xx is a
 // refusal of what the broker asked — a login source that does not exist, a
 // name it will not take — and is answered 424 with Gitea's own words, so the
-// app can show them once. Anything else is Gitea not answering, answered 502,
-// which the app reads as "still setting up" and asks again in a while. The
-// platform's edge replaces an upstream 502 with its own HTML page (measured
-// 2026-09-17), so a 502 carries no words of the broker's anyway — which is
-// why a refusal must not be one: it left the app retrying "still setting up"
-// against a Gitea whose login source had never been added.
+// app can show them once: answered as "still setting up", it left the app
+// retrying against a Gitea whose login source had never been added. Anything
+// else is Gitea not answering, answered 503 (writeUnavailable), which the app
+// reads as "still setting up" and asks again in a while.
 func (s *Server) answerGiteaFailure(w http.ResponseWriter, what, login string, err error) {
 	s.log.Error(what, "login", login, "err", err.Error())
 	if status := gitea.Status(err); status >= 400 && status < 500 {
@@ -148,7 +146,21 @@ func (s *Server) answerGiteaFailure(w http.ResponseWriter, what, login string, e
 		WriteError(w, http.StatusFailedDependency, "gitea_refused", "Gitea refused: "+giteaWords(err))
 		return
 	}
-	WriteError(w, http.StatusBadGateway, "gitea", "Gitea could not be reached")
+	writeUnavailable(w, "gitea", "Gitea could not be reached")
+}
+
+// unavailableRetryAfter is how many seconds the app is asked to wait before it
+// asks again.
+const unavailableRetryAfter = "5"
+
+// writeUnavailable answers a dependency that did not answer: 503 with
+// Retry-After, never 502. The platform's edge replaces an upstream 502 with
+// its own HTML page and no CORS headers (measured 2026-09-17), so the browser
+// saw a network error instead of the broker's words. The CORS headers are the
+// ones every answer on this route carries (appCORS).
+func writeUnavailable(w http.ResponseWriter, code, message string) {
+	w.Header().Set("Retry-After", unavailableRetryAfter)
+	WriteError(w, http.StatusServiceUnavailable, code, message)
 }
 
 // giteaWords is what Gitea said, without the broker's framing.

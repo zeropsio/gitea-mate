@@ -50,6 +50,9 @@ type Fake struct {
 	// Fail forces a status for one "METHOD /path" (the path after
 	// /api/rest/public). Used to prove the fail-safe rules.
 	Fail map[string]int
+	// FailTimes bounds a Fail entry: it answers that many times, then the
+	// route serves again — what an intermittent refusal looks like.
+	FailTimes map[string]int
 	// TruncateProjectSearch makes the search claim a higher totalHits than it
 	// returns — a page short of its declared total.
 	TruncateProjectSearch bool
@@ -110,6 +113,7 @@ func New(t *testing.T, clientID string) *Fake {
 		tokens:     map[string]zerops.Token{},
 		services:   map[string][]zerops.Service{},
 		Fail:       map[string]int{},
+		FailTimes:  map[string]int{},
 		Ungranted:  map[string]bool{},
 		userData:   map[string][]zerops.ServiceUserData{},
 		stopped:    map[string]bool{},
@@ -245,6 +249,14 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	f.Requests = append(f.Requests, key)
 	w.Header().Set("Date", f.Now.Format(http.TimeFormat))
 	forced := f.Fail[key]
+	if n, bounded := f.FailTimes[key]; forced != 0 && bounded {
+		if n <= 1 {
+			delete(f.Fail, key)
+			delete(f.FailTimes, key)
+		} else {
+			f.FailTimes[key] = n - 1
+		}
+	}
 	identity, known := f.identities[bearer(r)]
 	f.mu.Unlock()
 

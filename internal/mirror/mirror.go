@@ -173,6 +173,12 @@ func ReadOrg(ctx context.Context, z *zerops.Client, clientID, giteaProjectID str
 	if err != nil {
 		return State{}, fmt.Errorf("%w: the member list: %w", ErrUnreadable, err)
 	}
+	return ReadOrgWith(ctx, z, clientID, giteaProjectID, members)
+}
+
+// ReadOrgWith is [ReadOrg] on a member list the caller already read — the one
+// a throwaway's check read moments ago — so a sign-in reads it once.
+func ReadOrgWith(ctx context.Context, z *zerops.Client, clientID, giteaProjectID string, members zerops.MemberList) (State, error) {
 	if len(members.Members) == 0 {
 		return State{}, fmt.Errorf("%w: the member list is empty, which no live org is", ErrUnreadable)
 	}

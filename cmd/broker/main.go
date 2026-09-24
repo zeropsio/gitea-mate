@@ -95,7 +95,7 @@ func run(log *slog.Logger) error {
 	// What a proven person may do, read live: the OIDC consent and the app's
 	// own sign-in (POST /person/token) ask the same question.
 	rightsFor := oidc.RightsFunc(func(ctx context.Context, caller throwaway.Caller) (roles.Rights, error) {
-		org, err := mirror.ReadOrg(ctx, zeropsClient, cfg.ZeropsClientID, cfg.ZeropsProjectID)
+		org, err := mirror.ReadOrgWith(ctx, zeropsClient, cfg.ZeropsClientID, cfg.ZeropsProjectID, caller.Members)
 		if err != nil {
 			return roles.Rights{}, err
 		}

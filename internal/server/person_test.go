@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -67,6 +68,7 @@ func newPeopleRig(t *testing.T) *peopleRig {
 		Gitea:  r.gitea.Client(),
 		Throwaway: &throwaway.Checker{
 			Broker: broker, AsCaller: z.Client, ClientID: clientID, GiteaHost: giteaHost,
+			Retry: []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond},
 		},
 		Rights: rightsFromTheFake(broker),
 		Pass: func(ctx context.Context) error {
@@ -89,7 +91,7 @@ func (f rightsFunc) For(ctx context.Context, caller throwaway.Caller) (roles.Rig
 // on the caller.
 func rightsFromTheFake(z *zerops.Client) RightsReader {
 	return rightsFunc(func(ctx context.Context, caller throwaway.Caller) (roles.Rights, error) {
-		org, err := mirror.ReadOrg(ctx, z, clientID, giteaPrj)
+		org, err := mirror.ReadOrgWith(ctx, z, clientID, giteaPrj, caller.Members)
 		if err != nil {
 			return roles.Rights{}, err
 		}
@@ -309,5 +311,97 @@ func TestGiteaRefusingTheBrokersOwnCredentialIsNotThePersonsRefusal(t *testing.T
 	}
 	if !strings.Contains(body.Message, "administrator credentials") {
 		t.Errorf("message = %q, want it to name whose credentials failed", body.Message)
+	}
+}
+
+// memberListReads counts the calls that read the org's member list.
+func (p *peopleRig) memberListReads() int {
+	n := 0
+	for _, request := range p.zerops.Requests {
+		if request == "GET /client/"+clientID+"/user/list" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestTheMemberListIsReadOncePerPersonTokenRequest — the throwaway's last step
+// reads the member list, and the rights that follow are computed from that
+// same read: every extra read of it was one more chance for Zerops to answer
+// 400 (the intermittent 502s of 2026-09-2x).
+func TestTheMemberListIsReadOncePerPersonTokenRequest(t *testing.T) {
+	r := newPeopleRig(t)
+	rr := r.personToken("throwaway-jan", "https://app.example")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /person/token = %d %s", rr.Code, rr.Body.String())
+	}
+	if got := r.memberListReads(); got != 1 {
+		t.Fatalf("the member list was read %d times, want once: %v", got, r.zerops.Requests)
+	}
+}
+
+// TestAZeropsRefusalOnTheMemberListIsRetried — Zerops answers the member list
+// 400 now and then, for no reason the broker can act on; a short ladder of
+// retries turns that into a sign-in that works.
+func TestAZeropsRefusalOnTheMemberListIsRetried(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			r := newPeopleRig(t)
+			members := "GET /client/" + clientID + "/user/list"
+			r.zerops.Fail[members] = status
+			r.zerops.FailTimes[members] = 2
+
+			rr := r.personToken("throwaway-jan", "https://app.example")
+			if rr.Code != http.StatusOK {
+				t.Fatalf("POST /person/token = %d %s, want the refusals retried", rr.Code, rr.Body.String())
+			}
+			if got := r.memberListReads(); got != 3 {
+				t.Fatalf("the member list was read %d times, want 2 refusals and 1 answer", got)
+			}
+		})
+	}
+}
+
+// TestPersonTokenNeverAnswers502AndEveryErrorCarriesCORS — the platform's edge
+// replaces an upstream 502 with its own page and no CORS headers (measured
+// 2026-09-17), so the browser saw a network error instead of the broker's
+// answer. Zerops or Gitea being away is a 503 with Retry-After, carrying the
+// same CORS headers as a success.
+func TestPersonTokenNeverAnswers502AndEveryErrorCarriesCORS(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		breakIt func(r *peopleRig)
+	}{
+		{"Zerops refuses the member list every time", func(r *peopleRig) {
+			r.zerops.Fail["GET /client/"+clientID+"/user/list"] = http.StatusBadRequest
+		}},
+		{"Zerops fails the member list every time", func(r *peopleRig) {
+			r.zerops.Fail["GET /client/"+clientID+"/user/list"] = http.StatusInternalServerError
+		}},
+		{"Zerops fails the project list the rights need", func(r *peopleRig) {
+			r.zerops.Fail["POST /project/search"] = http.StatusInternalServerError
+		}},
+		{"Gitea fails", func(r *peopleRig) {
+			r.gitea.Fail["GET /users/"+roles.Login("u-jan")] = http.StatusInternalServerError
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newPeopleRig(t)
+			tc.breakIt(r)
+
+			rr := r.personToken("throwaway-jan", "https://app.example")
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Fatalf("POST /person/token = %d %s, want 503", rr.Code, rr.Body.String())
+			}
+			if rr.Header().Get("Retry-After") == "" {
+				t.Errorf("a 503 carries no Retry-After")
+			}
+			if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+				t.Errorf("Access-Control-Allow-Origin = %q, want *", got)
+			}
+			if got := rr.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(got, "Authorization") {
+				t.Errorf("Access-Control-Allow-Headers = %q, want Authorization", got)
+			}
+		})
 	}
 }

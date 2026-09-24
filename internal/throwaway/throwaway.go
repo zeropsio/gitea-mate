@@ -15,6 +15,7 @@ package throwaway
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -60,6 +61,9 @@ type Caller struct {
 	// Member is the person's row in the org's member list, read with the
 	// broker's own token: their org role, status and flags.
 	Member zerops.Member
+	// Members is that whole list, as the check read it, so the rights read
+	// that follows does not read it a second time.
+	Members zerops.MemberList
 	// TokenID and TokenName identify the throwaway itself, for the log.
 	TokenID   string
 	TokenName string
@@ -77,7 +81,15 @@ type Checker struct {
 	ClientID  string
 	GiteaHost string
 	Window    time.Duration
+	// Retry is the pause before each new read of the member list after Zerops
+	// answered it 400 or 5xx. Nil is [DefaultRetry].
+	Retry []time.Duration
 }
+
+// DefaultRetry is the member list's retry ladder. Zerops answers that read
+// 400 now and then with the broker's own token (why is unmeasured); a second
+// read a moment later answers.
+var DefaultRetry = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second}
 
 // NamePrefix is what a Gitea sign-in throwaway's name must start with:
 // gitea-signin:{gitea host}: (docs/vocabulary.md).
@@ -85,7 +97,7 @@ func (c *Checker) NamePrefix() string { return "gitea-signin:" + c.GiteaHost + "
 
 // Check proves the bearer. A *Refusal means the token is not what it claims;
 // any other error is the broker's own trouble reaching Zerops, and the caller
-// answers 502, not 401.
+// answers 503, not 401.
 func (c *Checker) Check(ctx context.Context, bearer string) (Caller, error) {
 	window := c.Window
 	if window <= 0 {
@@ -147,7 +159,7 @@ func (c *Checker) Check(ctx context.Context, bearer string) (Caller, error) {
 	if token.CreatedByUser == "" {
 		return Caller{}, refuse(ReasonNotMember, fmt.Errorf("the token names no creator"))
 	}
-	members, err := c.Broker.Members(ctx, c.ClientID)
+	members, err := c.members(ctx)
 	if err != nil {
 		return Caller{}, fmt.Errorf("reading the org's members: %w", err)
 	}
@@ -158,9 +170,30 @@ func (c *Checker) Check(ctx context.Context, bearer string) (Caller, error) {
 		if m.Status != statusActive {
 			return Caller{}, refuse(ReasonNotMember, fmt.Errorf("the creator is %s", m.Status))
 		}
-		return Caller{UserID: m.UserID, Member: m, TokenID: token.ID, TokenName: token.Name}, nil
+		return Caller{UserID: m.UserID, Member: m, Members: members, TokenID: token.ID, TokenName: token.Name}, nil
 	}
 	return Caller{}, refuse(ReasonNotMember, fmt.Errorf("the creator is not in the org's member list"))
+}
+
+// members reads the org's member list, again after each pause of the retry
+// ladder while Zerops answers 400 or 5xx. Any other answer is final.
+func (c *Checker) members(ctx context.Context) (zerops.MemberList, error) {
+	ladder := c.Retry
+	if ladder == nil {
+		ladder = DefaultRetry
+	}
+	for attempt := 0; ; attempt++ {
+		members, err := c.Broker.Members(ctx, c.ClientID)
+		status := zerops.Status(err)
+		if err == nil || attempt == len(ladder) || (status != http.StatusBadRequest && status < 500) {
+			return members, err
+		}
+		select {
+		case <-ctx.Done():
+			return members, err
+		case <-time.After(ladder[attempt]):
+		}
+	}
 }
 
 const statusActive = "ACTIVE"
