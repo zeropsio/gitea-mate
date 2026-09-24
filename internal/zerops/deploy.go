@@ -3,7 +3,6 @@ package zerops
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -317,12 +316,7 @@ func (c *Client) doRaw(ctx context.Context, method, path, contentType string, bo
 		return date, fmt.Errorf("zerops api: %s %s: %w", method, path, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		apiErr := &APIError{Status: resp.StatusCode}
-		_ = json.Unmarshal(raw, apiErr)
-		if apiErr.Code == "" {
-			apiErr.Code = "http_" + fmt.Sprint(resp.StatusCode)
-		}
-		return date, apiErr
+		return date, refusal(resp.StatusCode, raw)
 	}
 	return date, nil
 }

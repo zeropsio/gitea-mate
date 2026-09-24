@@ -59,6 +59,23 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("zerops api: %d %s: %s", e.Status, e.Code, e.Message)
 }
 
+// refusal reads a non-2xx answer. The platform wraps its {code, message} in an
+// error envelope (measured on GET /project/{id} of a deleted project,
+// 2026-09-24); a gateway's HTML is not JSON, and the status alone then has to
+// speak.
+func refusal(status int, raw []byte) *APIError {
+	var envelope struct {
+		Error APIError `json:"error"`
+	}
+	_ = json.Unmarshal(raw, &envelope)
+	apiErr := &envelope.Error
+	apiErr.Status = status
+	if apiErr.Code == "" {
+		apiErr.Code = "http_" + fmt.Sprint(status)
+	}
+	return apiErr
+}
+
 // Status returns the HTTP status of err if it is an APIError, else 0.
 func Status(err error) int {
 	var apiErr *APIError
@@ -112,14 +129,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) (time
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		apiErr := &APIError{Status: resp.StatusCode}
-		// The body is the platform's {code, message}. A gateway's HTML is not,
-		// and the status alone then has to speak.
-		_ = json.Unmarshal(raw, apiErr)
-		if apiErr.Code == "" {
-			apiErr.Code = "http_" + fmt.Sprint(resp.StatusCode)
-		}
-		return date, apiErr
+		return date, refusal(resp.StatusCode, raw)
 	}
 
 	if out != nil && len(raw) > 0 {

@@ -2,6 +2,7 @@ package zerops_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -257,6 +258,46 @@ func TestAPIErrorCarriesTheCode(t *testing.T) {
 	_, err := c.Members(context.Background(), org)
 	if zerops.Status(err) != 500 || zerops.Code(err) != "forced" {
 		t.Errorf("err = %v (status %d, code %q)", err, zerops.Status(err), zerops.Code(err))
+	}
+}
+
+// The platform wraps a refusal in an error envelope (measured 2026-09-24 on
+// GET /project/{id} of a deleted project); a gateway's page is not JSON.
+func TestAPIErrorReadsThePlatformsEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, code, message string
+		status                    int
+	}{
+		{
+			name:    "a deleted project",
+			status:  http.StatusBadRequest,
+			body:    `{"error":{"code":"projectNotFound","message":"Project not found.","meta":[{"error":"Project not found.","code":"projectNotFound","metadata":null}]}}`,
+			code:    "projectNotFound",
+			message: "Project not found.",
+		},
+		{
+			name:   "a gateway's page",
+			status: http.StatusBadGateway,
+			body:   `<html><body>502 Bad Gateway</body></html>`,
+			code:   "http_502",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer srv.Close()
+
+			_, err := zerops.New(srv.URL, "the-token", srv.Client()).Project(context.Background(), "p-1")
+			if zerops.Status(err) != tc.status || zerops.Code(err) != tc.code {
+				t.Errorf("err = %v (status %d, code %q), want %d %q", err, zerops.Status(err), zerops.Code(err), tc.status, tc.code)
+			}
+			var apiErr *zerops.APIError
+			if errors.As(err, &apiErr) && apiErr.Message != tc.message {
+				t.Errorf("message = %q, want %q", apiErr.Message, tc.message)
+			}
+		})
 	}
 }
 
