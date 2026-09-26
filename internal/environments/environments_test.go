@@ -80,9 +80,14 @@ func TestParseRefusals(t *testing.T) {
 			"version is 2",
 		},
 		{
-			"no environments at all",
-			"version: 1\n",
-			"no environments",
+			"environments that are a list",
+			"version: 1\nenvironments:\n  - stage\n",
+			"a mapping of name to environment",
+		},
+		{
+			"environments that are a word",
+			"version: 1\nenvironments: stage\n",
+			"a mapping of name to environment",
 		},
 		{
 			"a tier that is neither",
@@ -300,6 +305,30 @@ func TestReadFromTheGroupRepo(t *testing.T) {
 			}
 			if path != tc.dir+"/import.yaml" || len(recipe.Runtimes()) != 2 {
 				t.Fatalf("ReadRecipe(%s) = %q, %d runtimes", tc.tier, path, len(recipe.Runtimes()))
+			}
+		})
+	}
+}
+
+// A file that declares nothing is a group that has declared nothing, as a
+// missing file is — the state the app leaves when a group's last environment
+// is taken out. Refused, it failed every webhook and deploy pass of the group
+// (measured 2026-09-24, `medusa`: 17:04:54Z–17:09Z, until an entry was merged).
+func TestParseAFileThatDeclaresNothing(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, body string }{
+		{"no environments key", "version: 1\n"},
+		{"a bare environments key", "version: 1\nenvironments:\n"},
+		{"an empty mapping", "version: 1\nenvironments: {}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			file, err := environments.Parse([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if file.Version != 1 || len(file.Environments) != 0 {
+				t.Fatalf("Parse = %+v, want version 1 and no environments", file)
 			}
 		})
 	}

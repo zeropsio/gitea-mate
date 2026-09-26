@@ -126,8 +126,11 @@ func Parse(raw []byte) (File, error) {
 	if doc.Version != 1 {
 		return File{}, fmt.Errorf("environments.yaml: version is %d, and this broker reads version 1", doc.Version)
 	}
-	if doc.Environments.Kind == 0 {
-		return File{}, fmt.Errorf("environments.yaml: no environments")
+	// A file that declares nothing — no key, a bare `environments:`, `{}` — is
+	// a group with no environments, as a missing file is: the app leaves it so
+	// when the last one is taken out.
+	if doc.Environments.Kind == 0 || doc.Environments.Tag == "!!null" {
+		return File{Version: doc.Version}, nil
 	}
 	if doc.Environments.Kind != yaml.MappingNode {
 		return File{}, fmt.Errorf("environments.yaml: environments is a mapping of name to environment")
@@ -154,9 +157,6 @@ func Parse(raw []byte) (File, error) {
 			return File{}, err
 		}
 		out.Environments = append(out.Environments, env)
-	}
-	if len(out.Environments) == 0 {
-		return File{}, fmt.Errorf("environments.yaml: no environments")
 	}
 	return out, nil
 }
