@@ -367,7 +367,8 @@ func (m *Mirror) gatherGitea(ctx context.Context, reg registry.Registry) (GiteaS
 		BotTokens:    map[string][]gitea.AccessToken{},
 		PersonTokens: map[string][]gitea.AccessToken{},
 
-		GroupPullRequests: map[string][]gitea.PullRequest{},
+		GroupPullRequests:     map[string][]gitea.PullRequest{},
+		GroupPullRequestFiles: map[string]map[int64][]gitea.PullRequestFile{},
 	}
 
 	users, err := m.Gitea.ListUsers(ctx)
@@ -462,6 +463,23 @@ func (m *Mirror) gatherGitea(ctx context.Context, reg registry.Registry) (GiteaS
 				return out, fmt.Errorf("pull requests of %s/%s: %w", g.Slug, registry.GroupRepo, err)
 			}
 			out.GroupPullRequests[g.Slug] = open
+			// What a Mate's request changes decides whether the pass merges
+			// it; one whose files cannot be read is left unread, and so open.
+			bots := map[string]bool{}
+			for _, prj := range g.Projects {
+				if prj.Kind == roles.KindMate {
+					bots[BotLogin(prj.ID)] = true
+				}
+			}
+			out.GroupPullRequestFiles[g.Slug] = map[int64][]gitea.PullRequestFile{}
+			for _, pr := range open {
+				if !bots[pr.User.Login] || pr.Base.Ref != groupMainBranch {
+					continue
+				}
+				if files, err := m.Gitea.PullRequestFiles(ctx, g.Slug, registry.GroupRepo, pr.Number); err == nil {
+					out.GroupPullRequestFiles[g.Slug][pr.Number] = files
+				}
+			}
 		} else if !gitea.IsNotFound(err) {
 			return out, fmt.Errorf("repo %s/%s: %w", g.Slug, registry.GroupRepo, err)
 		}

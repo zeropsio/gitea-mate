@@ -197,7 +197,7 @@ Caller: Gitea. `X-Gitea-Signature` is the hex HMAC-SHA256 of the raw body with
 | `push` to `env/*` | nothing — the broker wrote it |
 | `create` of a tag `v*` on the group repo | re-checks the pusher's production rights in Zerops, writes `mate/release/{tag}` `success` (approved) or `failure` (refused) on the tagged commit, deploys an approved tag's commits |
 | `pull_request` merged on the group repo | imports the recipe delta into each environment built from it, re-reads environments |
-| `pull_request` opened on the group repo by a Mate's bot | nudges the rights loop, whose next pass merges it — a Mate's recipe proposal lands by itself (D23) |
+| `pull_request` opened on the group repo by a Mate's bot | nudges the rights loop, whose next pass merges it when it only adds files — a Mate's first recipe lands by itself (D23); one that changes a file `main` carries waits for a person |
 | `workflow_job` `queued` | starts the group's runner service if it is stopped |
 | `workflow_job` `completed` | notes the time; a quiet spell (default 15 min) stops the runner |
 | anything else | `204`, ignored |

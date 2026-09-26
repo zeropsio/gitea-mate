@@ -140,6 +140,10 @@ type GiteaState struct {
 	PersonTokens map[string][]gitea.AccessToken
 	// GroupPullRequests is org -> the pull requests open on its group repo.
 	GroupPullRequests map[string][]gitea.PullRequest
+	// GroupPullRequestFiles is org -> pull request number -> the files it
+	// changes, read for every request a registered Mate's bot opened against
+	// main. A request missing here could not be read.
+	GroupPullRequestFiles map[string]map[int64][]gitea.PullRequestFile
 }
 
 // TeamState is one team and who is in it.
@@ -426,14 +430,16 @@ func (p *planner) groupRepoRules() []gitea.BranchProtection {
 // the declarations live.
 const groupMainBranch = "main"
 
-// planRecipePullRequests lands every recipe a Mate proposed (D23): a pull
+// planRecipePullRequests lands the recipe a Mate proposed (D23): a pull
 // request open on the group repo against main, opened by the bot of a Mate
-// registered in that group, is merged as it is. The group repo takes merges
-// from anyone with write, and a Mate's proposal is the group's own import,
-// not something a person has to review — the owner, 2026-09-17, on a first
-// recipe that waited for a releaser: "they all should be able to merge on the
-// import yaml repo". A person's pull request is theirs to merge; a bot of
-// another group is nobody here.
+// registered in that group, is merged as it is when it only adds files — the
+// owner, 2026-09-17, on a first recipe that waited for a releaser: "they all
+// should be able to merge on the import yaml repo". One that modifies, removes
+// or renames a file main carries rewrites the import a stage or a production
+// is made and deployed from, and waits for a person with write: on 2026-09-26
+// a second Mate's re-proposal, merged here, replaced the hand-written tiers,
+// and the next release built production with the dev setup. A person's pull
+// request is theirs to merge; a bot of another group is nobody here.
 func (p *planner) planRecipePullRequests() {
 	for _, g := range p.state.Registry.Groups {
 		bots := map[string]bool{}
@@ -446,9 +452,30 @@ func (p *planner) planRecipePullRequests() {
 			if pr.State != "open" || pr.Merged || pr.Base.Ref != groupMainBranch || !bots[pr.User.Login] {
 				continue
 			}
+			files, read := p.state.Gitea.GroupPullRequestFiles[g.Slug][pr.Number]
+			if !read {
+				p.note("%s/%s#%d from %s: the files it changes could not be read, so it is not merged", g.Slug, registry.GroupRepo, pr.Number, pr.User.Login)
+				continue
+			}
+			if changed := changedFiles(files); len(changed) > 0 {
+				p.note("%s/%s#%d from %s changes the group's import (%s): it waits for a person with write", g.Slug, registry.GroupRepo, pr.Number, pr.User.Login, strings.Join(changed, ", "))
+				continue
+			}
 			p.do(Action{Kind: MergeRecipePullRequest, Org: g.Slug, Repo: registry.GroupRepo, Login: pr.User.Login, PullRequest: pr.Number})
 		}
 	}
+}
+
+// changedFiles is every file of a request that is anything but added, as
+// "name (status)".
+func changedFiles(files []gitea.PullRequestFile) []string {
+	var changed []string
+	for _, f := range files {
+		if f.Status != "added" {
+			changed = append(changed, f.Filename+" ("+f.Status+")")
+		}
+	}
+	return changed
 }
 
 func (p *planner) hasHook(org string) bool {

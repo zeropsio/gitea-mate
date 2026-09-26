@@ -487,9 +487,11 @@ func (c *Client) ListPullRequests(ctx context.Context, owner, repo, state string
 	return all, err
 }
 
-// PullRequestFile is one file a pull request changes.
+// PullRequestFile is one file a pull request changes. Status is Gitea's word
+// for the change: "added", "modified", "deleted", "renamed", …
 type PullRequestFile struct {
 	Filename string `json:"filename"`
+	Status   string `json:"status"`
 }
 
 // PullRequestFiles is GET /repos/{o}/{r}/pulls/{n}/files, every page. None at

@@ -3,9 +3,11 @@
 One repository per group, made by the broker's rights loop when the group is registered. It holds
 the recipe (every tier's import), which Zerops project each environment is and what feeds it, and
 the release tags. `main` is protected: no direct push for anyone, merges by anyone with write —
-the `write` and `release` teams — and a Mate's recipe pull request is merged by the broker on
-arrival (D23; until 2026-09-17 the `release` team alone merged, and every Mate's recipe waited for a
-releaser). A recipe request Gitea calls empty — its branch carries nothing `main` lacks, so Gitea
+the `write` and `release` teams — and a Mate's recipe pull request that only adds files is merged
+by the broker on arrival (D23; until 2026-09-17 the `release` team alone merged, and every Mate's
+recipe waited for a releaser). One that modifies, removes or renames a file `main` carries waits for
+a person with write, and each pass reports it: on 2026-09-26 a second Mate's re-proposal, merged by
+the broker, replaced the hand-written tiers and the next release built production with the dev setup. A recipe request Gitea calls empty — its branch carries nothing `main` lacks, so Gitea
 answers every merge `405` — is closed by the broker rather than retried every pass (measured
 2026-09-17: a Mate re-proposed a recipe `main` already had). `env/*` is written by the broker
 alone; tags `v*` are created by the `release` team alone.

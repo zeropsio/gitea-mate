@@ -851,6 +851,9 @@ func TestAMatesRecipePullRequestIsMergedAndNobodyElses(t *testing.T) {
 		{Number: 4, State: "open", User: gitea.PullRequestUser{Login: "mate-p-fen"}, Base: gitea.PullRequestBranch{Ref: "env/stage"}},
 		{Number: 5, State: "closed", Merged: true, User: gitea.PullRequestUser{Login: "mate-p-fen"}, Base: main},
 	}}
+	g.GroupPullRequestFiles = map[string]map[int64][]gitea.PullRequestFile{"acme": {
+		1: {{Filename: "3 — Stage/import.yaml", Status: "added"}},
+	}}
 	plan := mirror.Compute(mirror.State{Registry: reg, Problems: problems, Gitea: g}, opts())
 
 	var merged []int64
@@ -864,5 +867,69 @@ func TestAMatesRecipePullRequestIsMergedAndNobodyElses(t *testing.T) {
 	}
 	if plan.Destructive() != 0 {
 		t.Errorf("a merge counted as destructive")
+	}
+}
+
+// A Mate may add the group's import; a change to one that is there waits for a
+// person. zcp re-proposes the recipe from each Mate's own project, and on
+// 2026-09-26 the pass merged a second Mate's proposal over the hand-written
+// tiers: production's setups turned into the dev ones and the next release
+// served `zsc noop` (a 502). What a request changes is read, and an unread
+// list merges nothing.
+func TestAMatesRecipeMergesOnlyWhenItAddsFiles(t *testing.T) {
+	main := gitea.PullRequestBranch{Ref: "main"}
+	for _, tc := range []struct {
+		name   string
+		files  []gitea.PullRequestFile
+		known  bool
+		merged bool
+	}{
+		{"the group's first import", []gitea.PullRequestFile{
+			{Filename: "3 — Stage/import.yaml", Status: "added"},
+			{Filename: "README.md", Status: "added"},
+		}, true, true},
+		{"a request main already carries", []gitea.PullRequestFile{}, true, true},
+		{"a tier rewritten", []gitea.PullRequestFile{
+			{Filename: "3 — Stage/import.yaml", Status: "added"},
+			{Filename: "4 — Small Production/import.yaml", Status: "modified"},
+		}, true, false},
+		{"a tier removed", []gitea.PullRequestFile{
+			{Filename: "5 — Highly-available Production/import.yaml", Status: "deleted"},
+		}, true, false},
+		{"a tier renamed", []gitea.PullRequestFile{
+			{Filename: "4 — Production/import.yaml", Status: "renamed"},
+		}, true, false},
+		{"files that could not be read", nil, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg, problems := oneGroup(t)
+			g := emptyGitea()
+			g.GroupPullRequests = map[string][]gitea.PullRequest{"acme": {
+				{Number: 7, State: "open", User: gitea.PullRequestUser{Login: "mate-p-fen"}, Base: main},
+			}}
+			if tc.known {
+				g.GroupPullRequestFiles = map[string]map[int64][]gitea.PullRequestFile{"acme": {7: tc.files}}
+			}
+			plan := mirror.Compute(mirror.State{Registry: reg, Problems: problems, Gitea: g}, opts())
+
+			merged := false
+			for _, a := range plan.Actions {
+				if a.Kind == mirror.MergeRecipePullRequest && a.PullRequest == 7 {
+					merged = true
+				}
+			}
+			if merged != tc.merged {
+				t.Fatalf("merged = %v, want %v:\n%s", merged, tc.merged, mirror.Describe(plan))
+			}
+			waiting := false
+			for _, p := range plan.Problems {
+				if strings.Contains(p, "acme/group#7") {
+					waiting = true
+				}
+			}
+			if waiting == tc.merged {
+				t.Errorf("a request left open must be reported, a merged one not: %v", plan.Problems)
+			}
+		})
 	}
 }

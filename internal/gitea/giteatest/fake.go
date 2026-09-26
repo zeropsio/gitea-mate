@@ -54,10 +54,11 @@ type Fake struct {
 	teams   map[string][]*gitea.Team // org -> teams
 	members map[int64]map[string]bool
 
-	repos         map[string]*gitea.Repo          // "org/name"
-	pulls         map[string][]*gitea.PullRequest // "org/name" -> its pull requests
-	emptyPulls    map[string]bool                 // "org/name#number" -> Gitea calls it empty
-	collaborators map[string]map[string]string    // "org/name" -> login -> permission
+	repos         map[string]*gitea.Repo             // "org/name"
+	pulls         map[string][]*gitea.PullRequest    // "org/name" -> its pull requests
+	emptyPulls    map[string]bool                    // "org/name#number" -> Gitea calls it empty
+	pullFiles     map[string][]gitea.PullRequestFile // "org/name#number" -> what it changes, when set
+	collaborators map[string]map[string]string       // "org/name" -> login -> permission
 	branchRules   map[string][]gitea.BranchProtection
 	tagRules      map[string][]gitea.TagProtection
 	hooks         map[string][]gitea.Hook // org -> hooks
@@ -94,6 +95,7 @@ func New(t *testing.T) *Fake {
 		repos:         map[string]*gitea.Repo{},
 		pulls:         map[string][]*gitea.PullRequest{},
 		emptyPulls:    map[string]bool{},
+		pullFiles:     map[string][]gitea.PullRequestFile{},
 		collaborators: map[string]map[string]string{},
 		branchRules:   map[string][]gitea.BranchProtection{},
 		tagRules:      map[string][]gitea.TagProtection{},
@@ -821,6 +823,13 @@ func (f *Fake) SetPullRequestEmpty(full string, number int64) {
 	f.emptyPulls[full+"#"+strconv.FormatInt(number, 10)] = true
 }
 
+// SetPullRequestFiles sets what a request changes, as Gitea lists it.
+func (f *Fake) SetPullRequestFiles(full string, number int64, files []gitea.PullRequestFile) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pullFiles[full+"#"+strconv.FormatInt(number, 10)] = files
+}
+
 // PullRequest returns one by number.
 func (f *Fake) PullRequest(full string, number int64) (gitea.PullRequest, bool) {
 	f.mu.Lock()
@@ -856,7 +865,12 @@ func (f *Fake) pullRequests(w http.ResponseWriter, r *http.Request, full, rest s
 				writeJSON(w, 200, []gitea.PullRequestFile{})
 				return
 			}
-			writeJSON(w, 200, []gitea.PullRequestFile{{Filename: "3 — Stage/import.yaml"}})
+			if files, set := f.pullFiles[full+"#"+number]; set {
+				writeJSON(w, 200, files)
+				return
+			}
+			// A Mate's first recipe: every file new to main.
+			writeJSON(w, 200, []gitea.PullRequestFile{{Filename: "3 — Stage/import.yaml", Status: "added"}})
 			return
 		}
 		fail(w, http.StatusNotFound, "no such pull request")

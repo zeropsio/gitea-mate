@@ -648,6 +648,43 @@ func TestAMatesRecipePullRequestIsMergedByThePass(t *testing.T) {
 	}
 }
 
+// A Mate's re-proposal that rewrites a tier main carries stays open for a
+// person, pass after pass, and the pass says so (2026-09-26: merged, it turned
+// production's setups into the dev ones).
+func TestAMatesRecipeThatRewritesATierWaitsForAPerson(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	if _, err := r.mirror.Pass(ctx); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	r.gitea.AddPullRequest("acme/group", gitea.PullRequest{
+		Number: 11, Title: "Mate: the group's import files",
+		User: gitea.PullRequestUser{Login: "mate-p-fen"}, Base: gitea.PullRequestBranch{Ref: "main"},
+	})
+	r.gitea.SetPullRequestFiles("acme/group", 11, []gitea.PullRequestFile{
+		{Filename: "4 — Small Production/import.yaml", Status: "modified"},
+	})
+
+	for pass := 2; pass <= 3; pass++ {
+		result, err := r.mirror.Pass(ctx)
+		if err != nil || len(result.Failures) != 0 {
+			t.Fatalf("pass %d: %v %v", pass, err, result.Failures)
+		}
+		if pr, _ := r.gitea.PullRequest("acme/group", 11); pr.Merged || pr.State != "open" {
+			t.Fatalf("pass %d: the rewrite must stay open, got %+v", pass, pr)
+		}
+		said := false
+		for _, p := range result.Plan.Problems {
+			if strings.Contains(p, "acme/group#11") && strings.Contains(p, "waits for a person") {
+				said = true
+			}
+		}
+		if !said {
+			t.Errorf("pass %d does not say the request waits: %v", pass, result.Plan.Problems)
+		}
+	}
+}
+
 // A recipe request main already carries is closed, not retried: Gitea calls
 // it empty and answers every merge 405, and on the owner's org (2026-09-17)
 // the loop failed the same merge every three minutes while the projects page
