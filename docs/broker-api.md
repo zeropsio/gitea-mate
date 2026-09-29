@@ -248,6 +248,43 @@ the site admin's basic auth mints it a token; that token answers `GET /user` as 
 only what the person may; a token name a user already holds is refused (`400`), and a token is
 deleted by name.
 
+## `GET /person/attachments/{uuid}` — a picture on a pull request, for the app
+
+Caller: the Mate app, from the browser, as the person — `Authorization: Bearer <the person's Gitea
+app token>` (the one `POST /person/token` mints; any Gitea token works, since Gitea decides). A Mate
+describes its change as its pull request's body, and the pictures in it are the request's
+attachments (`{GITEA_PUBLIC_URL}/attachments/{uuid}`, attached by the Mate's bot with `write:issue`).
+Gitea serves an attachment's bytes on that one web route, and the app cannot read a private one there
+from its own origin: a token in a header needs a CORS preflight, which Gitea answers with a redirect
+to its sign-in page (`303`, measured on 1.27.2), and a token in the query string passes the preflight
+and lands, whole, in Gitea's request log.
+
+The broker forwards the person's token to Gitea's `/attachments/{uuid}` as it came, never follows
+the sign-in redirect (followed, it is a `200` of HTML), and relays the answer. It adds no credential
+of its own, so the person reads exactly what they may read in Gitea. It serves a raster picture and
+nothing else:
+
+| Answer | When |
+| --- | --- |
+| `200` | the picture: Gitea's own type (`image/png`, `image/jpeg`, `image/gif`, `image/webp`, `image/avif`) and length, the bytes unchanged; `Cache-Control: private, max-age=3600`, `Vary: Authorization, Origin`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` |
+| `400 not_an_attachment` | the id is not a lowercase UUID, which is how Gitea names every attachment; Gitea is not asked |
+| `401 gitea_token_required` | no bearer |
+| `401 gitea_token_refused` | Gitea asked for a sign-in: the token is unknown, expired or revoked. The app re-mints on a `401`, as it does for Gitea's own |
+| `403 forbidden` | the token may not read issues — a bot's generation minted before `write:issue`, for one |
+| `404 not_found` | no such attachment, or none this token may read: Gitea says the same for both |
+| `413 too_large` | larger than 20 MiB, which no picture of a change needs; refused before a byte is sent |
+| `415 not_a_picture` | anything else — a text file, and an SVG, which can carry script — never served from the broker's origin |
+| `503 gitea` | Gitea did not answer, with `Retry-After` |
+
+Every answer, a refusal included, and the preflight carry `Access-Control-Allow-Origin: *`; the
+preflight allows `GET` with `Authorization` and is kept ten minutes. The token is never logged: the
+request log records the method, the path, the status and the time, never a header.
+
+Measured on Gitea 1.27.2 (2026-09-29, the lab, `TestLabPersonAttachment`): a bot token with
+`write:repository,read:user` is refused both attaching (`403 required=[write:issue]`) and reading;
+with `write:issue` it attaches; through the route, the reader's picture comes back byte for byte, a
+made-up token is `401`, a person who may not read the repository `404`, a text file and an SVG `415`.
+
 ## OIDC provider — Gitea's *Sign in with Zerops* (guide 3.6)
 
 Issuer `BROKER_PUBLIC_URL`. One client, `client_id` `gitea`, `client_secret` `OIDC_CLIENT_SECRET`,
@@ -275,7 +312,8 @@ Takes a Zerops key from a caller · deploys (a job does, with `zcli push`, on a 
 hands it — D27) · executes repository code or moves any (the one `git` it runs merges refs into
 `env/*` in a throwaway directory with `core.hooksPath=/dev/null`) · hands a key to a job of a
 branch's own workflow, to a job holding a commit protected state does not want, or to a runner that
-has run anything but default-branch jobs · reads a sibling's variables from the container (the two Gitea secrets it
+has run anything but default-branch jobs · serves anything but a raster picture from its own origin,
+or reads an attachment with a credential other than the caller's own · reads a sibling's variables from the container (the two Gitea secrets it
 needs arrive as explicit `${web_…}` references) · trusts the private network · starts a pass
 because something a job can reach asked it to (there is no poke endpoint; the timer and the signed
 webhooks are the only triggers).

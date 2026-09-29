@@ -11,7 +11,7 @@ test:
 # The credentials reach it only through the environment — never a file, a
 # fixture or a commit.
 lab-test:
-	go test ./internal/gitea/ -run TestLab -v -count=1
+	go test ./internal/gitea/ ./internal/server/ -run TestLab -v -count=1
 
 lint:
 	@out="$$(gofmt -l .)"; \
