@@ -103,8 +103,10 @@ func unreachable(what string, err error) string {
 // GITEA_URL naming another Gitea means the token there is not ours; a token
 // that is not the newest generation is one a crash between mint and write
 // left behind — planBotTokens keeps it while the container holds it, so the
-// container is minted anew and converges on the newest. Both mint anew. A
-// broker URL alone is put right without a mint.
+// container is minted anew and converges on the newest. A newest generation
+// that lacks a scope a bot's token carries now was minted by an earlier
+// broker, and a token's scopes never change after it is minted. All three
+// mint anew. A broker URL alone is put right without a mint.
 func (p *planner) planMateAccess() {
 	for _, g := range p.state.Registry.Groups {
 		for _, prj := range g.Projects {
@@ -127,7 +129,8 @@ func (p *planner) planMateAccess() {
 			mint := token.Content == "" ||
 				svc.Vars[VarGiteaURL].Content != p.opts.GiteaPublicURL ||
 				!hasLive ||
-				!strings.HasSuffix(token.Content, newest.TokenLastEight)
+				!strings.HasSuffix(token.Content, newest.TokenLastEight) ||
+				!coversScopes(newest.Scopes, BotScopes)
 			write := mint || svc.Vars[VarBrokerURL].Content != p.opts.BrokerPublicURL
 			if !write {
 				continue
@@ -138,6 +141,30 @@ func (p *planner) planMateAccess() {
 			})
 		}
 	}
+}
+
+// coversScopes reports whether a token minted with have may do everything
+// want names, read the way Gitea reads scopes: "all" is every scope, and a
+// write scope includes the read one of the same category. Gitea lists a
+// token's scopes in its own order, so the order is never compared.
+func coversScopes(have, want []string) bool {
+	held := make(map[string]bool, len(have))
+	for _, scope := range have {
+		held[scope] = true
+	}
+	if held["all"] {
+		return true
+	}
+	for _, scope := range want {
+		if held[scope] {
+			continue
+		}
+		if category, ok := strings.CutPrefix(scope, "read:"); ok && held["write:"+category] {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // newestGeneration is the bot token with the highest generation in its name,

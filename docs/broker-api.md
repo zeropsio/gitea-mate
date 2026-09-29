@@ -43,9 +43,14 @@ the way it makes teams and bots true:
 1. **The bot** — `mate-{projectId}`, restricted, in its group's `read` team (as today).
 2. **A live token** — when the bot has no token named `mate/{bot}/{n}`, or the token the Mate's
    container holds is not the bot's newest generation (compared through Gitea's `token_last_eight`
-   against the value the platform returns in clear), the loop mints generation *n+1* (scopes
-   `write:repository,read:user`). Without the second clause a crash between mint and write would
-   leave the container on generation *n* for good.
+   against the value the platform returns in clear), or the newest generation lacks a scope a bot's
+   token carries now, the loop mints generation *n+1* (scopes `write:repository,write:issue,read:user`).
+   Without the second clause a crash between mint and write would leave the container on generation
+   *n* for good; without the third a bot minted by an earlier broker would never gain a scope, since
+   Gitea fixes a token's scopes when it is minted. Scopes compare as Gitea reads them: in any order,
+   `all` as every scope, a write scope as including its category's read. `write:issue` is what
+   attaches a picture to the Mate's own pull request — Gitea's attachment routes are issue-scope and
+   refuse a token without it (`403 required=[write:issue]`, measured on 1.27.2).
 3. **The Mate's environment** — with the broker's Zerops token, which the app granted `BASIC_USER`
    on the Mate's project when it registered it, the loop finds the project's `zcp@1` service and
    writes three service variables on it: `GITEA_URL` and `MATE_BROKER_URL` (plain) and

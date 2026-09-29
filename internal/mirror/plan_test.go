@@ -46,8 +46,18 @@ func served(token string) map[string]mirror.MateService {
 }
 
 // liveToken is one live generation of p-fen's bot whose value ends in last8.
+// liveToken is a generation the rights loop minted: named for its bot, with
+// every scope a bot's token carries.
 func liveToken(generation int, last8 string, age time.Duration) gitea.AccessToken {
-	return gitea.AccessToken{Name: mirror.TokenName("mate-p-fen", generation), TokenLastEight: last8, CreatedAt: now.Add(-age)}
+	return liveTokenScoped(generation, last8, age, mirror.BotScopes...)
+}
+
+// liveTokenScoped is a generation minted with the scopes given — an earlier
+// broker's, or Gitea's own spelling of today's.
+func liveTokenScoped(generation int, last8 string, age time.Duration, scopes ...string) gitea.AccessToken {
+	return gitea.AccessToken{
+		Name: mirror.TokenName("mate-p-fen", generation), TokenLastEight: last8, CreatedAt: now.Add(-age), Scopes: scopes,
+	}
 }
 
 // oneGroup is a registry with one group, one Mate and a production project.
@@ -659,6 +669,33 @@ func TestMateAccessIsPlannedWhenItIsNotTrue(t *testing.T) {
 			},
 			services: served("tok-11111111"),
 			want:     true, mint: true,
+		},
+		{
+			// A generation an earlier broker minted, before a bot could attach
+			// a picture to its change's pull request: Gitea's attachment routes
+			// are issue-scope, and refused it 403 (measured on 1.27.2). A
+			// scope is fixed when a token is minted, so only a new generation
+			// can carry it.
+			name:     "the newest generation lacks a scope a bot's token carries now",
+			tokens:   []gitea.AccessToken{liveTokenScoped(1, "11111111", time.Hour, "write:repository", "read:user")},
+			services: served("tok-11111111"),
+			want:     true, mint: true,
+		},
+		{
+			name: "every scope is there, in Gitea's own order: nothing",
+			tokens: []gitea.AccessToken{
+				liveTokenScoped(1, "11111111", time.Hour, "write:issue", "write:repository", "read:user"),
+			},
+			services: served("tok-11111111"),
+		},
+		{
+			// Gitea reads a write scope as including the read one of its
+			// category, and so does the rule.
+			name: "a write scope covers the read one of its category: nothing",
+			tokens: []gitea.AccessToken{
+				liveTokenScoped(1, "11111111", time.Hour, "write:repository", "write:issue", "write:user"),
+			},
+			services: served("tok-11111111"),
 		},
 		{
 			name:   "an empty container: every variable is missing",

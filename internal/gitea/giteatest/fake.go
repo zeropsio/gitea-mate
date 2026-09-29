@@ -214,6 +214,19 @@ func (f *Fake) TeamMembers(org, team string) []string {
 }
 
 // Tokens reads back one login's token names, sorted.
+// TokenScopes is what the named token of login may do, as it was minted; nil
+// when there is no such token.
+func (f *Fake) TokenScopes(login, name string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, t := range f.tokens {
+		if t.Owner == login && t.Name == name {
+			return slices.Clone(t.Scopes)
+		}
+	}
+	return nil
+}
+
 func (f *Fake) Tokens(login string) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
