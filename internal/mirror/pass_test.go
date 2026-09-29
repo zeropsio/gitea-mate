@@ -492,6 +492,50 @@ func TestAnotherGiteasAccessIsReplacedInPlace(t *testing.T) {
 	}
 }
 
+// A Mate whose token an earlier broker minted without a scope a bot's token
+// carries now gets generation n+1 with every one of them, written into its
+// container in place — and generation n is not revoked on that pass, so the
+// Mate keeps pushing through the rollover.
+func TestAGenerationWithoutEveryBotScopeIsReplacedByOneWithThem(t *testing.T) {
+	r := newRig(t)
+	r.gitea.AddUser(gitea.User{Login: "mate-p-fen", Active: true, Restricted: true})
+	r.gitea.AddToken("mate-p-fen", mirror.TokenName("mate-p-fen", 1), "value-1", "write:repository", "read:user")
+	r.zerops.SetUserData(zcpService,
+		zerops.ServiceUserData{Key: mirror.VarGiteaURL, Content: giteaPublicURL},
+		zerops.ServiceUserData{Key: mirror.VarBrokerURL, Content: brokerPublicURL},
+		zerops.ServiceUserData{ID: "ud-tok", Key: mirror.VarGiteaToken, Content: "value-1", Sensitive: true},
+	)
+
+	result, err := r.mirror.Pass(context.Background())
+	if err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if len(result.Failures) != 0 {
+		t.Fatalf("failures %v", result.Failures)
+	}
+	second := mirror.TokenName("mate-p-fen", 2)
+	if names := r.gitea.Tokens("mate-p-fen"); !contains(names, second) || !contains(names, mirror.TokenName("mate-p-fen", 1)) {
+		t.Fatalf("tokens = %v, want generations 1 and 2", names)
+	}
+	scopes := r.gitea.TokenScopes("mate-p-fen", second)
+	for _, want := range []string{"write:repository", "write:issue", "read:user"} {
+		if !contains(scopes, want) {
+			t.Errorf("generation 2 carries %v, missing %q", scopes, want)
+		}
+	}
+	if got := r.vars()[mirror.VarGiteaToken]; got.ID != "ud-tok" || !got.Sensitive || !strings.HasSuffix(got.Content, second) {
+		t.Errorf("GITEA_TOKEN = %+v, want the same variable holding generation 2", got)
+	}
+
+	again, err := r.mirror.Pass(context.Background())
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if got := r.gitea.Tokens("mate-p-fen"); len(got) != 2 {
+		t.Errorf("the second pass minted again: %v\n%s", got, mirror.Describe(again.Plan))
+	}
+}
+
 // A container whose token is fine and whose broker URL is stale is written
 // without a new generation.
 func TestAStaleBrokerURLIsWrittenWithoutAMint(t *testing.T) {

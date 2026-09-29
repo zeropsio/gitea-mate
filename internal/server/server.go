@@ -90,6 +90,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	if s.deps.Gitea != nil {
 		mux.HandleFunc("POST /mate/repository", s.handleRepository)
+		mux.HandleFunc("GET /person/attachments/{uuid}", s.handlePersonAttachment)
+		mux.HandleFunc("OPTIONS /person/attachments/{uuid}", s.handlePersonAttachmentPreflight)
 	}
 	mux.HandleFunc("POST /hooks/gitea", s.handleGiteaHook)
 	if s.deps.Deploys != nil {

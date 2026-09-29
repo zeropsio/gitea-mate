@@ -35,8 +35,13 @@ const (
 var HookEvents = []string{"push", "create", "delete", "pull_request", "workflow_job", "workflow_run"}
 
 // BotScopes is what a Mate bot's token may do. GET /user needs read:user —
-// write:repository alone is 403 (measured on Gitea 1.27.2).
-var BotScopes = []string{"write:repository", "read:user"}
+// write:repository alone is 403 (measured on Gitea 1.27.2). write:issue is
+// what attaches a picture to the Mate's own pull request: Gitea's attachment
+// routes are issue-scope, and refuse a token without it (403 "required=
+// [write:issue]", measured on 1.27.2). A scope is fixed when a token is
+// minted, so the loop mints a new generation for a bot whose newest lacks one
+// (planMateAccess).
+var BotScopes = []string{"write:repository", "write:issue", "read:user"}
 
 // AppTokenPrefix names the tokens the broker mints for a person's app
 // session (POST /person/token): mate-app/{unix nanoseconds}. Gitea refuses a

@@ -1,12 +1,16 @@
 // Package giteatest is an httptest fake of the slice of Gitea the broker
 // drives. The mirror and the server drive their tests through it.
 //
-// It copies two measured behaviours of Gitea 1.27.2 deliberately, because the
-// broker depends on both:
+// It copies three measured behaviours of Gitea 1.27.2 deliberately, because
+// the broker depends on each:
 //
 //   - /users/{login}/tokens answers 401 "auth required" to an API token,
 //     however privileged, and takes the site admin's basic auth instead;
-//   - GET /user needs read:user; write:repository alone is 403.
+//   - GET /user needs read:user; write:repository alone is 403;
+//   - GET /attachments/{uuid} — the web route, the only one that serves an
+//     attachment's bytes — answers a token it does not know with a 303 to
+//     its sign-in page (REQUIRE_SIGNIN_VIEW), a token without read:issue with
+//     403, and somebody who may not read the attachment with 404.
 package giteatest
 
 import (
@@ -39,6 +43,14 @@ type tokenRow struct {
 	Owner string
 }
 
+// fakeAttachment is one attachment: what Gitea says it is, its bytes, and the
+// logins that may read it.
+type fakeAttachment struct {
+	contentType string
+	body        []byte
+	readers     map[string]bool
+}
+
 // Fake is a running fake Gitea.
 type Fake struct {
 	mu  sync.Mutex
@@ -49,10 +61,12 @@ type Fake struct {
 	// source is 1 once admin-init.sh has added it.
 	sources map[int64]bool
 	tokens  []tokenRow
-	nextID  int64
-	orgs    map[string]*gitea.Org
-	teams   map[string][]*gitea.Team // org -> teams
-	members map[int64]map[string]bool
+	// attachments is what GET /attachments/{uuid} serves, by uuid.
+	attachments map[string]fakeAttachment
+	nextID      int64
+	orgs        map[string]*gitea.Org
+	teams       map[string][]*gitea.Team // org -> teams
+	members     map[int64]map[string]bool
 
 	repos         map[string]*gitea.Repo             // "org/name"
 	pulls         map[string][]*gitea.PullRequest    // "org/name" -> its pull requests
@@ -214,6 +228,59 @@ func (f *Fake) TeamMembers(org, team string) []string {
 }
 
 // Tokens reads back one login's token names, sorted.
+// AddAttachment registers an attachment Gitea serves with contentType, and
+// the logins that may read it.
+func (f *Fake) AddAttachment(uuid, contentType string, body []byte, readers ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.attachments == nil {
+		f.attachments = map[string]fakeAttachment{}
+	}
+	who := map[string]bool{}
+	for _, login := range readers {
+		who[login] = true
+	}
+	f.attachments[uuid] = fakeAttachment{contentType: contentType, body: slices.Clone(body), readers: who}
+}
+
+func (f *Fake) serveAttachment(w http.ResponseWriter, r *http.Request, uuid string) {
+	caller, scopes, ok := f.callerOf(r)
+	if !ok {
+		http.Redirect(w, r, "/user/login?redirect_to="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
+		return
+	}
+	if !hasScope(scopes, "read:issue") {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	f.mu.Lock()
+	att, found := f.attachments[uuid]
+	f.mu.Unlock()
+	if !found || !att.readers[caller] {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", att.contentType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(att.body)))
+	w.Header().Set("Cache-Control", "max-age=0, private, must-revalidate")
+	_, _ = w.Write(att.body)
+}
+
+// TokenScopes is what the named token of login may do, as it was minted; nil
+// when there is no such token.
+func (f *Fake) TokenScopes(login, name string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, t := range f.tokens {
+		if t.Owner == login && t.Name == name {
+			return slices.Clone(t.Scopes)
+		}
+	}
+	return nil
+}
+
 func (f *Fake) Tokens(login string) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -303,6 +370,13 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 
 	if forced != 0 {
 		fail(w, forced, "the test forced this refusal")
+		return
+	}
+
+	// The one web route the broker reads: no /api/v1 prefix, and Gitea's
+	// own answers — a redirect to sign in, not a 401.
+	if uuid, ok := strings.CutPrefix(r.URL.Path, "/attachments/"); ok && r.Method == http.MethodGet {
+		f.serveAttachment(w, r, uuid)
 		return
 	}
 
