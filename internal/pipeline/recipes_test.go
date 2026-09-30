@@ -72,6 +72,92 @@ func TestStartWithoutCodeKeepsEverythingButTheTwoGitFields(t *testing.T) {
 	}
 }
 
+// A tier generates its secrets, and the platform evaluates a directive only
+// under the preprocessor's header: a delta that carries one turns it on, one
+// that carries none is left as it was.
+func TestADeltaThatGeneratesASecretTurnsThePreprocessorOn(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		recipe string
+		header bool
+	}{
+		{name: "a generated secret", recipe: `
+services:
+  - hostname: mailpit
+    type: alpine@3.21
+    envSecrets:
+      MP_UI_AUTH: admin:<@generateRandomString(<16>)>
+`, header: true},
+		{name: "nothing generated", recipe: stageImportGrown, header: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			recipe, err := environments.ParseRecipe([]byte(tc.recipe))
+			if err != nil {
+				t.Fatalf("ParseRecipe: %v", err)
+			}
+			document, err := environments.StartWithoutCode(recipe.Order())
+			if err != nil {
+				t.Fatalf("StartWithoutCode: %v", err)
+			}
+			if got := strings.HasPrefix(document, "#zeropsPreprocessor=on\n"); got != tc.header {
+				t.Fatalf("header = %v, want %v:\n%s", got, tc.header, document)
+			}
+			if _, err := environments.ParseRecipe([]byte(document)); err != nil {
+				t.Fatalf("the delta does not parse: %v\n%s", err, document)
+			}
+		})
+	}
+}
+
+// A utility built from its published recipe on a public host is built by the
+// platform at import: the delta keeps its build, and the broker never deploys
+// it. A credential in the URL makes it private, and it is created empty.
+func TestAPublicBuildKeepsItsBuildAndIsNeverDeployed(t *testing.T) {
+	t.Parallel()
+	const tier = `
+services:
+  - hostname: mailpit
+    type: alpine@3.21
+    buildFromGit: https://github.com/zerops-recipe-apps/mailpit-app
+    zeropsSetup: mailpit
+    enableSubdomainAccess: true
+  - hostname: tool
+    type: alpine@3.21
+    buildFromGit: https://x-access-token:secret@github.com/acme/tool
+    zeropsSetup: tool
+  - hostname: api
+    type: nodejs@22
+    buildFromGit: https://gitea.example/acme/api
+    zeropsSetup: api
+`
+	recipe, err := environments.ParseRecipe([]byte(tier))
+	if err != nil {
+		t.Fatalf("ParseRecipe: %v", err)
+	}
+	runtime := map[string]bool{}
+	for _, service := range recipe.Order() {
+		runtime[service.Hostname] = service.Runtime()
+	}
+	if runtime["mailpit"] || !runtime["api"] {
+		t.Fatalf("runtimes the broker deploys = %v, want api alone", runtime)
+	}
+	document, err := environments.StartWithoutCode(recipe.Order())
+	if err != nil {
+		t.Fatalf("StartWithoutCode: %v", err)
+	}
+	if !strings.Contains(document, "buildFromGit: https://github.com/zerops-recipe-apps/mailpit-app") {
+		t.Fatalf("the public build did not survive the delta:\n%s", document)
+	}
+	if strings.Contains(document, "secret@") || strings.Contains(document, "gitea.example") {
+		t.Fatalf("a private build survived the delta:\n%s", document)
+	}
+	if strings.Count(document, "startWithoutCode: true") != 2 {
+		t.Fatalf("the private services do not start without code:\n%s", document)
+	}
+}
+
 func TestARecipeChangeIsImportedIntoEveryEnvironmentOfItsTier(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)

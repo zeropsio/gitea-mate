@@ -12,6 +12,7 @@ package environments
 
 import (
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -287,11 +288,30 @@ func (s RecipeService) Repository() (owner, name string, ok bool) {
 }
 
 // Runtime reports whether a service is one the broker deploys: it names both a
-// repository and a setup. Everything else in a tier — a database, a storage —
-// is created by the import and never deployed to.
+// repository and a setup, on the group's own Git hosting. Everything else in a
+// tier — a database, a storage, a utility the platform builds itself from a
+// public repository — is created by the import and never deployed to.
 func (s RecipeService) Runtime() bool {
 	_, _, ok := s.Repository()
-	return ok && s.ZeropsSetup != ""
+	return ok && s.ZeropsSetup != "" && !s.PublicBuild()
+}
+
+// PublicBuild reports a service the platform builds itself at import: its
+// buildFromGit is an https URL on a public host the platform clones from
+// (GitHub, GitLab), with no credential, query or fragment in it — a utility
+// such as a mail catcher, built from its published recipe. Its build is kept
+// in a delta and the broker never deploys it; everything on the group's own
+// Git hosting is private, and the platform cannot clone it.
+func (s RecipeService) PublicBuild() bool {
+	u, err := url.Parse(strings.TrimSpace(s.BuildFromGit))
+	if err != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "github.com", "gitlab.com":
+		return true
+	}
+	return false
 }
 
 // ParseRecipe reads a tier's import.yaml.
@@ -370,7 +390,9 @@ func (r Recipe) Runtimes() []RecipeService {
 
 // StartWithoutCode renders the given services as a services-only import
 // document, with `buildFromGit` and `zeropsSetup` replaced by
-// `startWithoutCode: true` and everything else kept as the recipe wrote it.
+// `startWithoutCode: true` and everything else kept as the recipe wrote it —
+// except a service that builds from a public repository (PublicBuild), which
+// keeps its build: the platform clones and builds it at import.
 //
 // The conversion is not a simplification: the platform cannot clone a private
 // repository, so a service imported from the recipe has to be created empty
@@ -396,14 +418,26 @@ func StartWithoutCode(services []RecipeService) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("import delta: %w", err)
 	}
+	// A recipe generates its secrets — `<@generateRandomString(<32>)>` — and the
+	// platform evaluates a directive only under this header, first in the
+	// document. Without it the new service stores the directive as its value.
+	if strings.Contains(string(raw), "<@") {
+		return preprocessorHeader + string(raw), nil
+	}
 	return string(raw), nil
 }
+
+// preprocessorHeader turns the platform's import preprocessor on.
+const preprocessorHeader = "#zeropsPreprocessor=on\n"
 
 // withoutCode copies a service's mapping and swaps its two git fields for
 // startWithoutCode. The copy leaves the recipe the caller holds untouched.
 func withoutCode(service RecipeService) (*yaml.Node, error) {
 	if service.Raw == nil || service.Raw.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("import delta: %s is not a mapping", service.Hostname)
+	}
+	if service.PublicBuild() {
+		return service.Raw, nil
 	}
 	out := &yaml.Node{Kind: yaml.MappingNode, Tag: service.Raw.Tag}
 	for i := 0; i+1 < len(service.Raw.Content); i += 2 {
