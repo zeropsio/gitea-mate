@@ -108,7 +108,8 @@ with write. An existing service repository of the group answers `200` with `crea
 bot that does not collaborate on it yet is made a collaborator with write first: that is how a
 group's second Mate joins its app, since the recipe's `buildFromGit` names the same repository for
 every Mate it creates (D24). `group` — the group repository — answers `409 taken`, made yet or not:
-a Mate's recipe reaches it only as a pull request from its bot's fork (D23).
+it is no service repository, and a registered Mate's write on it is the rights loop's (D31), never
+an answer here.
 
 ```json
 { "fullName": "acme/api", "cloneUrl": "https://web-1234-3000.prg1.zerops.app/acme/api",

@@ -237,8 +237,10 @@ func (r *rig) secondMate(t *testing.T) string {
 }
 
 func TestRepositoryRefusals(t *testing.T) {
-	// The group repository is no Mate's to write, made yet or not: its recipe
-	// arrives as a pull request from the bot's fork (D23).
+	// The group repository is no service repository, made yet or not: this
+	// endpoint neither makes it nor joins a bot to it. A registered Mate
+	// writes it as a collaborator the rights loop makes (D31), and the refusal
+	// says so rather than sending the Mate to a fork.
 	for _, made := range []bool{true, false} {
 		t.Run(fmt.Sprintf("the group repository is taken (made: %v)", made), func(t *testing.T) {
 			r := newRig(t)
@@ -257,8 +259,12 @@ func TestRepositoryRefusals(t *testing.T) {
 			if body.Error != "taken" {
 				t.Errorf("error = %q", body.Error)
 			}
+			if !strings.Contains(body.Message, "not a service repository") || !strings.Contains(body.Message, "pull request") ||
+				strings.Contains(body.Message, "fork") {
+				t.Errorf("message = %q; want it to name the recipe repository and the pull request, and no fork", body.Message)
+			}
 			if _, ok := r.gitea.Collaborators("acme", "group")["mate-p-fen"]; ok {
-				t.Errorf("the bot was made a collaborator on the group repository")
+				t.Errorf("the endpoint made the bot a collaborator on the group repository; that is the rights loop's (D31)")
 			}
 		})
 	}
