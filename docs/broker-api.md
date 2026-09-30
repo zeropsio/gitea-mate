@@ -170,7 +170,7 @@ touched:
 
 ```json
 { "id": "d_8f2a…", "status": "granted", "environment": "acme-stage", "service": "api", "sha": "3f9c…",
-  "token": "…", "projectId": "…", "serviceId": "…", "setup": "prod", "versionName": "3f9c…" }
+  "token": "…", "projectId": "…", "serviceId": "…", "setup": "prod", "versionName": "main 3f9c1b2" }
 ```
 
 `status` is `granted`, `live`, `nothing`, `superseded` or `in_progress`; only `granted` carries a

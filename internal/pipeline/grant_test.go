@@ -67,7 +67,7 @@ func TestAJobOfTheDefaultBranchIsHandedTheKey(t *testing.T) {
 	}
 	want := deploy.Grant{
 		ID: grant.ID, Status: deploy.GrantGranted, Environment: "stage", Service: "api", Sha: second,
-		Token: "the-stage-key", ProjectID: stagePrj, ServiceID: "svc-stage-api", Setup: "api", VersionName: second,
+		Token: "the-stage-key", ProjectID: stagePrj, ServiceID: "svc-stage-api", Setup: "api", VersionName: "main 2222222",
 	}
 	if grant != want || !strings.HasPrefix(grant.ID, "d_") {
 		t.Fatalf("Grant = %+v, want %+v", grant, want)
@@ -381,7 +381,7 @@ func TestProductionIsGrantedWhatTheReleaseLists(t *testing.T) {
 		t.Fatalf("Grant = %+v, %v", grant, err)
 	}
 	if grant.Token != "the-production-key" || grant.ServiceID != "svc-prod-api" ||
-		grant.VersionName != second+" v1.0.0 u-v1.0.0" {
+		grant.VersionName != "v1.0.0 2222222" {
 		t.Fatalf("Grant = %+v", grant)
 	}
 

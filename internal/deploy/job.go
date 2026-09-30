@@ -23,8 +23,9 @@ type Target struct {
 	Repo  string
 	// Sha is the commit.
 	Sha string
-	// VersionName is what the Zerops app version is called: the sha, and for
-	// production "{sha} {tag} {tagger}". The sha is always the first token.
+	// VersionName is what the Zerops app version is called ([zerops.VersionName]):
+	// the stage's branch or production's tag, then the short sha — "main
+	// 7e2d4c1", "v0.1.0 7e2d4c1". [zerops.VersionSha] reads it back.
 	VersionName string
 	// Setup is the target tier's zeropsSetup for this service.
 	Setup string

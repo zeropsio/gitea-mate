@@ -58,7 +58,7 @@ app at registration — on a collision the app numbers it (`acme-2`, `acme-3`) �
 | a Mate's token | `zcp-{project}` (the platform's), lowered to `NO_ACCESS` + `BASIC_USER` on its project; replacements `zcp-{project}/{generation}` |
 | a door throwaway | `mate-door:{projectId}:{nonce}` — `NO_ACCESS`, no grants, no flags |
 | a Gitea throwaway | `gitea-signin:{gitea host}:{nonce}` — the same shape; used for sign-in consent |
-| an app version | named by the full commit sha; production's `{sha} {tag} {tagger login}` — the sha is always the first token |
+| an app version | `{branch} {short sha}` on a stage, `{tag} {short sha}` in production ("v0.1.0 7e2d4c1", seven hex); older names, still read: the bare full sha, `{sha} {tag} {tagger login}` (`group-repo.md`) |
 
 ## Gitea's environment that the app fills in (service `web`, plain)
 

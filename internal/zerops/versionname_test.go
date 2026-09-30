@@ -11,6 +11,27 @@ const (
 	otherSha = "3f9c1b2e5cd0d39ae4e3c5b934829b22de8d0955"
 )
 
+func TestVersionName(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		label string
+		sha   string
+		want  string
+	}{
+		{"a stage names its branch and the short sha", "main", fullSha, "main 7e2d4c1"},
+		{"production names its tag and the short sha", "v0.1.0", fullSha, "v0.1.0 7e2d4c1"},
+		{"a merged stage branch is a label like any other", "env/stage", fullSha, "env/stage 7e2d4c1"},
+		{"a sha already short stays whole", "main", "3f9c", "main 3f9c"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := zerops.VersionName(tc.label, tc.sha); got != tc.want {
+				t.Fatalf("VersionName(%q, %q) = %q, want %q", tc.label, tc.sha, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestVersionSha(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

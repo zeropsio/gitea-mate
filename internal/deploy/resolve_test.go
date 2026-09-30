@@ -110,7 +110,7 @@ func TestResolveAStageFollowsItsBranch(t *testing.T) {
 	if len(targets) != 2 || targets[0].Service != "api" || targets[1].Service != "web" {
 		t.Fatalf("targets = %+v", targets)
 	}
-	if targets[0].Sha != apiSha || targets[0].VersionName != apiSha || targets[0].Setup != "api" {
+	if targets[0].Sha != apiSha || targets[0].VersionName != "main 3f9c1b2" || targets[0].Setup != "api" {
 		t.Fatalf("api = %+v", targets[0])
 	}
 	if targets[0].Gate != nil {
@@ -160,8 +160,9 @@ func TestResolveProductionFollowsTheApprovedTag(t *testing.T) {
 	if api.Sha != apiSha {
 		t.Fatalf("api is at %q, want the tag's commit", api.Sha)
 	}
-	// docs/group-repo.md: production's version is `{sha} {tag} {tagger}`.
-	if api.VersionName != apiSha+" v1.0.0 u-abc" {
+	// docs/group-repo.md: production's version is `{tag} {short sha}`, and
+	// names nobody — who tagged it is the release's to say.
+	if api.VersionName != "v1.0.0 3f9c1b2" {
 		t.Fatalf("api's version name is %q", api.VersionName)
 	}
 	if api.Setup != "api-prod" {

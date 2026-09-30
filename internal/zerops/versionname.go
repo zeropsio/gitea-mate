@@ -2,9 +2,20 @@ package zerops
 
 import "strings"
 
-// ShortShaLength is the shortest sha an app version's name may spell: the
-// seven hex characters git and the Mate app show.
+// ShortShaLength is how much of a commit sha an app version's name carries:
+// the seven hex characters git and the Mate app show.
 const ShortShaLength = 7
+
+// VersionName is what the broker calls an app version (docs/group-repo.md):
+// the label a person reads it by — a stage's branch, production's release tag
+// — and the commit's short sha, "v0.1.0 7e2d4c1". Branches and tags cannot
+// hold a space, so the name is always exactly two tokens.
+func VersionName(label, sha string) string {
+	if len(sha) > ShortShaLength {
+		sha = sha[:ShortShaLength]
+	}
+	return label + " " + sha
+}
 
 // VersionSha is the commit an app version's name was built from, as far as the
 // name spells it — whole or short; [SameCommit] compares it. It reads every
