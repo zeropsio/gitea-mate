@@ -100,7 +100,7 @@ func (d *Dispatcher) one(ctx context.Context, job Job, target Target, serviceID 
 		return
 	}
 	status, has := history.Latest, history.Has
-	if service.DeployedSha() == target.Sha {
+	if zerops.SameCommit(service.DeployedSha(), target.Sha) {
 		// Where almost every pass ends. A job that died after its push landed
 		// never reported, and its status would say "deploying" for ever; one
 		// that reported a failure the platform then settled would say failed.

@@ -89,7 +89,7 @@ func (p *Pipeline) Grant(ctx context.Context, req deploy.GrantRequest) (deploy.G
 			if err != nil {
 				return deploy.Grant{}, deploy.Refuse(http.StatusBadGateway, "upstream", "%s: %v", where, err)
 			}
-			if service.DeployedSha() == target.Sha {
+			if zerops.SameCommit(service.DeployedSha(), target.Sha) {
 				live = append(live, where)
 				continue
 			}
@@ -270,7 +270,7 @@ func (p *Pipeline) Result(ctx context.Context, id, repository, outcome, message 
 	if err != nil {
 		return deploy.Refuse(http.StatusBadGateway, "upstream", "the service could not be read")
 	}
-	if service.Deploying() && zerops.VersionSha(service.DeployedName()) == record.Sha {
+	if service.Deploying() && zerops.SameCommit(zerops.VersionSha(service.DeployedName()), record.Sha) {
 		// The platform names the reported commit's version but does not run
 		// it yet: not a verdict. The status stays pending, and the pass writes
 		// live once the service runs the commit. A service building another
@@ -279,7 +279,7 @@ func (p *Pipeline) Result(ctx context.Context, id, repository, outcome, message 
 			"environment", record.Environment, "service", record.Service, "sha", record.Sha)
 		return nil
 	}
-	if service.DeployedSha() != record.Sha {
+	if !zerops.SameCommit(service.DeployedSha(), record.Sha) {
 		why := fmt.Sprintf("the job reported success, but %s runs %q", record.Service, service.DeployedSha())
 		if service.Deploying() {
 			why = fmt.Sprintf("the job reported success, but %s builds %q", record.Service, zerops.VersionSha(service.DeployedName()))

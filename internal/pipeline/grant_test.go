@@ -67,7 +67,7 @@ func TestAJobOfTheDefaultBranchIsHandedTheKey(t *testing.T) {
 	}
 	want := deploy.Grant{
 		ID: grant.ID, Status: deploy.GrantGranted, Environment: "stage", Service: "api", Sha: second,
-		Token: "the-stage-key", ProjectID: stagePrj, ServiceID: "svc-stage-api", Setup: "api", VersionName: second,
+		Token: "the-stage-key", ProjectID: stagePrj, ServiceID: "svc-stage-api", Setup: "api", VersionName: "main 2222222",
 	}
 	if grant != want || !strings.HasPrefix(grant.ID, "d_") {
 		t.Fatalf("Grant = %+v, want %+v", grant, want)
@@ -179,6 +179,11 @@ func TestNothingToDoIsNotAFailure(t *testing.T) {
 		{
 			name: "a commit already live",
 			arm:  func(_ *testing.T, w *world) { w.land("svc-stage-api", second) },
+			sha:  second, want: deploy.GrantLive,
+		},
+		{
+			name: "a commit already live under its short name",
+			arm:  func(_ *testing.T, w *world) { w.land("svc-stage-api", "main 2222222") },
 			sha:  second, want: deploy.GrantLive,
 		},
 		{
@@ -376,7 +381,7 @@ func TestProductionIsGrantedWhatTheReleaseLists(t *testing.T) {
 		t.Fatalf("Grant = %+v, %v", grant, err)
 	}
 	if grant.Token != "the-production-key" || grant.ServiceID != "svc-prod-api" ||
-		grant.VersionName != second+" v1.0.0 u-v1.0.0" {
+		grant.VersionName != "v1.0.0 2222222" {
 		t.Fatalf("Grant = %+v", grant)
 	}
 
@@ -396,7 +401,10 @@ func TestTheJobsReport(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		land bool
-		// start is the commit whose build the service has started.
+		// landed is the name of the version the service runs once the job
+		// lands; empty is the old name, the bare sha.
+		landed string
+		// start is the name of the version whose build the service has started.
 		start     string
 		outcome   string
 		message   string
@@ -405,9 +413,12 @@ func TestTheJobsReport(t *testing.T) {
 		subdomain bool
 	}{
 		{name: "success, and the service runs the commit", land: true, outcome: "success", wantState: "success", wantPart: "live", subdomain: true},
+		{name: "success, and the service runs it by its short name", land: true, landed: "main 2222222", outcome: "success", wantState: "success", wantPart: "live", subdomain: true},
 		{name: "success, but the service runs something else", outcome: "success", wantState: "failure", wantPart: "reported success"},
 		{name: "success, while the new version is not active yet", start: second, outcome: "success", wantState: "pending", wantPart: deploy.DescriptionDeploying},
+		{name: "success, while the new version, short-named, is not active yet", start: "main 2222222", outcome: "success", wantState: "pending", wantPart: deploy.DescriptionDeploying},
 		{name: "success, while the service builds another commit", start: first, outcome: "success", wantState: "failure", wantPart: "api builds \"" + first + "\""},
+		{name: "success, while the service builds another commit by its short name", start: "main 1111111", outcome: "success", wantState: "failure", wantPart: "api builds \"1111111\""},
 		{name: "failure, in the job's words", outcome: "failure", message: "the build failed: npm ci", wantState: "failure", wantPart: "npm ci"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -419,7 +430,11 @@ func TestTheJobsReport(t *testing.T) {
 				t.Fatalf("Grant: %v", err)
 			}
 			if tc.land {
-				w.land("svc-stage-api", second)
+				landed := tc.landed
+				if landed == "" {
+					landed = second
+				}
+				w.land("svc-stage-api", landed)
 			}
 			if tc.start != "" {
 				w.zerops.StartBuild("svc-stage-api", tc.start)

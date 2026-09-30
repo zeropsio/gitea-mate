@@ -9,6 +9,7 @@ import (
 	"github.com/zeropsio/gitea-mate/internal/environments"
 	"github.com/zeropsio/gitea-mate/internal/gitea"
 	"github.com/zeropsio/gitea-mate/internal/registry"
+	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
 
 // Resolving is where "what is deployed" is decided, and it reads protected
@@ -99,7 +100,7 @@ func (r *Resolver) stage(ctx context.Context, plan Plan, env environments.Enviro
 		}
 		targets = append(targets, Target{
 			Service: service.Hostname, Owner: owner, Repo: repo, Sha: sha,
-			VersionName: sha, Setup: service.ZeropsSetup,
+			VersionName: zerops.VersionName(env.Branch(), sha), Setup: service.ZeropsSetup,
 		})
 	}
 	return targets, problems, nil
@@ -132,7 +133,7 @@ func (r *Resolver) production(ctx context.Context, plan Plan, env environments.E
 		}
 		target := Target{
 			Service: service.Hostname, Owner: owner, Repo: repo, Sha: sha,
-			VersionName: sha + " " + release.Tag + " " + release.Tagger,
+			VersionName: zerops.VersionName(release.Tag, sha),
 			Setup:       service.ZeropsSetup,
 			Gate:        gate,
 		}

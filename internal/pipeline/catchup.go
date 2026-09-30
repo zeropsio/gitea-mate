@@ -104,7 +104,7 @@ func (p *Pipeline) catchUp(ctx context.Context, plan deploy.Plan, env environmen
 
 	var behind []deploy.Target
 	for _, target := range targets {
-		if live[target.Service] != target.Sha {
+		if !zerops.SameCommit(live[target.Service], target.Sha) {
 			behind = append(behind, target)
 			continue
 		}

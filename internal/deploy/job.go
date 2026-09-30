@@ -23,8 +23,9 @@ type Target struct {
 	Repo  string
 	// Sha is the commit.
 	Sha string
-	// VersionName is what the Zerops app version is called: the sha, and for
-	// production "{sha} {tag} {tagger}". The sha is always the first token.
+	// VersionName is what the Zerops app version is called ([zerops.VersionName]):
+	// the stage's branch or production's tag, then the short sha — "main
+	// 7e2d4c1", "v0.1.0 7e2d4c1". [zerops.VersionSha] reads it back.
 	VersionName string
 	// Setup is the target tier's zeropsSetup for this service.
 	Setup string
@@ -169,7 +170,7 @@ func GateMet(ctx context.Context, z *zerops.Client, clientID string, target Targ
 		if err != nil {
 			return false, fmt.Sprintf("the gate %s could not be read: %v", target.Gate.Environment, err)
 		}
-		if staged.DeployedSha() == target.Sha {
+		if zerops.SameCommit(staged.DeployedSha(), target.Sha) {
 			return true, ""
 		}
 		return false, fmt.Sprintf("%s is not live on %s, which this environment gates on", target.Sha, target.Gate.Environment)

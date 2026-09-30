@@ -46,17 +46,6 @@ const (
 	AppVersionDeployFail  = "DEPLOY_FAILED"
 )
 
-// VersionSha is the commit an app version's name was built from: its first
-// token (docs/group-repo.md — production's name is "{sha} {tag} {tagger}").
-func VersionSha(name string) string {
-	for i := 0; i < len(name); i++ {
-		if name[i] == ' ' {
-			return name[:i]
-		}
-	}
-	return name
-}
-
 // CreateAppVersion is POST /service-stack/{id}/app-version. The name is the
 // only thing the body carries, and it is how every later read knows which
 // commit is live.
@@ -121,8 +110,9 @@ type ServiceDetail struct {
 // when the service has never deployed.
 func (d ServiceDetail) DeployedName() string { return d.userData(AppVersionNameKey) }
 
-// DeployedSha is the commit the service is verifiably running: the first token
-// of [ServiceDetail.DeployedName], and only while the version userData names is
+// DeployedSha is the commit the service is verifiably running, as its name
+// spells it ([VersionSha] — whole in an old name, short in a new one, so it is
+// compared with [SameCommit]), and only while the version userData names is
 // the active one. A deploy on its way, one whose build failed, a service that
 // has never deployed and one deployed by something other than the broker have
 // none — none of them is known to run anything by name.

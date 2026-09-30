@@ -202,41 +202,39 @@ func TestAPassWithNothingRegisteredIsQuiet(t *testing.T) {
 // and a service whose environment says it already runs the head is left alone.
 func TestTheDeployedShaIsReadFromTheServicesEnvironment(t *testing.T) {
 	t.Parallel()
-	w := newWorld(t)
-	ctx := context.Background()
-	w.gitea.SetBranch("acme/api", "main", second)
+	for _, tc := range []struct {
+		name     string
+		deployed string
+		behind   int
+	}{
+		{"the old stage name, a bare sha", second, 0},
+		{"the old production name, {sha} {tag} {tagger}", second + " v1.0.0 u-abc", 0},
+		{"the stage name, {branch} {short sha}", "main 2222222", 0},
+		{"the production name, {tag} {short sha}", "v1.0.0 2222222", 0},
+		{"another commit's short name", "main 1111111", 1},
+		{"a name a person typed", "hotfix friday", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			ctx := context.Background()
+			w.gitea.SetBranch("acme/api", "main", second)
+			w.zerops.AddAppVersion(zerops.AppVersion{
+				ID: "ver-seeded", ServiceStackID: "svc-stage-api", Status: zerops.AppVersionActive, Sequence: 1,
+			}, tc.deployed)
 
-	// The stage is already there, as far as its own environment is concerned.
-	w.zerops.AddAppVersion(zerops.AppVersion{
-		ID: "ver-seeded", ServiceStackID: "svc-stage-api", Status: zerops.AppVersionActive, Sequence: 1,
-	}, second)
-
-	result, err := w.pipe.Pass(ctx)
-	if err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
-	w.queue.Wait()
-	if result.Deploys != 0 {
-		t.Fatalf("the pass found %d services behind, want none", result.Deploys)
-	}
-	if len(w.gitea.Dispatches) != 0 {
-		t.Fatal("a service already at the head got a job")
-	}
-
-	// A production-shaped name is read the same way: the sha is the first token.
-	w.zerops.SetServices(stagePrj, zerops.Service{ID: "svc-stage-api", ProjectID: stagePrj, Name: "api",
-		Status: "ACTIVE", Ports: []zerops.ServicePort{{Port: 3000, HTTPRouting: true}}})
-	w.zerops.AddAppVersion(zerops.AppVersion{
-		ID: "ver-named", ServiceStackID: "svc-stage-api", Status: zerops.AppVersionActive, Sequence: 2,
-	}, second+" v1.0.0 u-abc")
-
-	result, err = w.pipe.Pass(ctx)
-	if err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
-	w.queue.Wait()
-	if result.Deploys != 0 {
-		t.Fatalf("a version named {sha} {tag} {tagger} was not read as its sha: %+v", result)
+			result, err := w.pipe.Pass(ctx)
+			if err != nil {
+				t.Fatalf("Pass: %v", err)
+			}
+			w.queue.Wait()
+			if result.Deploys != tc.behind {
+				t.Fatalf("a service named %q was found %d behind, want %d", tc.deployed, result.Deploys, tc.behind)
+			}
+			if len(w.gitea.Dispatches) != tc.behind {
+				t.Fatalf("dispatched %v, want %d jobs", w.gitea.Dispatches, tc.behind)
+			}
+		})
 	}
 }
 
