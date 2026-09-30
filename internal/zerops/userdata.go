@@ -2,6 +2,7 @@ package zerops
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 )
 
@@ -17,14 +18,32 @@ import (
 // restart follows one.
 
 // UserData is GET /service-stack/{id}/user-data: the service's own variables,
-// with the ids an update needs.
+// with the ids an update needs. The platform pages it, 20 a page by default,
+// and a zcp container holds more (29 measured 2026-09-30), so every page is
+// read. A read short of its declared total is ErrPartial: a variable missing
+// from it would be created again and refused as a duplicate.
 func (c *Client) UserData(ctx context.Context, serviceID string) ([]ServiceUserData, error) {
-	var out struct {
-		List []ServiceUserData `json:"list"`
+	var all []ServiceUserData
+	for {
+		var page struct {
+			List  []ServiceUserData `json:"list"`
+			Total int               `json:"total"`
+		}
+		path := fmt.Sprintf("/service-stack/%s/user-data?limit=%d&offset=%d", url.PathEscape(serviceID), userDataPageSize, len(all))
+		if _, err := c.do(ctx, "GET", path, nil, &page); err != nil {
+			return all, err
+		}
+		all = append(all, page.List...)
+		if len(page.List) == 0 || len(all) >= page.Total {
+			if len(all) < page.Total {
+				return all, fmt.Errorf("%w: user data returned %d of %d", ErrPartial, len(all), page.Total)
+			}
+			return all, nil
+		}
 	}
-	_, err := c.do(ctx, "GET", "/service-stack/"+url.PathEscape(serviceID)+"/user-data", nil, &out)
-	return out.List, err
 }
+
+const userDataPageSize = 100
 
 // UserDataSpec is the body of a service-variable create.
 type UserDataSpec struct {
