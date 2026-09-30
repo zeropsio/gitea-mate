@@ -2,6 +2,7 @@ package zerops_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/zeropsio/gitea-mate/internal/zerops"
@@ -62,6 +63,28 @@ func TestServiceUserDataReadCreateUpdate(t *testing.T) {
 		if entry.Key == "GITEA_TOKEN" && (entry.Content != "t2" || entry.ID != token.ID || !entry.Sensitive) {
 			t.Errorf("after the update = %+v", entry)
 		}
+	}
+}
+
+// A container holds more variables than one page: the platform answers 20 a
+// page, and a zcp container carries 29 with its system ones (measured
+// 2026-09-30). Every one is read — a variable on the second page read as
+// missing is created again, which the platform refuses as a duplicate.
+func TestUserDataReadsEveryPage(t *testing.T) {
+	f, c := newFake(t)
+	f.SetServices("p-fen", zerops.Service{ID: "s-zcp", ProjectID: "p-fen", Name: "zcp"})
+	var want []zerops.ServiceUserData
+	for i := range 29 {
+		want = append(want, zerops.ServiceUserData{ID: fmt.Sprintf("ud-%d", i), Key: fmt.Sprintf("VAR_%02d", i), Content: "v"})
+	}
+	f.SetUserData("s-zcp", want...)
+
+	have, err := c.UserData(context.Background(), "s-zcp")
+	if err != nil {
+		t.Fatalf("UserData: %v", err)
+	}
+	if len(have) != len(want) || have[len(have)-1].Key != "VAR_28" {
+		t.Fatalf("read %d of %d variables", len(have), len(want))
 	}
 }
 

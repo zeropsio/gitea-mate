@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -293,7 +294,7 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	case key == "POST /service-stack/search":
 		f.serviceSearch(w, r)
 	case r.Method == "GET" && strings.HasPrefix(path, "/service-stack/") && strings.HasSuffix(path, "/user-data"):
-		f.listUserData(w, strings.TrimSuffix(strings.TrimPrefix(path, "/service-stack/"), "/user-data"))
+		f.listUserData(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/service-stack/"), "/user-data"))
 	case r.Method == "POST" && strings.HasPrefix(path, "/service-stack/") && strings.HasSuffix(path, "/user-data"):
 		f.createUserData(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/service-stack/"), "/user-data"))
 	case r.Method == "PUT" && strings.HasPrefix(path, "/user-data/"):
@@ -533,18 +534,29 @@ func (f *Fake) serviceSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 // listUserData is GET /service-stack/{id}/user-data. Sensitive values come
-// back in clear, as they do to a BASIC_USER token on the project.
-func (f *Fake) listUserData(w http.ResponseWriter, serviceID string) {
+// back in clear, as they do to a BASIC_USER token on the project. It pages as
+// the platform does: 20 a page unless ?limit= says otherwise, from ?offset=,
+// with the whole count in total (measured 2026-09-30: a zcp container holds
+// 29, its system variables among them).
+func (f *Fake) listUserData(w http.ResponseWriter, r *http.Request, serviceID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.userDataReachable(w, serviceID) {
 		return
 	}
-	list := f.userData[serviceID]
-	if list == nil {
-		list = []zerops.ServiceUserData{}
+	all := f.userData[serviceID]
+	limit, offset := 20, 0
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		limit = n
 	}
-	writeJSON(w, 200, map[string]any{"list": list})
+	if n, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && n > 0 {
+		offset = n
+	}
+	list := []zerops.ServiceUserData{}
+	if offset < len(all) {
+		list = all[offset:min(offset+limit, len(all))]
+	}
+	writeJSON(w, 200, map[string]any{"list": list, "count": len(list), "total": len(all), "limit": limit, "offset": offset})
 }
 
 // createUserData is POST /service-stack/{id}/user-data: 200 with a process. A
