@@ -277,6 +277,63 @@ func TestReposAndProtection(t *testing.T) {
 	}
 }
 
+// A Mate's bot writes as a collaborator, and the rights loop reads who
+// collaborates on a repository to make that true and to take it away again.
+// An account Gitea does not know is no collaborator: 422, as Gitea answers.
+func TestCollaborators(t *testing.T) {
+	f := giteatest.New(t)
+	c := f.Client()
+	ctx := context.Background()
+	if _, err := c.CreateOrg(ctx, "acme", "Acme"); err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+	if _, err := c.CreateOrgRepo(ctx, "acme", gitea.NewRepo{Name: "group"}); err != nil {
+		t.Fatalf("CreateOrgRepo: %v", err)
+	}
+	logins := func() []string {
+		t.Helper()
+		users, err := c.ListCollaborators(ctx, "acme", "group")
+		if err != nil {
+			t.Fatalf("ListCollaborators: %v", err)
+		}
+		out := []string{}
+		for _, u := range users {
+			out = append(out, u.Login)
+		}
+		slices.Sort(out)
+		return out
+	}
+	if got := logins(); len(got) != 0 {
+		t.Fatalf("a new repository's collaborators = %v, want none", got)
+	}
+
+	if err := c.AddCollaborator(ctx, "acme", "group", "mate-p-nobody", "write"); gitea.Status(err) != http.StatusUnprocessableEntity {
+		t.Errorf("AddCollaborator of an account Gitea does not know = %v, want 422", err)
+	}
+	for _, login := range []string{"mate-p2", "mate-p1"} {
+		f.AddUser(gitea.User{Login: login, Active: true, Restricted: true})
+		if err := c.AddCollaborator(ctx, "acme", "group", login, "write"); err != nil {
+			t.Fatalf("AddCollaborator(%s): %v", login, err)
+		}
+	}
+	if got := logins(); !slices.Equal(got, []string{"mate-p1", "mate-p2"}) {
+		t.Errorf("collaborators = %v, want both bots", got)
+	}
+	if got := f.Collaborators("acme", "group"); got["mate-p1"] != "write" || got["mate-p2"] != "write" {
+		t.Errorf("permissions = %v, want write for both", got)
+	}
+
+	if err := c.RemoveCollaborator(ctx, "acme", "group", "mate-p2"); err != nil {
+		t.Fatalf("RemoveCollaborator: %v", err)
+	}
+	if got := logins(); !slices.Equal(got, []string{"mate-p1"}) {
+		t.Errorf("collaborators after a removal = %v, want mate-p1 alone", got)
+	}
+	if ok, err := c.IsCollaborator(ctx, "acme", "group", "mate-p2"); err != nil || ok {
+		t.Errorf("IsCollaborator(mate-p2) after its removal = %v, %v", ok, err)
+	}
+}
+
 func TestOrgHookCarriesTheSecretAndTheEvents(t *testing.T) {
 	f := giteatest.New(t)
 	c := f.Client()

@@ -839,6 +839,8 @@ func (f *Fake) repoRoutes(w http.ResponseWriter, r *http.Request, path string) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		writeJSON(w, 200, f.repos[full])
+	case rest == "/collaborators" && r.Method == http.MethodGet:
+		f.listCollaborators(w, full)
 	case strings.HasPrefix(rest, "/collaborators/"):
 		f.collaborator(w, r, full, strings.TrimPrefix(rest, "/collaborators/"))
 	case strings.HasPrefix(rest, "/pulls"):
@@ -997,6 +999,11 @@ func (f *Fake) collaborator(w http.ResponseWriter, r *http.Request, full, login 
 	}
 	switch r.Method {
 	case http.MethodPut:
+		// Gitea makes no collaborator of an account it does not know: 422.
+		if _, ok := f.users[login]; !ok {
+			fail(w, http.StatusUnprocessableEntity, "user does not exist [name: "+login+"]")
+			return
+		}
 		var in struct {
 			Permission string `json:"permission"`
 		}
@@ -1013,6 +1020,21 @@ func (f *Fake) collaborator(w http.ResponseWriter, r *http.Request, full, login 
 		delete(f.collaborators[full], login)
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// listCollaborators is GET /repos/{o}/{r}/collaborators: the accounts, as
+// Gitea lists users, without their permission.
+func (f *Fake) listCollaborators(w http.ResponseWriter, full string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []gitea.User{}
+	for login := range f.collaborators[full] {
+		if u, ok := f.users[login]; ok {
+			out = append(out, *u)
+		}
+	}
+	slices.SortFunc(out, func(a, b gitea.User) int { return strings.Compare(a.Login, b.Login) })
+	writeJSON(w, 200, out)
 }
 
 func (f *Fake) branchProtection(w http.ResponseWriter, r *http.Request, full, rest string) {

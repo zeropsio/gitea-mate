@@ -445,6 +445,27 @@ func (c *Client) IsCollaborator(ctx context.Context, owner, repo, login string) 
 	return c.exists(ctx, "/repos/"+esc(owner)+"/"+esc(repo)+"/collaborators/"+esc(login))
 }
 
+// ListCollaborators is GET /repos/{o}/{r}/collaborators, every page: the
+// accounts that collaborate on a repository, whatever their permission.
+func (c *Client) ListCollaborators(ctx context.Context, owner, repo string) ([]User, error) {
+	var all []User
+	err := paged(func(page int) (int, error) {
+		var out []User
+		path := withPage("/repos/"+esc(owner)+"/"+esc(repo)+"/collaborators", page)
+		if err := c.do(ctx, http.MethodGet, path, nil, &out, authToken); err != nil {
+			return 0, err
+		}
+		all = append(all, out...)
+		return len(out), nil
+	})
+	return all, err
+}
+
+// RemoveCollaborator is DELETE /repos/{o}/{r}/collaborators/{login}.
+func (c *Client) RemoveCollaborator(ctx context.Context, owner, repo, login string) error {
+	return c.do(ctx, http.MethodDelete, "/repos/"+esc(owner)+"/"+esc(repo)+"/collaborators/"+esc(login), nil, nil, authToken)
+}
+
 // ---------------------------------------------------------------------------
 // Pull requests
 // ---------------------------------------------------------------------------
