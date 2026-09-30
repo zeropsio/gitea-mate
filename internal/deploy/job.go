@@ -169,7 +169,7 @@ func GateMet(ctx context.Context, z *zerops.Client, clientID string, target Targ
 		if err != nil {
 			return false, fmt.Sprintf("the gate %s could not be read: %v", target.Gate.Environment, err)
 		}
-		if staged.DeployedSha() == target.Sha {
+		if zerops.SameCommit(staged.DeployedSha(), target.Sha) {
 			return true, ""
 		}
 		return false, fmt.Sprintf("%s is not live on %s, which this environment gates on", target.Sha, target.Gate.Environment)

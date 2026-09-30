@@ -103,13 +103,53 @@ func TestAnEnvironmentBehindGetsAJob(t *testing.T) {
 	}
 }
 
+// fullSha is a commit as Gitea names it, for the names that spell it short.
+const fullSha = "3f9c1b2e5d7a4c6f8e0b1d2a3c4f5e6d7a8b9c0d"
+
+// liveNames are every name a service can carry for the commit fullSha: the
+// ones the broker wrote before and the ones it writes now.
+var liveNames = []struct{ name, sha, deployed string }{
+	{"a bare sha, the old stage name", fullSha, fullSha},
+	{"sha, tag and tagger, the old production name", fullSha, fullSha + " v1.0.0 u-abc"},
+	{"branch and short sha, the stage name", fullSha, "main 3f9c1b2"},
+	{"tag and short sha, the production name", fullSha, "v1.0.0 3f9c1b2"},
+	{"a fake's short sha", "3f9c", "3f9c"},
+}
+
+func atSha(job deploy.Job, sha string) deploy.Job {
+	job.Targets[0].Sha = sha
+	return job
+}
+
 func TestACommitAlreadyLiveGetsNoJob(t *testing.T) {
 	t.Parallel()
-	w := newWorld(t)
-	w.zerops.AddAppVersion(zerops.AppVersion{ServiceStackID: "svc-stage-api", Status: zerops.AppVersionActive}, "3f9c")
-	w.dispatcher.Run(context.Background(), stageJob())
-	if len(w.gitea.Dispatches) != 0 {
-		t.Fatalf("a commit already live was dispatched: %v", w.gitea.Dispatches)
+	for _, tc := range liveNames {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			w.zerops.AddAppVersion(zerops.AppVersion{ServiceStackID: "svc-stage-api", Status: zerops.AppVersionActive}, tc.deployed)
+			w.dispatcher.Run(context.Background(), atSha(stageJob(), tc.sha))
+			if len(w.gitea.Dispatches) != 0 {
+				t.Fatalf("a commit already live was dispatched: %v", w.gitea.Dispatches)
+			}
+		})
+	}
+}
+
+// TestAnotherCommitsShortNameIsNotLive — a short sha matches only the commit
+// it begins, and a name a person typed matches none.
+func TestAnotherCommitsShortNameIsNotLive(t *testing.T) {
+	t.Parallel()
+	for _, deployed := range []string{"main 1111111", "v1.0.0 3f9c1b3", "hotfix friday", "main 3f9c1b"} {
+		t.Run(deployed, func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			w.zerops.AddAppVersion(zerops.AppVersion{ServiceStackID: "svc-stage-api", Status: zerops.AppVersionActive}, deployed)
+			w.dispatcher.Run(context.Background(), atSha(stageJob(), fullSha))
+			if len(w.gitea.Dispatches) != 1 {
+				t.Fatalf("a service running %q was taken for %s: dispatched %v", deployed, fullSha, w.gitea.Dispatches)
+			}
+		})
 	}
 }
 
@@ -174,21 +214,27 @@ func TestAWorkflowThatCannotBeStartedSaysWhatToDo(t *testing.T) {
 
 func TestTheGateHoldsAProductionJob(t *testing.T) {
 	t.Parallel()
-	w := newWorld(t)
-	w.dispatcher.Run(context.Background(), productionJob())
-	if len(w.gitea.Dispatches) != 0 {
-		t.Fatalf("a commit the stage does not run was dispatched to production: %v", w.gitea.Dispatches)
-	}
-	status := statusOf(t, w.gitea, "3f9c", "mate/deploy/production/api")
-	if status.State != "failure" || !strings.Contains(status.Description, "is not live on stage") {
-		t.Fatalf("the status is %+v, want the gate's refusal", status)
-	}
+	for _, tc := range liveNames {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			job := atSha(productionJob(), tc.sha)
+			w.dispatcher.Run(context.Background(), job)
+			if len(w.gitea.Dispatches) != 0 {
+				t.Fatalf("a commit the stage does not run was dispatched to production: %v", w.gitea.Dispatches)
+			}
+			status := statusOf(t, w.gitea, tc.sha, "mate/deploy/production/api")
+			if status.State != "failure" || !strings.Contains(status.Description, "is not live on stage") {
+				t.Fatalf("the status is %+v, want the gate's refusal", status)
+			}
 
-	w.zerops.AddAppVersion(zerops.AppVersion{ServiceStackID: "svc-stage-api", Status: zerops.AppVersionActive}, "3f9c")
-	w.dispatcher.Run(context.Background(), productionJob())
-	want := "acme/api zerops.yml@main environment=production service=api sha=3f9c"
-	if !slices.Equal(w.gitea.Dispatches, []string{want}) {
-		t.Fatalf("dispatched %v, want [%s]", w.gitea.Dispatches, want)
+			w.zerops.AddAppVersion(zerops.AppVersion{ServiceStackID: "svc-stage-api", Status: zerops.AppVersionActive}, tc.deployed)
+			w.dispatcher.Run(context.Background(), job)
+			want := "acme/api zerops.yml@main environment=production service=api sha=" + tc.sha
+			if !slices.Equal(w.gitea.Dispatches, []string{want}) {
+				t.Fatalf("dispatched %v, want [%s]", w.gitea.Dispatches, want)
+			}
+		})
 	}
 }
 

@@ -182,6 +182,11 @@ func TestNothingToDoIsNotAFailure(t *testing.T) {
 			sha:  second, want: deploy.GrantLive,
 		},
 		{
+			name: "a commit already live under its short name",
+			arm:  func(_ *testing.T, w *world) { w.land("svc-stage-api", "main 2222222") },
+			sha:  second, want: deploy.GrantLive,
+		},
+		{
 			name: "a repository whose branch feeds no environment",
 			arm: func(_ *testing.T, w *world) {
 				w.gitea.AddFile("acme/group", "main", "environments.yaml",
@@ -396,7 +401,10 @@ func TestTheJobsReport(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		land bool
-		// start is the commit whose build the service has started.
+		// landed is the name of the version the service runs once the job
+		// lands; empty is the old name, the bare sha.
+		landed string
+		// start is the name of the version whose build the service has started.
 		start     string
 		outcome   string
 		message   string
@@ -405,9 +413,12 @@ func TestTheJobsReport(t *testing.T) {
 		subdomain bool
 	}{
 		{name: "success, and the service runs the commit", land: true, outcome: "success", wantState: "success", wantPart: "live", subdomain: true},
+		{name: "success, and the service runs it by its short name", land: true, landed: "main 2222222", outcome: "success", wantState: "success", wantPart: "live", subdomain: true},
 		{name: "success, but the service runs something else", outcome: "success", wantState: "failure", wantPart: "reported success"},
 		{name: "success, while the new version is not active yet", start: second, outcome: "success", wantState: "pending", wantPart: deploy.DescriptionDeploying},
+		{name: "success, while the new version, short-named, is not active yet", start: "main 2222222", outcome: "success", wantState: "pending", wantPart: deploy.DescriptionDeploying},
 		{name: "success, while the service builds another commit", start: first, outcome: "success", wantState: "failure", wantPart: "api builds \"" + first + "\""},
+		{name: "success, while the service builds another commit by its short name", start: "main 1111111", outcome: "success", wantState: "failure", wantPart: "api builds \"1111111\""},
 		{name: "failure, in the job's words", outcome: "failure", message: "the build failed: npm ci", wantState: "failure", wantPart: "npm ci"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -419,7 +430,11 @@ func TestTheJobsReport(t *testing.T) {
 				t.Fatalf("Grant: %v", err)
 			}
 			if tc.land {
-				w.land("svc-stage-api", second)
+				landed := tc.landed
+				if landed == "" {
+					landed = second
+				}
+				w.land("svc-stage-api", landed)
 			}
 			if tc.start != "" {
 				w.zerops.StartBuild("svc-stage-api", tc.start)

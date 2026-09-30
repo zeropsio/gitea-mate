@@ -25,26 +25,6 @@ func deployFake(t *testing.T) (*zeropstest.Fake, *zerops.Client) {
 	return f, f.Client("broker")
 }
 
-func TestVersionSha(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"a stage version is the bare sha", "3f9c1b2e", "3f9c1b2e"},
-		{"a production version names the tag and the tagger too", "3f9c1b2e v1.2.0 u-abc", "3f9c1b2e"},
-		{"a version nobody named has no sha", "", ""},
-		{"a name that starts with a space has none either", " v1", ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := zerops.VersionSha(tc.in); got != tc.want {
-				t.Fatalf("VersionSha(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestDeployOneArchive(t *testing.T) {
 	t.Parallel()
 	f, client := deployFake(t)
