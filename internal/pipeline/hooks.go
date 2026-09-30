@@ -281,9 +281,10 @@ func MayRelease(state mirror.State, group registry.Group, pusher string) (bool, 
 }
 
 // PullRequest is a pull request opened, closed or merged. A merge into the
-// group repo's `main` is a recipe or a declaration change; a Mate's bot
-// opening one there is a recipe proposal the rights loop merges (D23), so the
-// loop is nudged rather than left to its next tick.
+// group repo's `main` is a recipe or a declaration change, whoever merged it —
+// a person, or a Mate, which writes the group repo (D31). A Mate's bot opening
+// one there may be a recipe proposal the rights loop merges when it only adds
+// files (D23, D30), so the loop is nudged rather than left to its next tick.
 func (p *Pipeline) PullRequest(ctx context.Context, org string, payload []byte) error {
 	var body struct {
 		Action      string `json:"action"`
