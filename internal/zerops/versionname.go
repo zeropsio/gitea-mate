@@ -48,8 +48,10 @@ func VersionSha(name string) string {
 }
 
 // SameCommit reports whether the sha a version's name spells is the full sha
-// of a commit: equal, or a hex prefix of at least [ShortShaLength] characters.
-// A shorter or non-hex token never matches a commit it only begins like.
+// of a commit: equal, or a hex prefix of at least [ShortShaLength] characters
+// of a full 40-hex sha. A shorter or non-hex token — a dirty working tree's
+// "{sha}-dirty" among them — never matches a commit it only begins like, and
+// a short sha on the right is a spelling nothing can check.
 func SameCommit(token, sha string) bool {
 	if token == "" {
 		return false
@@ -57,7 +59,8 @@ func SameCommit(token, sha string) bool {
 	if token == sha {
 		return true
 	}
-	return len(token) >= ShortShaLength && isHex(token) && strings.HasPrefix(sha, token)
+	return len(token) >= ShortShaLength && isHex(token) &&
+		len(sha) == 40 && isHex(sha) && strings.HasPrefix(sha, token)
 }
 
 func isHex(s string) bool {

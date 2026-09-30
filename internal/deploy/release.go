@@ -49,9 +49,11 @@ type Release struct {
 	Services map[string]string
 }
 
-// fullSha is what a release line must carry. A short sha would deploy
-// correctly once and then never compare equal to the app version's name, so
-// the catch-up pass would redeploy it for ever.
+// fullSha is what a release line must carry. The version name spells a
+// deployed commit short, and [zerops.SameCommit] matches that only against a
+// full sha: a short release line would deploy correctly once and then never
+// compare as the commit running, so the catch-up pass would redeploy it for
+// ever.
 var fullSha = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // serviceName is a Zerops hostname: lower-case letters and digits, starting

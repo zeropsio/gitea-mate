@@ -51,6 +51,8 @@ func TestVersionSha(t *testing.T) {
 		{"a name that starts with a space has none either", " v1", ""},
 		{"a name with a doubled space is not ours", "main  7e2d4c1", ""},
 		{"a name with a trailing space is not ours", "main 7e2d4c1 ", ""},
+		{"zcp's push of a clean tree reads like a stage's", "main 7e2d4c1", "7e2d4c1"},
+		{"zcp's push of a dirty tree is not a commit", "main 7e2d4c1-dirty", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := zerops.VersionSha(tc.in); got != tc.want {
@@ -74,7 +76,9 @@ func TestSameCommit(t *testing.T) {
 		{"another commit's prefix is not", "3f9c1b2", fullSha, false},
 		{"another full sha is not", otherSha, fullSha, false},
 		{"a prefix shorter than seven never matches", "7e2d4c", fullSha, false},
-		{"a prefix that is not hex never matches", "7e2d4c1-dirty", fullSha, false},
+		{"a dirty tree's short token is not the commit", "7e2d4c1-dirty", fullSha, false},
+		{"a dirty tree's whole token is not the commit", fullSha + "-dirty", fullSha, false},
+		{"a short commit is a spelling nothing can check", "7e2d4c1", "7e2d4c1a9", false},
 		{"nothing deployed is no commit", "", fullSha, false},
 		{"a short sha the fakes use still equals itself", "3f9c", "3f9c", true},
 		{"a token longer than the sha is not its prefix", fullSha + "0", fullSha, false},
