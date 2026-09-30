@@ -16,6 +16,9 @@ import (
 	"github.com/zeropsio/gitea-mate/internal/zerops/zeropstest"
 )
 
+// fullSha is the commit a world deploys, as Gitea names it.
+const fullSha = "3f9c1b2e5d7a4c6f8e0b1d2a3c4f5e6d7a8b9c0d"
+
 // world is one group with a stage and a production project, one service `api`
 // whose repository carries the workflow zcp writes, and a commit to deploy.
 type world struct {
@@ -31,7 +34,7 @@ func newWorld(t *testing.T) *world {
 	g := giteatest.New(t)
 	g.AddRepo("acme/api", "main")
 	g.AddFile("acme/api", "main", ".gitea/workflows/zerops.yml", "on: [push, workflow_dispatch]\n")
-	g.SetBranch("acme/api", "main", "3f9c")
+	g.SetBranch("acme/api", "main", fullSha)
 
 	z := zeropstest.New(t, "org-1")
 	z.AddIdentity("broker", zeropstest.Identity{UserInfoID: "tok-broker", TokenID: "tok-broker", ClientID: "org-1"})
@@ -52,7 +55,7 @@ func stageJob() deploy.Job {
 		Environment: environments.Environment{
 			Name: "stage", Tier: environments.TierStage, Project: "prj-stage", Sources: []string{"main"},
 		},
-		Targets: []deploy.Target{{Service: "api", Owner: "acme", Repo: "api", Sha: "3f9c", VersionName: "3f9c", Setup: "api"}},
+		Targets: []deploy.Target{{Service: "api", Owner: "acme", Repo: "api", Sha: fullSha, VersionName: "main 3f9c1b2", Setup: "api"}},
 	}
 }
 
@@ -63,8 +66,8 @@ func productionJob() deploy.Job {
 			Name: "production", Tier: environments.TierProduction, Project: "prj-prod", Release: true,
 		},
 		Targets: []deploy.Target{{
-			Service: "api", Owner: "acme", Repo: "api", Sha: "3f9c",
-			VersionName: "3f9c v1.0.0 u-abc", Setup: "api-prod",
+			Service: "api", Owner: "acme", Repo: "api", Sha: fullSha,
+			VersionName: "v1.0.0 3f9c1b2", Setup: "api-prod",
 			Gate: &deploy.Gate{Environment: "stage", Project: "prj-stage"},
 		}},
 	}
@@ -81,7 +84,7 @@ func statusOf(t *testing.T, g *giteatest.Fake, sha, context string) gitea.Commit
 	return last
 }
 
-const stageDispatch = "acme/api zerops.yml@main environment=stage service=api sha=3f9c"
+const stageDispatch = "acme/api zerops.yml@main environment=stage service=api sha=" + fullSha
 
 // TestAnEnvironmentBehindGetsAJob — D27: the broker deploys nothing itself. An
 // environment behind its source gets the repository's own workflow started, on
@@ -94,7 +97,7 @@ func TestAnEnvironmentBehindGetsAJob(t *testing.T) {
 	if !slices.Equal(w.gitea.Dispatches, []string{stageDispatch}) {
 		t.Fatalf("dispatched %v, want [%s]", w.gitea.Dispatches, stageDispatch)
 	}
-	status := statusOf(t, w.gitea, "3f9c", "mate/deploy/stage/api")
+	status := statusOf(t, w.gitea, fullSha, "mate/deploy/stage/api")
 	if status.State != "pending" || status.Description != deploy.DescriptionDispatched {
 		t.Fatalf("the commit's status is %+v, want pending %q", status, deploy.DescriptionDispatched)
 	}
@@ -104,7 +107,6 @@ func TestAnEnvironmentBehindGetsAJob(t *testing.T) {
 }
 
 // fullSha is a commit as Gitea names it, for the names that spell it short.
-const fullSha = "3f9c1b2e5d7a4c6f8e0b1d2a3c4f5e6d7a8b9c0d"
 
 // liveNames are every name a service can carry for the commit fullSha: the
 // ones the broker wrote before and the ones it writes now.
@@ -113,7 +115,6 @@ var liveNames = []struct{ name, sha, deployed string }{
 	{"sha, tag and tagger, the old production name", fullSha, fullSha + " v1.0.0 u-abc"},
 	{"branch and short sha, the stage name", fullSha, "main 3f9c1b2"},
 	{"tag and short sha, the production name", fullSha, "v1.0.0 3f9c1b2"},
-	{"a fake's short sha", "3f9c", "3f9c"},
 }
 
 func atSha(job deploy.Job, sha string) deploy.Job {
@@ -160,10 +161,10 @@ func TestALiveCommitClosesAStatusAJobLeftPending(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
 	w.dispatcher.Run(context.Background(), stageJob())
-	w.zerops.AddAppVersion(zerops.AppVersion{ServiceStackID: "svc-stage-api", Status: zerops.AppVersionActive}, "3f9c")
+	w.zerops.AddAppVersion(zerops.AppVersion{ServiceStackID: "svc-stage-api", Status: zerops.AppVersionActive}, fullSha)
 	w.dispatcher.Run(context.Background(), stageJob())
 
-	status := statusOf(t, w.gitea, "3f9c", "mate/deploy/stage/api")
+	status := statusOf(t, w.gitea, fullSha, "mate/deploy/stage/api")
 	if status.State != "success" {
 		t.Fatalf("the commit's status is %+v, want success", status)
 	}
@@ -204,7 +205,7 @@ func TestAWorkflowThatCannotBeStartedSaysWhatToDo(t *testing.T) {
 	w.dispatcher.Run(context.Background(), job)
 
 	var last gitea.CommitStatus
-	for _, s := range w.gitea.Statuses("acme/old", "3f9c") {
+	for _, s := range w.gitea.Statuses("acme/old", fullSha) {
 		last = s
 	}
 	if last.State != "failure" || !strings.Contains(last.Description, "merge the Mate's pull request") {
@@ -244,7 +245,7 @@ func TestAServiceTheProjectDoesNotHaveIsReported(t *testing.T) {
 	job := stageJob()
 	job.Targets[0].Service = "worker"
 	w.dispatcher.Run(context.Background(), job)
-	status := statusOf(t, w.gitea, "3f9c", "mate/deploy/stage/worker")
+	status := statusOf(t, w.gitea, fullSha, "mate/deploy/stage/worker")
 	if status.State != "failure" || !strings.Contains(status.Description, "has no service worker") {
 		t.Fatalf("the status is %+v", status)
 	}
@@ -269,7 +270,7 @@ func TestAJobsOwnFailureReportIsFinalAcrossPasses(t *testing.T) {
 	if len(w.gitea.Dispatches) != 1 {
 		t.Fatalf("a failed deploy was dispatched again: %v", w.gitea.Dispatches)
 	}
-	if status := statusOf(t, w.gitea, "3f9c", "mate/deploy/stage/api"); status.State != "failure" {
+	if status := statusOf(t, w.gitea, fullSha, "mate/deploy/stage/api"); status.State != "failure" {
 		t.Fatalf("the commit's status is %+v, want the failure left alone", status)
 	}
 }
@@ -287,7 +288,7 @@ func TestATransientRepoReadFailureAfterAStaleDeployingPendingIsDispatchedAgain(t
 
 	w.gitea.Fail["GET /repos/acme/api"] = http.StatusBadGateway
 	w.dispatcher.Run(ctx, stageJob())
-	if status := statusOf(t, w.gitea, "3f9c", "mate/deploy/stage/api"); status.State != "failure" {
+	if status := statusOf(t, w.gitea, fullSha, "mate/deploy/stage/api"); status.State != "failure" {
 		t.Fatalf("the commit's status is %+v, want the refusal written", status)
 	}
 	delete(w.gitea.Fail, "GET /repos/acme/api")
@@ -312,7 +313,7 @@ func TestARefusalNamingAnOwnerThatStartsWithFailedIsDispatchedAgain(t *testing.T
 
 	w.dispatcher.Run(ctx, job)
 	var last gitea.CommitStatus
-	for _, s := range w.gitea.Statuses("failed-x/api", "3f9c") {
+	for _, s := range w.gitea.Statuses("failed-x/api", fullSha) {
 		last = s
 	}
 	if last.State != "failure" || !strings.HasPrefix(last.Description, "failed-x/api") {

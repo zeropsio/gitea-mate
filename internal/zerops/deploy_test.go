@@ -30,7 +30,7 @@ func TestDeployOneArchive(t *testing.T) {
 	f, client := deployFake(t)
 	ctx := context.Background()
 
-	version, err := client.CreateAppVersion(ctx, "svc-api", "3f9c1b2e")
+	version, err := client.CreateAppVersion(ctx, "svc-api", "main 3f9c1b2")
 	if err != nil {
 		t.Fatalf("CreateAppVersion: %v", err)
 	}
@@ -62,11 +62,11 @@ func TestDeployOneArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Service: %v", err)
 	}
-	if detail.DeployedName() != "3f9c1b2e" {
+	if detail.DeployedName() != "main 3f9c1b2" {
 		t.Fatalf("appVersionName = %q, want the name the deploy sent", detail.DeployedName())
 	}
-	if detail.DeployedSha() != "3f9c1b2e" {
-		t.Fatalf("the live sha is %q, want 3f9c1b2e", detail.DeployedSha())
+	if detail.DeployedSha() != "3f9c1b2" {
+		t.Fatalf("the live sha is %q, want 3f9c1b2", detail.DeployedSha())
 	}
 	if detail.ActiveAppVersion == nil || detail.ActiveAppVersion.ID != version.ID {
 		t.Fatalf("activeAppVersion = %+v, want the version just deployed", detail.ActiveAppVersion)
@@ -162,7 +162,7 @@ func TestPromoteReadsAppCodeAndUploadsItElsewhere(t *testing.T) {
 		t.Fatalf("the promoted bytes are %q, want %q", bytesBack, archive)
 	}
 
-	prod, err := client.CreateAppVersion(ctx, "svc-api-prod", "3f9c v1.0.0 u-abc")
+	prod, err := client.CreateAppVersion(ctx, "svc-api-prod", "v1.0.0 3f9c1b2")
 	if err != nil {
 		t.Fatalf("CreateAppVersion: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestPromoteReadsAppCodeAndUploadsItElsewhere(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Service: %v", err)
 	}
-	if live.DeployedSha() != "3f9c" || live.DeployedName() != "3f9c v1.0.0 u-abc" {
+	if live.DeployedSha() != "3f9c1b2" || live.DeployedName() != "v1.0.0 3f9c1b2" {
 		t.Fatalf("production's version is %q", live.DeployedName())
 	}
 }
@@ -310,8 +310,8 @@ func TestAppVersionNameIsNotTheRunningVersionWhileTheIDsDiffer(t *testing.T) {
 	t.Parallel()
 	f, client := deployFake(t)
 	ctx := context.Background()
-	f.AddAppVersion(zerops.AppVersion{ID: "ver-old", ServiceStackID: "svc-api", Status: zerops.AppVersionActive}, "1111")
-	started := f.StartBuild("svc-api", "2222")
+	f.AddAppVersion(zerops.AppVersion{ID: "ver-old", ServiceStackID: "svc-api", Status: zerops.AppVersionActive}, "main 1111111")
+	started := f.StartBuild("svc-api", "main 2222222")
 
 	detail, err := client.Service(ctx, "svc-api")
 	if err != nil {
@@ -327,8 +327,8 @@ func TestAppVersionNameIsNotTheRunningVersionWhileTheIDsDiffer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Service: %v", err)
 	}
-	if detail.DeployedSha() != "2222" || detail.Deploying() {
-		t.Fatalf("once active the service reports %q (deploying %v), want 2222", detail.DeployedSha(), detail.Deploying())
+	if detail.DeployedSha() != "2222222" || detail.Deploying() {
+		t.Fatalf("once active the service reports %q (deploying %v), want 2222222", detail.DeployedSha(), detail.Deploying())
 	}
 }
 

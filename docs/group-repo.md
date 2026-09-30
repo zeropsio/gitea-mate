@@ -110,19 +110,20 @@ or no switch.
 A job deploys, with `zcli push` (D27); the broker tells it what to call the version. Every Zerops
 app version is named by what a person reads it by and the short sha of the commit it was built from:
 a stage's by `{branch} {short sha}` ("main 7e2d4c1"), production's by `{tag} {short sha}` ("v0.1.0
-7e2d4c1"); the short sha is its first seven hex characters, and who tagged a release is the
+7e2d4c1"); the short sha is exactly its first seven hex characters, and who tagged a release is the
 release's to say, not the name's. Branches and tags hold no space, so a name is always two tokens.
 Names written before 2026-09-30 still stand on services and read the same: a bare full sha (stage)
-or `{sha} {tag} {tagger login}` (production) — one token or three and more, the sha first. zcp names
-its own pushes the same way, `{branch} {short sha}`, and a push of a working tree with uncommitted
-changes `{branch} {short sha}-dirty`, which was built from no commit. Any other name was typed by
-hand and names no commit. The catch-up pass compares each environment's desired head with the sha in
-the deployed version's name — the same commit when equal, or when the name's sha is a hex prefix of
-at least seven characters — and starts a job for the difference. Production is built from the
-release's commits — nothing is promoted from a stage. Deploy outcomes are commit statuses on the
-service repository's commit: context `mate/deploy/{environment}/{service}`, state `pending`
-(`dispatched`, then `deploying · job {id}` once a job holds the key) / `success` (`live`) /
-`failure` (the job's or the broker's reason).
+or `{sha} {tag} {tagger}` (production) — one token or three and more, the sha first, whatever the
+tagger's display name holds. A whole sha is 40 hex, or 64 in a SHA-256 repository. zcp names its own
+pushes the same way, `{branch} {short sha}`, and a push of a working tree with uncommitted changes
+`{branch} {short sha}-dirty`, which was built from no commit. Any other name — `release 20260930`
+among them — was typed by hand and names no commit. The catch-up pass compares each environment's
+desired head with the sha in the deployed version's name — the same commit when equal, or when the
+name's sha is a hex prefix of at least seven characters — and starts a job for the difference.
+Production is built from the release's commits — nothing is promoted from a stage. Deploy outcomes
+are commit statuses on the service repository's commit: context
+`mate/deploy/{environment}/{service}`, state `pending` (`dispatched`, then `deploying · job {id}`
+once a job holds the key) / `success` (`live`) / `failure` (the job's or the broker's reason).
 
 ## Recipe deltas
 

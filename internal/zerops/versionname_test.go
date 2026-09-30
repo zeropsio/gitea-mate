@@ -1,10 +1,14 @@
 package zerops_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
+
+// sha256 is a whole sha of a SHA-256 repository, which Gitea 1.27 can make.
+var sha256 = strings.Repeat("7e2d4c1a", 8)
 
 const (
 	fullSha  = "7e2d4c1a9b3f5e6d8c0a1b2c3d4e5f6a7b8c9d0e"
@@ -53,6 +57,17 @@ func TestVersionSha(t *testing.T) {
 		{"a name with a trailing space is not ours", "main 7e2d4c1 ", ""},
 		{"zcp's push of a clean tree reads like a stage's", "main 7e2d4c1", "7e2d4c1"},
 		{"zcp's push of a dirty tree is not a commit", "main 7e2d4c1-dirty", ""},
+		{"a hand-made name ending in a date is not ours", "release 20260930", ""},
+		{"a hand-made name ending in a timestamp is not ours", "deploy 1727712000", ""},
+		{"a new name's sha is exactly seven hex", "main 7e2d4c1a", ""},
+		{"a single word that is not a whole sha is not ours", "hotfix", ""},
+		{"a single short sha is not ours", "7e2d4c1", ""},
+		{"three words a person typed are not ours", "deploy 7e2d4c1 again", ""},
+		{"an old production name whose tagger was empty", fullSha + " v1.2.0 ", fullSha},
+		{"an old production name whose tagger has a doubled space", fullSha + " v1.2.0  Gitea Admin", fullSha},
+		{"an old production name with no tagger at all", fullSha + " v1.2.0", fullSha},
+		{"an old stage version of a SHA-256 repository", sha256, sha256},
+		{"an old production version of a SHA-256 repository", sha256 + " v1.2.0 u-abc", sha256},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := zerops.VersionSha(tc.in); got != tc.want {
@@ -79,6 +94,9 @@ func TestSameCommit(t *testing.T) {
 		{"a dirty tree's short token is not the commit", "7e2d4c1-dirty", fullSha, false},
 		{"a dirty tree's whole token is not the commit", fullSha + "-dirty", fullSha, false},
 		{"a short commit is a spelling nothing can check", "7e2d4c1", "7e2d4c1a9", false},
+		{"the seven-hex prefix of a SHA-256 commit", "7e2d4c1", sha256, true},
+		{"a SHA-256 commit itself", sha256, sha256, true},
+		{"a prefix of neither length is no commit", "7e2d4c1", sha256[:50], false},
 		{"nothing deployed is no commit", "", fullSha, false},
 		{"a short sha the fakes use still equals itself", "3f9c", "3f9c", true},
 		{"a token longer than the sha is not its prefix", fullSha + "0", fullSha, false},
