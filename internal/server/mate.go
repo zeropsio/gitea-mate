@@ -40,10 +40,13 @@ func (s *Server) handleRepository(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_request", "a service repository is named ^[a-z][a-z0-9-]{0,39}$")
 		return
 	}
-	// The group repository is no Mate's to write, made yet or not: a Mate's
-	// recipe reaches it as a pull request from its bot's fork (D23).
+	// The group repository is no service repository, made yet or not. Made
+	// here it would stand, with a service repository's rule, where the rights
+	// loop makes the recipe's; joined here it would be wired as a pair's code.
+	// A registered Mate writes it already, as a collaborator the rights loop
+	// makes (D31), and lands a change on its main through a pull request.
 	if body.Name == registry.GroupRepo {
-		WriteError(w, http.StatusConflict, "taken", "the group repository takes a Mate's changes only as a pull request from its fork")
+		WriteError(w, http.StatusConflict, "taken", "group is the group's recipe repository, not a service repository: a registered Mate writes it already, and lands a change on its main through a pull request")
 		return
 	}
 

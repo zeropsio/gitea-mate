@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -252,6 +253,131 @@ func TestLab(t *testing.T) {
 		}
 		t.Logf("registration token: %d characters, never logged in full", len(tok))
 	})
+
+	// 6. D31: a registered Mate's bot writes the group repo as the rights loop
+	//    leaves it — in the read team and a collaborator with write, under the
+	//    group repo's rules: main takes no direct push and merges from anyone
+	//    with write, env/* is the site admin's, v* the release team's. The bot
+	//    pushes a branch, opens a pull request and merges it, and is refused
+	//    main, an env/* branch and a v* tag.
+	t.Run("a bot writing the group repo merges a pull request and pushes nothing protected", func(t *testing.T) {
+		if botToken == "" {
+			t.Skip("no bot token (the basic-auth variables are unset)")
+		}
+		const group = "group"
+		t.Cleanup(func() { labDelete(t, "/repos/"+org+"/"+group) })
+		if _, err := c.CreateOrgRepo(ctx, org, gitea.NewRepo{Name: group, Description: "probe"}); err != nil {
+			t.Fatalf("CreateOrgRepo(%s): %v", group, err)
+		}
+		for _, rule := range []gitea.BranchProtection{
+			{RuleName: "main", EnablePush: false},
+			{
+				RuleName: "env/*", EnablePush: true, EnablePushWhitelist: true,
+				PushWhitelistUsers: []string{os.Getenv("GITEA_LAB_ADMIN_USER")},
+			},
+		} {
+			if _, err := c.CreateBranchProtection(ctx, org, group, rule); err != nil {
+				t.Fatalf("CreateBranchProtection(%s): %v", rule.RuleName, err)
+			}
+		}
+		if _, err := c.CreateTagProtection(ctx, org, group, gitea.TagProtection{
+			NamePattern: "v*", WhitelistTeams: []string{"release"},
+		}); err != nil {
+			t.Fatalf("CreateTagProtection: %v", err)
+		}
+		teams, err := c.ListTeams(ctx, org)
+		if err != nil {
+			t.Fatalf("ListTeams: %v", err)
+		}
+		for _, team := range teams {
+			if team.Name == "read" {
+				if err := c.AddTeamMember(ctx, team.ID, bot); err != nil {
+					t.Fatalf("AddTeamMember(read): %v", err)
+				}
+			}
+		}
+		if err := c.AddCollaborator(ctx, org, group, bot, "write"); err != nil {
+			t.Fatalf("AddCollaborator(%s): %v", group, err)
+		}
+
+		root := "/repos/" + org + "/" + group
+		content := func(line string) string { return base64.StdEncoding.EncodeToString([]byte(line + "\n")) }
+		branch := "mate/" + bot
+		if status, body := labAs(t, botToken, http.MethodPost, root+"/contents/probe.txt", map[string]any{
+			"content": content("probe"), "message": "probe", "branch": "main", "new_branch": branch,
+		}); status != http.StatusCreated {
+			t.Fatalf("the bot could not push a branch to the group repo: %d %s", status, body)
+		}
+		status, body := labAs(t, botToken, http.MethodPost, root+"/pulls", map[string]any{
+			"head": branch, "base": "main", "title": "probe",
+		})
+		if status != http.StatusCreated {
+			t.Fatalf("the bot could not open a pull request on the group repo: %d %s", status, body)
+		}
+		var pull struct {
+			Number int64 `json:"number"`
+		}
+		if err := json.Unmarshal([]byte(body), &pull); err != nil || pull.Number == 0 {
+			t.Fatalf("the pull request answer %q: %v", body, err)
+		}
+		// Gitea checks a new request's mergeability in the background and
+		// answers 405 "Please try again later" until it has; a refused merge
+		// is a 405 in other words, and ends the test.
+		for attempt := 1; ; attempt++ {
+			err := c.AsToken(botToken).MergePullRequest(ctx, org, group, pull.Number, "")
+			if err == nil {
+				break
+			}
+			var apiErr *gitea.APIError
+			if attempt < 20 && errors.As(err, &apiErr) && apiErr.Status == http.StatusMethodNotAllowed &&
+				strings.Contains(apiErr.Message, "try again later") {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			t.Fatalf("the bot could not merge its pull request into the group repo's main: %v", err)
+		}
+
+		for _, refused := range []struct {
+			what, path string
+			in         map[string]any
+		}{
+			{"a commit straight onto main", root + "/contents/main.txt",
+				map[string]any{"content": content("main"), "message": "probe", "branch": "main"}},
+			{"an env/* branch", root + "/branches",
+				map[string]any{"new_branch_name": "env/probe", "old_ref_name": "main"}},
+			{"a v* tag", root + "/tags",
+				map[string]any{"tag_name": "v0.0.1-probe", "target": "main", "message": "probe"}},
+		} {
+			if status, body := labAs(t, botToken, http.MethodPost, refused.path, refused.in); status < 400 {
+				t.Errorf("the bot was allowed %s on the group repo: %d %s", refused.what, status, body)
+			} else {
+				t.Logf("%s refused, as it must be: %d", refused.what, status)
+			}
+		}
+	})
+}
+
+// labAs issues one call to the lab Gitea's API with a token of the test's own
+// — a bot's — and returns the status and the body.
+func labAs(t *testing.T, token, method, path string, body any) (int, string) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("encoding %s: %v", path, err)
+	}
+	req, err := http.NewRequest(method, strings.TrimSuffix(os.Getenv("GITEA_LAB_URL"), "/")+"/api/v1"+path, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	req.Header.Set("Authorization", "token "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, string(out)
 }
 
 // labDelete issues one DELETE as the lab admin token. Failures are logged, not

@@ -149,9 +149,12 @@ func TestPassBuildsAndThenChangesNothing(t *testing.T) {
 	if len(r.gitea.BranchRules("acme", "group")) != 2 || len(r.gitea.TagRules("acme", "group")) != 1 {
 		t.Errorf("rules = %+v %+v", r.gitea.BranchRules("acme", "group"), r.gitea.TagRules("acme", "group"))
 	}
-	// The bot is a reader of its group.
+	// The bot is a reader of its group, and writes its group repo (D31).
 	if got := r.gitea.TeamMembers("acme", "read"); !contains(got, "mate-p-fen") {
 		t.Errorf("read team = %v", got)
+	}
+	if got := r.gitea.Collaborators("acme", "group"); got["mate-p-fen"] != "write" {
+		t.Errorf("group repo collaborators = %v, want the bot with write", got)
 	}
 	if bot, ok := r.gitea.User("mate-p-fen"); !ok || !bot.Restricted {
 		t.Errorf("bot = %+v, %v", bot, ok)
@@ -762,6 +765,74 @@ func TestAnEmptyRecipePullRequestIsClosedNotRetried(t *testing.T) {
 	}
 }
 
+// A Mate served before D31 — its bot a reader of the group, its token in its
+// container — writes the group repo from the next pass, with no new
+// generation and nothing written to its container; the pass after plans
+// nothing.
+func TestAMateServedBeforeD31WritesItsGroupRepoOnTheNextPass(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	if _, err := r.mirror.Pass(ctx); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	// What a broker before D31 left: the bot collaborates nowhere on acme/group.
+	if err := r.gitea.Client().RemoveCollaborator(ctx, "acme", "group", "mate-p-fen"); err != nil {
+		t.Fatalf("taking the write away: %v", err)
+	}
+	tokens := strings.Join(r.gitea.Tokens("mate-p-fen"), ",")
+	r.zerops.Requests = nil
+
+	second, err := r.mirror.Pass(ctx)
+	if err != nil || len(second.Failures) != 0 {
+		t.Fatalf("second pass: %v %v", err, second.Failures)
+	}
+	if got := r.gitea.Collaborators("acme", "group"); got["mate-p-fen"] != "write" {
+		t.Errorf("group repo collaborators = %v, want the bot with write", got)
+	}
+	if got := strings.Join(r.gitea.Tokens("mate-p-fen"), ","); got != tokens {
+		t.Errorf("tokens = %s, want %s: a write on the group repo needs no new generation", got, tokens)
+	}
+	if r.zerops.Wrote() {
+		t.Errorf("the pass wrote to Zerops: %v", r.zerops.Requests)
+	}
+	if second.Destructive != 0 {
+		t.Errorf("destructive = %d, want none", second.Destructive)
+	}
+	third, err := r.mirror.Pass(ctx)
+	if err != nil {
+		t.Fatalf("third pass: %v", err)
+	}
+	if third.Planned != 0 {
+		t.Errorf("the third pass plans:\n%s", mirror.Describe(third.Plan))
+	}
+}
+
+// A Mate whose entry leaves the group's registry while its project lives on
+// loses what the group gave its bot: its read team and its write on the group
+// repo, each counted against the group's cap.
+func TestABotWhoseMateLeftTheGroupLosesItsWriteOnTheGroupRepo(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	if _, err := r.mirror.Pass(ctx); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	r.registry("mate:tool:gitea", "mate:gn:g-acme:acme", "mate:gm:g-acme:p-prod:production")
+
+	second, err := r.mirror.Pass(ctx)
+	if err != nil || len(second.Failures) != 0 {
+		t.Fatalf("second pass: %v %v", err, second.Failures)
+	}
+	if got := r.gitea.Collaborators("acme", "group"); got["mate-p-fen"] != "" {
+		t.Errorf("group repo collaborators = %v: the bot of a Mate that left the group still writes it", got)
+	}
+	if got := r.gitea.TeamMembers("acme", "read"); contains(got, "mate-p-fen") {
+		t.Errorf("read team = %v: the bot of a Mate that left the group still reads it", got)
+	}
+	if second.Destructive != 2 {
+		t.Errorf("destructive = %d, want 2: the read team and the group repo", second.Destructive)
+	}
+}
+
 // A rule that exists is edited into shape, never created again: Gitea answers
 // a duplicate with 403, and the owner's org kept main's release-only merge
 // whitelist through every pass until this was measured (2026-09-17). Here a
@@ -971,6 +1042,11 @@ func TestAProjectMissingFromSearchAndNotFoundTwiceIsExcludedAndItsBotRetired(t *
 	}
 	if bot, _ := r.gitea.User("mate-p-fen"); !bot.ProhibitLogin {
 		t.Errorf("the dead Mate's bot may still sign in: %+v", bot)
+	}
+	// Retired, not moved: the bot keeps its collaboration on the group repo as
+	// it keeps its read team, and no pass counts taking it away.
+	if got := r.gitea.Collaborators("acme", "group"); got["mate-p-fen"] != "write" {
+		t.Errorf("group repo collaborators = %v, want the retired bot kept", got)
 	}
 	third := r.passAt(t, now.Add(2*mirror.DefaultInterval))
 	if third.Planned != 0 {
