@@ -40,7 +40,10 @@ Nobody asks for it. The registry says which projects are Mates (`mate:gm:{group}
 written by the org's owner), and the loop makes every registered Mate's access true on each pass,
 the way it makes teams and bots true:
 
-1. **The bot** — `mate-{projectId}`, restricted, in its group's `read` team (as today).
+1. **The bot** — `mate-{projectId}`, restricted, in its group's `read` team, and a collaborator with
+   write on the group repo `{slug}/group` (D31): there it pushes a branch and merges a pull request
+   into `main`, as a person with write does, and pushes neither `main`, `env/*` nor a `v*` tag. A bot
+   whose Mate leaves the group's registry loses both; a deleted Mate's bot is retired and keeps them.
 2. **A live token** — when the bot has no token named `mate/{bot}/{n}`, or the token the Mate's
    container holds is not the bot's newest generation (compared through Gitea's `token_last_eight`
    against the value the platform returns in clear), or the newest generation lacks a scope a bot's
@@ -201,8 +204,8 @@ Caller: Gitea. `X-Gitea-Signature` is the hex HMAC-SHA256 of the raw body with
 | `push` to a source branch of an environment | deploys the environment (per 5.3) |
 | `push` to `env/*` | nothing — the broker wrote it |
 | `create` of a tag `v*` on the group repo | re-checks the pusher's production rights in Zerops, writes `mate/release/{tag}` `success` (approved) or `failure` (refused) on the tagged commit, deploys an approved tag's commits |
-| `pull_request` merged on the group repo | imports the recipe delta into each environment built from it, re-reads environments |
-| `pull_request` opened on the group repo by a Mate's bot | nudges the rights loop, whose next pass merges it when it only adds files — a Mate's first recipe lands by itself (D23); one that changes a file `main` carries waits for a person |
+| `pull_request` merged on the group repo | imports the recipe delta into each environment built from it, re-reads environments — whoever merged it, a person or a Mate (D31) |
+| `pull_request` opened on the group repo by a Mate's bot | nudges the rights loop, whose next pass merges it when it only adds files — a Mate's first recipe lands by itself (D23); one that changes a file `main` carries waits for a person with write, who merges it or asks a Mate to (D31) |
 | `workflow_job` `queued` | starts the group's runner service if it is stopped |
 | `workflow_job` `completed` | notes the time; a quiet spell (default 15 min) stops the runner |
 | anything else | `204`, ignored |

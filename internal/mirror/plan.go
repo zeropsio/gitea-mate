@@ -57,7 +57,15 @@ const DefaultAppTokenTTL = 12 * time.Hour
 const DefaultTokenGrace = 10 * time.Minute
 
 // BotLogin is a Mate's bot user: mate-{projectId} (docs/vocabulary.md).
-func BotLogin(projectID string) string { return "mate-" + projectID }
+func BotLogin(projectID string) string { return botLoginPrefix + projectID }
+
+// botLoginPrefix starts every bot's login and no person's: a person's is u-…
+// (docs/vocabulary.md).
+const botLoginPrefix = "mate-"
+
+// groupWriterPermission is what a registered Mate's bot holds on its group's
+// repository as a collaborator (D31): what a person in the write team holds.
+const groupWriterPermission = "write"
 
 // TokenName is a bot token's name: mate/{bot}/{generation}. The generation
 // lives in the name; the broker keeps no store.
@@ -149,6 +157,9 @@ type GiteaState struct {
 	// changes, read for every request a registered Mate's bot opened against
 	// main. A request missing here could not be read.
 	GroupPullRequestFiles map[string]map[int64][]gitea.PullRequestFile
+	// GroupCollaborators is org -> who collaborates on its group repo, read
+	// once the repo exists.
+	GroupCollaborators map[string]map[string]bool
 }
 
 // TeamState is one team and who is in it.
@@ -181,6 +192,8 @@ const (
 	ShapeBot           Kind = "shape_bot"
 	AddTeamMember      Kind = "add_team_member"
 	RemoveTeamMember   Kind = "remove_team_member"
+	AddCollaborator    Kind = "add_collaborator"
+	RemoveCollaborator Kind = "remove_collaborator"
 	PromoteSiteAdmin   Kind = "promote_site_admin"
 	DemoteSiteAdmin    Kind = "demote_site_admin"
 	DeactivatePerson   Kind = "deactivate_person"
@@ -237,7 +250,7 @@ type Action struct {
 // pile longer than the cap would hold the group on every pass.
 func (a Action) Destructive() bool {
 	switch a.Kind {
-	case RemoveTeamMember, DemoteSiteAdmin, DeactivatePerson, DeletePersonTokens, DeleteBotTokens:
+	case RemoveTeamMember, RemoveCollaborator, DemoteSiteAdmin, DeactivatePerson, DeletePersonTokens, DeleteBotTokens:
 		return true
 	}
 	return false
@@ -351,12 +364,13 @@ func (p *planner) plan() {
 
 	// The order is what Gitea will accept: structure, then the bots, then the
 	// people and the bots into their teams (a team member who does not exist
-	// yet is a 404), then departures, then each Mate's access, then token
-	// generations.
+	// yet is a 404) and the bots onto their group repository, then
+	// departures, then each Mate's access, then token generations.
 	p.planStructure()
 	p.planRecipePullRequests()
 	p.planBots()
 	p.planPeople()
+	p.planGroupWriters()
 	p.planDepartures()
 	p.planMateAccess()
 	p.planBotTokens()
@@ -412,10 +426,11 @@ func (p *planner) planStructure() {
 
 // groupRepoRules is what protects a group repository: main takes no direct
 // push from anyone and merges from anyone with write — the write and release
-// teams, and the broker landing a Mate's proposal (D23; until 2026-09-17 the
-// release team alone, which left every Mate's recipe waiting for a releaser);
-// env/* is the broker's alone, named by rule so it holds before the branch
-// exists. What sets the releasers apart is the v* tag protection.
+// teams, every registered Mate's bot (D31, planGroupWriters), and the broker
+// landing a Mate's proposal (D23; until 2026-09-17 the release team alone,
+// which left every Mate's recipe waiting for a releaser); env/* is the
+// broker's alone, named by rule so it holds before the branch exists. What
+// sets the releasers apart is the v* tag protection.
 func (p *planner) groupRepoRules() []gitea.BranchProtection {
 	return []gitea.BranchProtection{
 		{
@@ -443,8 +458,10 @@ const groupMainBranch = "main"
 // or renames a file main carries rewrites the import a stage or a production
 // is made and deployed from, and waits for a person with write: on 2026-09-26
 // a second Mate's re-proposal, merged here, replaced the hand-written tiers,
-// and the next release built production with the dev setup. A person's pull
-// request is theirs to merge; a bot of another group is nobody here.
+// and the next release built production with the dev setup. The broker merges
+// nothing else by itself: such a change and a person's pull request are merged
+// by a person with write, or by a Mate its person asks (D31). A bot of another
+// group is nobody here.
 func (p *planner) planRecipePullRequests() {
 	for _, g := range p.state.Registry.Groups {
 		bots := map[string]bool{}
@@ -554,7 +571,9 @@ func (p *planner) planPeople() {
 	}
 
 	// Bots belong to the read team of their group and stay there whatever the
-	// people plan says.
+	// people plan says. What they write is their collaborations': the service
+	// repositories they ask for (D24) and the group repository
+	// (planGroupWriters).
 	for _, g := range p.state.Registry.Groups {
 		for _, prj := range g.Projects {
 			if prj.Kind == roles.KindMate {
@@ -563,13 +582,7 @@ func (p *planner) planPeople() {
 		}
 	}
 
-	// A deleted Mate's bot is retired, not moved: taking it out of its team
-	// would be a removal counted against the group for a bot that can no
-	// longer sign in.
-	retired := map[string]bool{}
-	for _, projectID := range p.state.DeadMates {
-		retired[BotLogin(projectID)] = true
-	}
+	retired := p.retiredBots()
 	for _, g := range p.state.Registry.Groups {
 		for _, team := range []string{TeamRead, TeamWrite, TeamRelease} {
 			current := p.state.Gitea.Teams[g.Slug][team].Members
@@ -587,6 +600,54 @@ func (p *planner) planPeople() {
 				}
 				p.do(Action{Kind: RemoveTeamMember, Org: g.Slug, Team: team, Login: login})
 			}
+		}
+	}
+}
+
+// retiredBots are the bots of the Mates whose project is deleted. A deleted
+// Mate's bot is retired, not moved: taking it out of its team or off its
+// group repository would be a removal counted against the group for a bot that
+// can no longer sign in and holds no token.
+func (p *planner) retiredBots() map[string]bool {
+	retired := map[string]bool{}
+	for _, projectID := range p.state.DeadMates {
+		retired[BotLogin(projectID)] = true
+	}
+	return retired
+}
+
+// planGroupWriters: every registered Mate of a group writes its group
+// repository as a person with write does (D31, 2026-09-30) — its bot a
+// collaborator with write on {slug}/group. The first Mate stands the group's
+// recipe up, and every later one may change it. main's rule is untouched: no
+// direct push from anyone, merges from anyone with write, so a Mate still
+// changes the recipe only through a pull request, now one it can merge when
+// its person asks; env/* stays the broker's and v* the releasers'. A Mate
+// registered before the rule writes from its next pass, with nothing minted or
+// written to its container. A bot collaborating there whose Mate is no longer
+// registered in the group loses it, as it loses its read team; a retired bot
+// keeps it (retiredBots). A person's collaboration is left alone: the broker
+// never makes one.
+func (p *planner) planGroupWriters() {
+	retired := p.retiredBots()
+	for _, g := range p.state.Registry.Groups {
+		mates := map[string]bool{}
+		for _, prj := range g.Projects {
+			if prj.Kind == roles.KindMate {
+				mates[BotLogin(prj.ID)] = true
+			}
+		}
+		current := p.state.Gitea.GroupCollaborators[g.Slug]
+		for _, bot := range sortedKeys(mates) {
+			if !current[bot] {
+				p.do(Action{Kind: AddCollaborator, Org: g.Slug, Repo: registry.GroupRepo, Login: bot})
+			}
+		}
+		for _, login := range sortedKeys(current) {
+			if mates[login] || retired[login] || !strings.HasPrefix(login, botLoginPrefix) {
+				continue
+			}
+			p.do(Action{Kind: RemoveCollaborator, Org: g.Slug, Repo: registry.GroupRepo, Login: login})
 		}
 	}
 }

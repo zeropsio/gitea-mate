@@ -369,6 +369,7 @@ func (m *Mirror) gatherGitea(ctx context.Context, reg registry.Registry) (GiteaS
 
 		GroupPullRequests:     map[string][]gitea.PullRequest{},
 		GroupPullRequestFiles: map[string]map[int64][]gitea.PullRequestFile{},
+		GroupCollaborators:    map[string]map[string]bool{},
 	}
 
 	users, err := m.Gitea.ListUsers(ctx)
@@ -458,6 +459,17 @@ func (m *Mirror) gatherGitea(ctx context.Context, reg registry.Registry) (GiteaS
 				repo.TagRules[r.NamePattern] = r
 			}
 			out.Repos[g.Slug][registry.GroupRepo] = repo
+			// Who writes the group repo as a collaborator: every registered
+			// Mate's bot (D31). A list that cannot be read is never read as
+			// nobody, so it ends the pass like every other read here.
+			collaborators, err := m.Gitea.ListCollaborators(ctx, g.Slug, registry.GroupRepo)
+			if err != nil {
+				return out, fmt.Errorf("collaborators of %s/%s: %w", g.Slug, registry.GroupRepo, err)
+			}
+			out.GroupCollaborators[g.Slug] = map[string]bool{}
+			for _, u := range collaborators {
+				out.GroupCollaborators[g.Slug][u.Login] = true
+			}
 			open, err := m.Gitea.ListPullRequests(ctx, g.Slug, registry.GroupRepo, "open")
 			if err != nil {
 				return out, fmt.Errorf("pull requests of %s/%s: %w", g.Slug, registry.GroupRepo, err)
@@ -601,6 +613,10 @@ func (m *Mirror) perform(ctx context.Context, a Action) error {
 			return err
 		}
 		return m.Gitea.RemoveTeamMember(ctx, id, a.Login)
+	case AddCollaborator:
+		return m.Gitea.AddCollaborator(ctx, a.Org, a.Repo, a.Login, groupWriterPermission)
+	case RemoveCollaborator:
+		return m.Gitea.RemoveCollaborator(ctx, a.Org, a.Repo, a.Login)
 	case PromoteSiteAdmin, DemoteSiteAdmin:
 		admin := a.Kind == PromoteSiteAdmin
 		_, err := m.Gitea.EditUser(ctx, a.Login, gitea.UserEdit{Admin: &admin})

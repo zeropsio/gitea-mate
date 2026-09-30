@@ -117,6 +117,7 @@ func TestPlanBuildsAGroupFromNothing(t *testing.T) {
 		{Kind: mirror.CreateBot, Org: "acme", Login: "mate-p-fen"},
 		{Kind: mirror.ShapeBot, Org: "acme", Login: "mate-p-fen"},
 		{Kind: mirror.AddTeamMember, Org: "acme", Team: "read", Login: "mate-p-fen"},
+		{Kind: mirror.AddCollaborator, Org: "acme", Repo: "group", Login: "mate-p-fen"},
 	} {
 		if !has(plan, want) {
 			t.Errorf("the plan lacks %s", want)
@@ -125,7 +126,8 @@ func TestPlanBuildsAGroupFromNothing(t *testing.T) {
 
 	// The order Gitea insists on: the org, then its teams, then the group
 	// repository's rules — a protection naming a team that does not exist is
-	// 422 (measured on 1.27.2).
+	// 422 (measured on 1.27.2) — and a collaborator after the repository and
+	// the account it joins.
 	order := kinds(plan)
 	if at(order, "create_org") > at(order, "create_team") {
 		t.Error("teams are planned before their org")
@@ -135,6 +137,9 @@ func TestPlanBuildsAGroupFromNothing(t *testing.T) {
 	}
 	if at(order, "create_repo") > at(order, "set_branch_rule") {
 		t.Error("the branch rules are planned before the repository")
+	}
+	if at(order, "create_repo") > at(order, "add_collaborator") || at(order, "create_bot") > at(order, "add_collaborator") {
+		t.Error("the bot joins the group repository before the repository or the bot exists")
 	}
 
 	if plan.Destructive() != 0 {
@@ -177,9 +182,10 @@ func TestGroupRepoProtections(t *testing.T) {
 		t.Error("main allows a direct push")
 	}
 	if main.EnableMergeWhitelist || len(main.MergeWhitelistTeams) != 0 || main.BlockAdminMergeOverride {
-		// D23: anyone with write merges — the write and release teams, and the
-		// broker landing a Mate's proposal. Until 2026-09-17 the release team
-		// alone could, and every Mate's recipe waited for a releaser.
+		// D23: anyone with write merges — the write and release teams, every
+		// registered Mate's bot (D31), and the broker landing a Mate's
+		// proposal. Until 2026-09-17 the release team alone could, and every
+		// Mate's recipe waited for a releaser.
 		t.Errorf("main merges = %+v; the group repo takes merges from anyone with write", main)
 	}
 	if !env.EnablePushWhitelist || len(env.PushWhitelistUsers) != 1 || env.PushWhitelistUsers[0] != adminLogin {
@@ -241,6 +247,7 @@ func applied(t *testing.T) mirror.GiteaState {
 			"v*": {NamePattern: "v*", WhitelistTeams: []string{"release"}},
 		},
 	}}
+	g.GroupCollaborators = map[string]map[string]bool{"acme": {"mate-p-fen": true}}
 	g.Hooks["acme"] = []gitea.Hook{{ID: 9, Config: map[string]string{"url": hookURL}}}
 	g.BotTokens["mate-p-fen"] = []gitea.AccessToken{liveToken(1, "11111111", time.Hour)}
 	return g
@@ -966,6 +973,116 @@ func TestAMatesRecipeMergesOnlyWhenItAddsFiles(t *testing.T) {
 			}
 			if waiting == tc.merged {
 				t.Errorf("a request left open must be reported, a merged one not: %v", plan.Problems)
+			}
+		})
+	}
+}
+
+// D31: every registered Mate of a group writes its group repository as a
+// person with write does — its bot a collaborator with write on
+// {slug}/group, where main's rule lets it merge a pull request and never push.
+// The pass makes that true for every Mate, one registered before the rule on
+// its next pass, and takes it from a bot whose Mate left the group, as it
+// takes the bot's read team. A deleted Mate's bot is retired, not moved: it
+// keeps what it held, as it keeps its team. A person's collaboration is not
+// the loop's to judge.
+func TestEveryRegisteredMateWritesItsGroupRepo(t *testing.T) {
+	cases := []struct {
+		name string
+		// tags are registry entries besides oneGroup's.
+		tags []string
+		// collaborators are who collaborates on acme/group; nil with noRepo.
+		collaborators map[string]bool
+		noRepo        bool
+		dead          []string
+		wantAdd       []string
+		wantRemove    []string
+	}{
+		{
+			name:          "a Mate that does not collaborate yet — one registered before the rule — is made a writer",
+			collaborators: map[string]bool{},
+			wantAdd:       []string{"mate-p-fen"},
+		},
+		{
+			name:          "a Mate that writes it already: nothing",
+			collaborators: map[string]bool{"mate-p-fen": true},
+		},
+		{
+			name:          "a second Mate registered writes it too",
+			tags:          []string{"mate:gm:g-acme:p-ada:mate"},
+			collaborators: map[string]bool{"mate-p-fen": true},
+			wantAdd:       []string{"mate-p-ada"},
+		},
+		{
+			name:          "a bot whose Mate left the group loses it",
+			collaborators: map[string]bool{"mate-p-fen": true, "mate-p-gone": true},
+			wantRemove:    []string{"mate-p-gone"},
+		},
+		{
+			name:          "a deleted Mate's bot is retired with it, not moved",
+			collaborators: map[string]bool{"mate-p-fen": true, "mate-p-dead": true},
+			dead:          []string{"p-dead"},
+		},
+		{
+			name:          "a person's collaboration is left alone",
+			collaborators: map[string]bool{"mate-p-fen": true, roles.Login("u-jan"): true},
+		},
+		{
+			name:    "a group repo not made yet is written from the pass that makes it",
+			noRepo:  true,
+			wantAdd: []string{"mate-p-fen"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg, problems := registry.Parse(append([]string{
+				"mate:gn:g-acme:acme",
+				"mate:gm:g-acme:p-fen:mate",
+				"mate:gm:g-acme:p-prod:production",
+			}, tc.tags...))
+			g := applied(t)
+			g.GroupCollaborators = map[string]map[string]bool{"acme": tc.collaborators}
+			if tc.noRepo {
+				g.Repos = map[string]map[string]mirror.RepoState{"acme": {}}
+				g.GroupCollaborators = map[string]map[string]bool{}
+			}
+			plan := mirror.Compute(mirror.State{
+				Registry: reg, Problems: problems,
+				Mates:     map[string]string{"p-fen": "Fen", "p-ada": "Ada"},
+				Members:   settled(),
+				Gitea:     g,
+				DeadMates: tc.dead,
+			}, opts())
+
+			var added, removed []string
+			for _, a := range plan.Actions {
+				switch a.Kind {
+				case mirror.AddCollaborator:
+					added = append(added, a.Login)
+					if a.Destructive() {
+						t.Errorf("%s counts against the cap", a)
+					}
+				case mirror.RemoveCollaborator:
+					removed = append(removed, a.Login)
+					if !a.Destructive() {
+						t.Errorf("%s takes a write away and is not counted against the cap", a)
+					}
+				default:
+					continue
+				}
+				if a.Org != "acme" || a.Repo != "group" {
+					t.Errorf("%s is not on acme/group", a)
+				}
+			}
+			if strings.Join(added, ",") != strings.Join(tc.wantAdd, ",") {
+				t.Errorf("made writers %v, want %v:\n%s", added, tc.wantAdd, mirror.Describe(plan))
+			}
+			if strings.Join(removed, ",") != strings.Join(tc.wantRemove, ",") {
+				t.Errorf("took the write from %v, want %v:\n%s", removed, tc.wantRemove, mirror.Describe(plan))
+			}
+			if tc.noRepo && at(kinds(plan), "create_repo") > at(kinds(plan), "add_collaborator") {
+				t.Error("the bot joins the group repository before the repository is made")
 			}
 		})
 	}
