@@ -396,8 +396,17 @@ func StartWithoutCode(services []RecipeService) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("import delta: %w", err)
 	}
+	// A recipe generates its secrets — `<@generateRandomString(<32>)>` — and the
+	// platform evaluates a directive only under this header, first in the
+	// document. Without it the new service stores the directive as its value.
+	if strings.Contains(string(raw), "<@") {
+		return preprocessorHeader + string(raw), nil
+	}
 	return string(raw), nil
 }
+
+// preprocessorHeader turns the platform's import preprocessor on.
+const preprocessorHeader = "#zeropsPreprocessor=on\n"
 
 // withoutCode copies a service's mapping and swaps its two git fields for
 // startWithoutCode. The copy leaves the recipe the caller holds untouched.

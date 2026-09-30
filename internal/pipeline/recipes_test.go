@@ -72,6 +72,45 @@ func TestStartWithoutCodeKeepsEverythingButTheTwoGitFields(t *testing.T) {
 	}
 }
 
+// A tier generates its secrets, and the platform evaluates a directive only
+// under the preprocessor's header: a delta that carries one turns it on, one
+// that carries none is left as it was.
+func TestADeltaThatGeneratesASecretTurnsThePreprocessorOn(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		recipe string
+		header bool
+	}{
+		{name: "a generated secret", recipe: `
+services:
+  - hostname: mailpit
+    type: alpine@3.21
+    envSecrets:
+      MP_UI_AUTH: admin:<@generateRandomString(<16>)>
+`, header: true},
+		{name: "nothing generated", recipe: stageImportGrown, header: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			recipe, err := environments.ParseRecipe([]byte(tc.recipe))
+			if err != nil {
+				t.Fatalf("ParseRecipe: %v", err)
+			}
+			document, err := environments.StartWithoutCode(recipe.Order())
+			if err != nil {
+				t.Fatalf("StartWithoutCode: %v", err)
+			}
+			if got := strings.HasPrefix(document, "#zeropsPreprocessor=on\n"); got != tc.header {
+				t.Fatalf("header = %v, want %v:\n%s", got, tc.header, document)
+			}
+			if _, err := environments.ParseRecipe([]byte(document)); err != nil {
+				t.Fatalf("the delta does not parse: %v\n%s", err, document)
+			}
+		})
+	}
+}
+
 func TestARecipeChangeIsImportedIntoEveryEnvironmentOfItsTier(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
