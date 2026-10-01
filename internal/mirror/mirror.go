@@ -655,10 +655,15 @@ func (m *Mirror) perform(ctx context.Context, a Action) error {
 		return err
 	case ShapeBot:
 		yes, no, zero := true, false, 0
-		_, err := m.Gitea.EditUser(ctx, a.Login, gitea.UserEdit{
+		edit := gitea.UserEdit{
 			Active: &yes, Restricted: &yes, MaxRepoCreation: &zero,
-			AllowCreateOrganization: &no, FullName: &a.FullName,
-		})
+			AllowCreateOrganization: &no,
+		}
+		// A name a pass does not know is left as it is, never blanked.
+		if a.FullName != "" {
+			edit.FullName = &a.FullName
+		}
+		_, err := m.Gitea.EditUser(ctx, a.Login, edit)
 		return err
 	case AddTeamMember:
 		id, err := m.teamID(ctx, a.Org, a.Team)

@@ -226,7 +226,7 @@ func applied(t *testing.T) mirror.GiteaState {
 	g := emptyGitea()
 	g.Users[roles.Login("u-owner")] = gitea.User{Login: roles.Login("u-owner"), Active: true, IsAdmin: true}
 	g.Users[roles.Login("u-jan")] = gitea.User{Login: roles.Login("u-jan"), Active: true}
-	g.Users["mate-p-fen"] = gitea.User{Login: "mate-p-fen", Active: true, Restricted: true}
+	g.Users["mate-p-fen"] = gitea.User{Login: "mate-p-fen", FullName: "Fen", Active: true, Restricted: true}
 	g.Orgs["acme"] = true
 	g.Teams["acme"] = map[string]mirror.TeamState{
 		"read": {ID: 1, Members: map[string]bool{

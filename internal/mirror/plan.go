@@ -670,7 +670,9 @@ func (p *planner) planBots() {
 				p.do(Action{Kind: ShapeBot, Org: g.Slug, Login: login, FullName: name})
 				continue
 			}
-			if !user.Restricted || !user.Active {
+			// A bot made before the search listed its Mate's project has no
+			// name; it takes the Mate's once a pass knows it.
+			if !user.Restricted || !user.Active || (name != "" && user.FullName != name) {
 				p.do(Action{Kind: ShapeBot, Org: g.Slug, Login: login, FullName: name})
 			}
 		}

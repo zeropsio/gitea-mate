@@ -3,6 +3,7 @@ package mirror_test
 import (
 	"testing"
 
+	"github.com/zeropsio/gitea-mate/internal/gitea"
 	"github.com/zeropsio/gitea-mate/internal/mirror"
 	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
@@ -45,6 +46,37 @@ func TestAMateIsServedFromWhatThePressLeftAlone(t *testing.T) {
 			}
 			if _, updates, restarts := r.touchedContainer(); updates != 0 || restarts != 0 {
 				t.Errorf("updates %d restarts %d; a delivery adds its three and moves nothing", updates, restarts)
+			}
+		})
+	}
+}
+
+// A pass may run before the search lists a just-pressed Mate's project, and
+// then makes its bot without a name. The bot takes its Mate's name on the
+// first pass that knows it, and a pass that does not know it leaves the name
+// as it is.
+func TestABotTakesItsMatesNameOnceAPassKnowsIt(t *testing.T) {
+	cases := []struct {
+		name   string
+		listed string
+		held   string
+		want   string
+	}{
+		{name: "made nameless, now listed", listed: "Fen", held: "", want: "Fen"},
+		{name: "renamed Mate", listed: "Fen", held: "Old name", want: "Fen"},
+		{name: "not listed yet", listed: "", held: "Fen", want: "Fen"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			projects := rigProjects(rigTags())
+			projects[1].Name = tc.listed
+			r.zerops.SetProjects(projects...)
+			r.gitea.AddUser(gitea.User{Login: "mate-p-fen", FullName: tc.held, Active: true, Restricted: true})
+
+			r.passAt(t, now)
+			if u, _ := r.gitea.User("mate-p-fen"); u.FullName != tc.want {
+				t.Errorf("the bot's name is %q, want %q", u.FullName, tc.want)
 			}
 		})
 	}
