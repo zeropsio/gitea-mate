@@ -93,6 +93,10 @@ func run(log *slog.Logger) error {
 	}
 	rights.SetHookSecret(cfg.GiteaWebhookSecret.Reveal())
 	loop := mirror.NewLoop(rights, log, cfg.MirrorInterval, mirror.DefaultNudgeDelay)
+	// A Mate's press writes its registry tag and nothing after it, and no
+	// Gitea hook fires on a Zerops tag: the watch reads the registry every
+	// few seconds and passes as soon as it changed.
+	loop.Watch = rights.Registry
 
 	// What a proven person may do, read live: the OIDC consent and the app's
 	// own sign-in (POST /person/token) ask the same question.

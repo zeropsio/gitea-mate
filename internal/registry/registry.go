@@ -263,6 +263,15 @@ func RunnerHostname(slug string) string {
 	return name
 }
 
+// Fingerprint is the registry a tag list carries, as one comparable string:
+// the same for any order and for any tag outside the registry, and different
+// for every entry added, removed or changed. The rights loop's watch compares
+// it with the one its last pass acted on.
+func Fingerprint(tags []string) string {
+	reg, _ := Parse(tags)
+	return strings.Join(Tags(reg), "\n")
+}
+
 // IsRegistryTag reports whether a tag belongs to the registry — what a writer
 // strips before putting a fresh registry back on a project.
 func IsRegistryTag(tag string) bool {

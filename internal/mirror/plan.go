@@ -102,6 +102,9 @@ type State struct {
 	// Registry is the parsed registry, and Problems what it could not take.
 	Registry registry.Registry
 	Problems []registry.Problem
+	// RegistryFingerprint is the registry as read, before deleted projects
+	// are taken out (registry.Fingerprint).
+	RegistryFingerprint string
 	// Gitea is the current Gitea state.
 	Gitea GiteaState
 	// Mates names each Mate project, so a bot can carry its Mate's name.

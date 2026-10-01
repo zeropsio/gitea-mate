@@ -76,6 +76,15 @@ first looks. When they are not — the account's first project, where this broke
 building — zcp waits with backoff and the loop catches up on its first pass. A Mate registered
 later (an older project tagged into a group) is served on the next pass the same way.
 
+When that pass runs. A Zerops tag fires no Gitea hook, so the loop watches the registry: every 15
+seconds it reads the Gitea project's tags (`GET /project/{id}`, on the token it holds already) and
+passes at once when the registry differs from the one its last pass acted on. While a Mate that pass
+could not serve yet still waits — its `zcp@1` not listed, a write refused — it passes again every
+30 seconds for five minutes, then falls back to the interval (three minutes). A pass takes 6
+seconds at the median and 40 at most (21 Mates, measured 2026-10-01), so a new Mate's variables land
+about 14 seconds after its press and within 95 at worst; the interval alone took about 96 seconds
+and up to 220.
+
 What the loop cannot do it reports and retries: a Mate project the broker's token does not reach
 (an older org `READ_ONLY` token the app has not granted the project yet), a project with no `zcp@1` service (nothing to write to), a
 platform refusal. None of these stops the pass for the other Mates. The plain variables are written
