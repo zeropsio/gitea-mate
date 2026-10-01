@@ -211,3 +211,23 @@ func TestMatesWaitingCountsTheMatesAPassLeftUnserved(t *testing.T) {
 		})
 	}
 }
+
+// The search the org read rests on lags the platform's own reads by seconds
+// (0.5–2.6 s, measured). The pass takes its registry from the read the watch
+// makes, so a pass never acts on — and reports — a registry older than the
+// one the watch saw, which would read as a change at every watch.
+func TestThePassActsOnTheRegistryTheWatchSawWhileTheSearchLags(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.passAt(t, now)
+
+	r.zerops.FreezeSearch()
+	r.registry(append(rigTags(), "mate:release:g-acme:mates")...)
+	seen, err := r.mirror.Registry(ctx)
+	if err != nil {
+		t.Fatalf("Registry: %v", err)
+	}
+	if got := r.passAt(t, now.Add(time.Second)).Registry; got != seen {
+		t.Errorf("the pass acted on %q, the watch saw %q", got, seen)
+	}
+}

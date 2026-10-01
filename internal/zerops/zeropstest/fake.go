@@ -84,6 +84,9 @@ type Fake struct {
 	Ungranted map[string]bool
 	// userData is each service's own variables, by service id.
 	userData map[string][]zerops.ServiceUserData
+	// searchIndex, when set, is what POST /project/search answers in place
+	// of the projects GET /project/{id} reads: an index that lags.
+	searchIndex []zerops.Project
 	// hidden is, by service id, the variables its next list reads leave out
 	// though they exist: a create of one is still refused as a duplicate.
 	hidden map[string]hiddenUserData
@@ -180,6 +183,23 @@ func (f *Fake) SetProjects(p ...zerops.Project) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.projects = p
+}
+
+// FreezeSearch makes POST /project/search answer the projects as they are
+// now while later SetProjects calls reach GET /project/{id} alone: the
+// platform's search index lagging its own reads (0.5–2.6 s, measured).
+// ThawSearch catches it up.
+func (f *Fake) FreezeSearch() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.searchIndex = append([]zerops.Project{}, f.projects...)
+}
+
+// ThawSearch makes the search answer what GET answers again.
+func (f *Fake) ThawSearch() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.searchIndex = nil
 }
 
 // SetServices replaces one project's services.
@@ -476,6 +496,9 @@ func (f *Fake) projectSearch(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	items := f.projects
+	if f.searchIndex != nil {
+		items = f.searchIndex
+	}
 	for _, term := range filter.Search {
 		if term.Name == "id" {
 			var kept []zerops.Project

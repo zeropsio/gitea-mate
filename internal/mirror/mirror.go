@@ -325,14 +325,13 @@ func ReadOrgWith(ctx context.Context, z *zerops.Client, clientID, giteaProjectID
 		return State{}, fmt.Errorf("%w: the project list: %w", ErrUnreadable, err)
 	}
 
-	var giteaProject *zerops.Project
-	for i := range projects.Projects {
-		if projects.Projects[i].ID == giteaProjectID {
-			giteaProject = &projects.Projects[i]
-		}
-	}
-	if giteaProject == nil {
-		return State{}, fmt.Errorf("%w: the registry lives on project %s, which the project list does not carry", ErrUnreadable, giteaProjectID)
+	// The registry is read from the project itself, not from the search: the
+	// search's index lags the platform's reads by seconds (0.5–2.6 s,
+	// measured), and the loop's watch reads the project the same way, so a
+	// pass never acts on a registry older than the one the watch saw.
+	giteaProject, err := z.Project(ctx, giteaProjectID)
+	if err != nil {
+		return State{}, fmt.Errorf("%w: the registry on project %s: %w", ErrUnreadable, giteaProjectID, err)
 	}
 	reg, problems := registry.Parse(giteaProject.TagList)
 
