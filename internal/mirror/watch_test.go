@@ -1,9 +1,11 @@
 package mirror_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -230,4 +232,77 @@ func TestThePassActsOnTheRegistryTheWatchSawWhileTheSearchLags(t *testing.T) {
 	if got := r.passAt(t, now.Add(time.Second)).Registry; got != seen {
 		t.Errorf("the pass acted on %q, the watch saw %q", got, seen)
 	}
+}
+
+// A change any pass sees first — a tick's, a hook's nudge, a sign-in's — starts
+// the chase as the watch's would: the watch then sees nothing new, and the
+// Mate the pass left waiting must not wait out the interval.
+func TestAChangeAnyPassSeesFirstStartsTheChase(t *testing.T) {
+	triggers := []struct {
+		name string
+		run  func(loop *mirror.Loop)
+	}{
+		{name: "a nudge", run: func(loop *mirror.Loop) { loop.Nudge() }},
+		{name: "RunNow", run: func(loop *mirror.Loop) { _, _ = loop.RunNow(context.Background()) }},
+	}
+	for _, tc := range triggers {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &counter{result: mirror.Result{Registry: "r1"}}
+			w := &registryWatch{now: "r1"}
+			loop := mirror.NewLoop(p, slog.New(slog.DiscardHandler), time.Hour, time.Millisecond)
+			loop.Watch = w.read
+			loop.WatchInterval = 5 * time.Millisecond
+			loop.ChaseInterval = 20 * time.Millisecond
+			loop.ChaseFor = time.Hour
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { loop.Run(ctx); close(done) }()
+			t.Cleanup(func() { cancel(); <-done })
+			waitUntil(t, func() bool { runs, _ := p.counts(); return runs == 1 })
+
+			// The watch is blind while the other pass sees the change.
+			w.set("", errors.New("503"))
+			p.setResult(mirror.Result{Registry: "r2", MatesWaiting: 1}, nil)
+			tc.run(loop)
+			waitUntil(t, func() bool { runs, _ := p.counts(); return runs == 2 })
+			w.set("r2", nil)
+			waitUntil(t, func() bool { runs, _ := p.counts(); return runs >= 4 })
+		})
+	}
+}
+
+// A watch that keeps failing is said at Info, so a broken one is seen; one
+// failure alone is not.
+func TestAWatchFailingTimeAfterTimeIsLogged(t *testing.T) {
+	var buf safeBuffer
+	p := &counter{result: mirror.Result{Registry: "r1"}}
+	w := &registryWatch{err: errors.New("503")}
+	loop := mirror.NewLoop(p, slog.New(slog.NewJSONHandler(&buf, nil)), time.Hour, time.Hour)
+	loop.Watch = w.read
+	loop.WatchInterval = 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { loop.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	waitUntil(t, func() bool { return w.count() >= mirror.WatchFailuresBeforeLog })
+	waitUntil(t, func() bool { return strings.Contains(buf.String(), `"level":"INFO","msg":"the rights loop's watch`) })
+}
+
+// safeBuffer is a log sink the loop's goroutine and the test share.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

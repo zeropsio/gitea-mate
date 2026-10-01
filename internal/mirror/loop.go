@@ -31,6 +31,11 @@ const (
 	DefaultChaseFor      = 5 * time.Minute
 )
 
+// WatchFailuresBeforeLog is how many failed watch reads in a row are said at
+// Info, and said again at every multiple: one failure is noise, a run of them
+// a watch that is broken.
+const WatchFailuresBeforeLog = 4
+
 // Passer is what a [Loop] drives. [*Mirror] implements it.
 type Passer interface {
 	Pass(ctx context.Context) (Result, error)
@@ -65,12 +70,19 @@ type Loop struct {
 	// overlap, whichever goroutine asks.
 	passMu sync.Mutex
 
-	// last is what the latest pass left, for the watch: the registry it acted
-	// on, how many Mates it left waiting, when it ended.
+	// What the watch compares with, under lastMu: the registry last seen, by
+	// the watch or by a pass; the registry the last pass acted on, how many
+	// Mates it left waiting and when it ended; and until when a chase runs.
 	lastMu      sync.Mutex
 	lastSeen    string
+	lastActed   string
 	lastWaiting int
 	lastAt      time.Time
+	chaseUntil  time.Time
+
+	// watchFailures is how many watch reads in a row failed; the Run
+	// goroutine alone touches it.
+	watchFailures int
 }
 
 // NewLoop builds a loop.
@@ -117,15 +129,13 @@ func (l *Loop) Run(ctx context.Context) {
 		defer watchTicker.Stop()
 		watch = watchTicker.C
 	}
-	var chaseUntil time.Time
-
 	l.pass(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-watch:
-			if l.watch(ctx, &chaseUntil) {
+			if l.watch(ctx) {
 				l.pass(ctx)
 			}
 		case <-ticker.C:
@@ -147,26 +157,31 @@ func (l *Loop) Run(ctx context.Context) {
 }
 
 // watch reads the registry and says whether a pass is due: the registry
-// differs from the one the last pass acted on — which starts a chase — or a
-// chase is on, a Mate still waits and the last pass is a chase interval old.
-// A registry the watch cannot read is no reason for a pass. A changed one is
-// taken as acted on before its pass runs, so a pass that fails on it is
-// retried by the interval, not by every watch.
-func (l *Loop) watch(ctx context.Context, chaseUntil *time.Time) bool {
+// differs from the one last seen — which starts a chase — or a chase is on, a
+// Mate still waits and the last pass is a chase interval old. A registry the
+// watch cannot read is no reason for a pass. A changed one is taken as seen
+// before its pass runs, so a pass that fails on it is retried by the
+// interval, not by every watch.
+func (l *Loop) watch(ctx context.Context) bool {
 	seen, err := l.Watch(ctx)
 	if err != nil {
-		l.Log.Debug("the rights loop's watch could not read the registry", "err", err.Error())
+		l.watchFailures++
+		if l.watchFailures%WatchFailuresBeforeLog == 0 {
+			l.Log.Info("the rights loop's watch cannot read the registry; a new registration waits for the interval",
+				"failures_in_a_row", l.watchFailures, "err", err.Error())
+		}
 		return false
 	}
+	l.watchFailures = 0
 	now := time.Now()
 	l.lastMu.Lock()
 	defer l.lastMu.Unlock()
 	if seen != l.lastSeen {
 		l.lastSeen = seen
-		*chaseUntil = now.Add(orDefault(l.ChaseFor, DefaultChaseFor))
+		l.chaseUntil = now.Add(orDefault(l.ChaseFor, DefaultChaseFor))
 		return true
 	}
-	return l.lastWaiting > 0 && now.Before(*chaseUntil) &&
+	return l.lastWaiting > 0 && now.Before(l.chaseUntil) &&
 		now.Sub(l.lastAt) >= orDefault(l.ChaseInterval, DefaultChaseInterval)
 }
 
@@ -175,6 +190,25 @@ func orDefault(d, def time.Duration) time.Duration {
 		return d
 	}
 	return def
+}
+
+// settle records what a pass left, whichever trigger ran it: a registry other
+// than the last pass's, or more Mates waiting than it left, starts a chase —
+// the watch then sees no change, and the Mate must not wait out the interval.
+// The pass reads its registry where the watch does, so what it saw is never
+// older than what the watch saw before it.
+func (l *Loop) settle(result Result, err error) {
+	now := time.Now()
+	l.lastMu.Lock()
+	defer l.lastMu.Unlock()
+	l.lastAt = now
+	if err != nil {
+		return
+	}
+	if result.Registry != l.lastActed || result.MatesWaiting > l.lastWaiting {
+		l.chaseUntil = now.Add(orDefault(l.ChaseFor, DefaultChaseFor))
+	}
+	l.lastSeen, l.lastActed, l.lastWaiting = result.Registry, result.Registry, result.MatesWaiting
 }
 
 // pass runs one pass and logs its outcome as counts. Never a name of a token.
@@ -188,7 +222,9 @@ func (l *Loop) RunNow(ctx context.Context) (Result, error) {
 	if ctx.Err() != nil {
 		return Result{}, ctx.Err()
 	}
-	return l.Passer.Pass(ctx)
+	result, err := l.Passer.Pass(ctx)
+	l.settle(result, err)
+	return result, err
 }
 
 func (l *Loop) pass(ctx context.Context) {
@@ -198,12 +234,7 @@ func (l *Loop) pass(ctx context.Context) {
 	l.passMu.Lock()
 	result, err := l.Passer.Pass(ctx)
 	l.passMu.Unlock()
-	l.lastMu.Lock()
-	l.lastAt = time.Now()
-	if err == nil {
-		l.lastSeen, l.lastWaiting = result.Registry, result.MatesWaiting
-	}
-	l.lastMu.Unlock()
+	l.settle(result, err)
 	switch {
 	case errors.Is(err, ErrCapped):
 		// The plan is in the result for a person to read; the log says how many,
