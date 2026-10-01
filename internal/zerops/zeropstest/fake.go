@@ -324,6 +324,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		f.createUserData(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/service-stack/"), "/user-data"))
 	case r.Method == "PUT" && strings.HasPrefix(path, "/user-data/"):
 		f.updateUserData(w, r, lastSegment(path))
+	case r.Method == "DELETE" && strings.HasPrefix(path, "/user-data/"):
+		f.deleteUserData(w, lastSegment(path))
 	case r.Method == "POST" && strings.HasSuffix(path, "/service-stack/import"):
 		f.importServices(w, r, path)
 	case r.Method == "PUT" && (strings.HasSuffix(path, "/stop") || strings.HasSuffix(path, "/start")):
@@ -629,7 +631,9 @@ func (f *Fake) createUserData(w http.ResponseWriter, r *http.Request, serviceID 
 }
 
 // updateUserData is PUT /user-data/{id}. The body must carry the key beside
-// the content; the platform refuses one without it.
+// the content; the platform refuses one without it. Whether the platform
+// renames a variable whose stored key differs in case is not measured, so the
+// fake keeps the stored key: nothing may rely on a PUT to rename.
 func (f *Fake) updateUserData(w http.ResponseWriter, r *http.Request, id string) {
 	var spec zerops.UserDataSpec
 	_ = json.NewDecoder(r.Body).Decode(&spec)
@@ -647,9 +651,31 @@ func (f *Fake) updateUserData(w http.ResponseWriter, r *http.Request, id string)
 			if !f.userDataReachable(w, serviceID) {
 				return
 			}
-			f.userData[serviceID][i].Key = spec.Key
 			f.userData[serviceID][i].Content = spec.Content
 			writeJSON(w, 200, f.userData[serviceID][i])
+			return
+		}
+	}
+	writeErr(w, http.StatusNotFound, "userDataNotFound", "no such variable")
+}
+
+// deleteUserData is DELETE /user-data/{id}: 200 with a process.
+func (f *Fake) deleteUserData(w http.ResponseWriter, id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for serviceID, list := range f.userData {
+		for i, e := range list {
+			if e.ID != id {
+				continue
+			}
+			if !f.userDataReachable(w, serviceID) {
+				return
+			}
+			f.userData[serviceID] = append(list[:i:i], list[i+1:]...)
+			f.sequence++
+			proc := zerops.Process{ID: "proc-" + itoa(f.sequence), ServiceStackID: serviceID, Status: zerops.ProcessFinished, ActionName: "stack.userData.delete"}
+			f.processes[proc.ID] = proc
+			writeJSON(w, 200, proc)
 			return
 		}
 	}

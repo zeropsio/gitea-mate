@@ -67,6 +67,13 @@ func (c *Client) CreateUserData(ctx context.Context, serviceID string, spec User
 	return out, err
 }
 
+// DeleteUserData is DELETE /user-data/{id}. It answers a process, which the
+// rights loop does not wait on.
+func (c *Client) DeleteUserData(ctx context.Context, id string) error {
+	_, err := c.do(ctx, "DELETE", "/user-data/"+url.PathEscape(id), nil, nil)
+	return err
+}
+
 // UpdateUserData is PUT /user-data/{id}. The body carries the key beside the
 // content — the platform refuses one without it (measured 2026-09-17).
 func (c *Client) UpdateUserData(ctx context.Context, id, key, content string) error {

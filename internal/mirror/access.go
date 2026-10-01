@@ -136,15 +136,15 @@ func (p *planner) planMateAccess() {
 
 			newest, hasLive := newestGeneration(bot, p.state.Gitea.BotTokens[bot])
 			token := svc.Vars[VarGiteaToken]
-			// A variable held under another case is one zcp does not read:
-			// it is rewritten under its own name, a token with a new mint.
-			mint := token.Content == "" || token.Key != VarGiteaToken ||
+			mint := token.Content == "" ||
 				svc.Vars[VarGiteaURL].Content != p.opts.GiteaPublicURL ||
 				!hasLive ||
 				!strings.HasSuffix(token.Content, newest.TokenLastEight) ||
 				!coversScopes(newest.Scopes, BotScopes)
+			// A variable held under another case is one zcp does not read: it
+			// is replaced under its own name, the token as it is, unminted.
 			write := mint || svc.Vars[VarBrokerURL].Content != p.opts.BrokerPublicURL ||
-				svc.Vars[VarGiteaURL].Key != VarGiteaURL || svc.Vars[VarBrokerURL].Key != VarBrokerURL
+				miscased(svc.Vars, VarGiteaURL, VarBrokerURL, VarGiteaToken)
 			if !write {
 				continue
 			}
@@ -154,6 +154,16 @@ func (p *planner) planMateAccess() {
 			})
 		}
 	}
+}
+
+// miscased reports whether a container holds any of keys under another case.
+func miscased(vars map[string]zerops.ServiceUserData, keys ...string) bool {
+	for _, k := range keys {
+		if v, ok := vars[k]; ok && v.Key != k {
+			return true
+		}
+	}
+	return false
 }
 
 // coversScopes reports whether a token minted with have may do everything
@@ -223,6 +233,9 @@ func (m *Mirror) deliverMateAccess(ctx context.Context, a Action) error {
 		}
 	}
 	if !a.Mint {
+		if tok, ok := held[VarGiteaToken]; ok && tok.Key != VarGiteaToken {
+			return m.writeVar(ctx, a.Service, held, zerops.UserDataSpec{Key: VarGiteaToken, Content: tok.Content, Sensitive: true})
+		}
 		return nil
 	}
 
@@ -287,11 +300,33 @@ func (m *Mirror) writeVar(ctx context.Context, service string, held map[string]z
 			return fmt.Errorf("creating %s: %w, and no read lists it", spec.Key, err)
 		}
 	}
-	if cur.Content == spec.Content && cur.Key == spec.Key {
+	if cur.Key != spec.Key {
+		return m.replaceVar(ctx, service, held, cur, spec)
+	}
+	if cur.Content == spec.Content {
 		return nil
 	}
 	if err := m.Zerops.UpdateUserData(ctx, cur.ID, spec.Key, spec.Content); err != nil {
 		return fmt.Errorf("updating %s: %w", spec.Key, err)
+	}
+	return nil
+}
+
+// replaceVar moves a variable held under another case to spec's own: it is
+// deleted by its id and created anew, two calls whose semantics are known,
+// where an update's renaming of a key is not measured. It is one attempt a
+// pass — a delivery writes each variable once — and a refusal is said at Info
+// and returned, so the next pass tries again and nothing is minted past it.
+func (m *Mirror) replaceVar(ctx context.Context, service string, held map[string]zerops.ServiceUserData, cur zerops.ServiceUserData, spec zerops.UserDataSpec) error {
+	err := m.Zerops.DeleteUserData(ctx, cur.ID)
+	if err == nil {
+		delete(held, strings.ToUpper(spec.Key))
+		_, err = m.Zerops.CreateUserData(ctx, service, spec)
+	}
+	if err != nil {
+		m.log().Info("a variable held under another case could not be moved to its own name; the next pass tries again",
+			"service", service, "key", spec.Key, "err", err.Error())
+		return fmt.Errorf("moving %s to its own name: %w", spec.Key, err)
 	}
 	return nil
 }
