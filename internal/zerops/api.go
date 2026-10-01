@@ -303,8 +303,8 @@ type ProjectUpdate struct {
 }
 
 // UpdateProject is PUT /project/{id} — the registry write. It needs effective
-// OWNER or ADMIN; the broker's own token is org READ_ONLY, so this is the app's
-// call, not the loop's.
+// OWNER or ADMIN; the broker's own token is org BASIC_USER (an older one org
+// READ_ONLY), so this is the app's call, not the loop's.
 func (c *Client) UpdateProject(ctx context.Context, projectID string, update ProjectUpdate) error {
 	if update.TagList == nil {
 		update.TagList = []string{}

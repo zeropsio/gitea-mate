@@ -96,12 +96,13 @@ func byKey(vars []zerops.ServiceUserData) map[string]zerops.ServiceUserData {
 	return out
 }
 
-// unreachable words a failed read. A 403 or 404 is the ordinary state of a
-// Mate the app has registered and not yet granted the broker.
+// unreachable words a failed read. The app mints the broker's token at org
+// BASIC_USER, which reaches every Mate as the press registers it; a 403 or 404
+// is an older token at org READ_ONLY on a Mate the app has not granted it.
 func unreachable(what string, err error) string {
 	switch status := zerops.Status(err); status {
 	case 403, 404:
-		return fmt.Sprintf("%s could not be read (%d): the broker's token does not reach the project; the app has not granted it yet", what, status)
+		return fmt.Sprintf("%s could not be read (%d): the broker's token does not reach the project; an org READ_ONLY broker token reaches a Mate only once the app has granted it", what, status)
 	default:
 		return fmt.Sprintf("%s could not be read: %v", what, err)
 	}

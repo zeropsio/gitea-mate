@@ -10,9 +10,9 @@
 #
 # The app replaces these placeholders before sending the file:
 #
-#   __ZEROPS_TOKEN__       the broker's Zerops token: org READ_ONLY, BASIC_USER
-#                          on this project, and BASIC_USER on each group stage
-#                          and production as they are created. Minted by the
+#   __ZEROPS_TOKEN__       the broker's Zerops token: org BASIC_USER, which
+#                          reaches this project, each group stage and
+#                          production, and each Mate. Minted by the
 #                          app as the owner. It reads and decides; since D27 a
 #                          job deploys, on the environment's own deploy token,
 #                          which the app writes onto the broker service later
