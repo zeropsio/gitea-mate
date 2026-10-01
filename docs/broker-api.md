@@ -57,8 +57,12 @@ the way it makes teams and bots true:
 3. **The Mate's environment** — with the broker's Zerops token, which the app granted `BASIC_USER`
    on the Mate's project when it registered it, the loop finds the project's `zcp@1` service and
    writes three service variables on it: `GITEA_URL` and `MATE_BROKER_URL` (plain) and
-   `GITEA_TOKEN` (sensitive). A variable already holding the right value is not written; a
-   `GITEA_URL` naming another Gitea means the token there is not ours, so the loop mints a new
+   `GITEA_TOKEN` (sensitive). Each write is an upsert: a variable the container holds — its key in
+   any case, since the platform holds one per key case-insensitively (`400 userDataDuplicateKey`) —
+   is updated by its id under its own name, and only a key it does not hold is created; a create
+   refused as a duplicate means a read listed less than the container holds, so the loop reads the
+   variables again and updates the one found. A variable already holding the right value is not
+   written; a `GITEA_URL` naming another Gitea means the token there is not ours, so the loop mints a new
    generation and writes all three; a stale `MATE_BROKER_URL` alone is put right as a plain write. The loop never restarts the container: zcp reads these from the
    container's live env store, which the platform rewrites within seconds of the write (measured
    2026-09-16 and 2026-09-17).

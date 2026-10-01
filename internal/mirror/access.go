@@ -3,6 +3,7 @@ package mirror
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/zeropsio/gitea-mate/internal/gitea"
@@ -80,11 +81,19 @@ func (m *Mirror) readMate(ctx context.Context, projectID string) (MateService, s
 	if err != nil {
 		return MateService{}, unreachable("its container's variables", err)
 	}
-	out := MateService{ServiceID: zcp.ID, Vars: map[string]zerops.ServiceUserData{}}
+	return MateService{ServiceID: zcp.ID, Vars: byKey(vars)}, ""
+}
+
+// byKey indexes a container's variables by their key in upper case: the
+// platform holds one variable per key in any case (400 userDataDuplicateKey,
+// "not unique (case insensitive)"), so a `gitea_url` is the GITEA_URL a
+// delivery updates, never one it creates beside it.
+func byKey(vars []zerops.ServiceUserData) map[string]zerops.ServiceUserData {
+	out := make(map[string]zerops.ServiceUserData, len(vars))
 	for _, v := range vars {
-		out.Vars[v.Key] = v
+		out[strings.ToUpper(v.Key)] = v
 	}
-	return out, ""
+	return out
 }
 
 // unreachable words a failed read. A 403 or 404 is the ordinary state of a
@@ -126,12 +135,15 @@ func (p *planner) planMateAccess() {
 
 			newest, hasLive := newestGeneration(bot, p.state.Gitea.BotTokens[bot])
 			token := svc.Vars[VarGiteaToken]
-			mint := token.Content == "" ||
+			// A variable held under another case is one zcp does not read:
+			// it is rewritten under its own name, a token with a new mint.
+			mint := token.Content == "" || token.Key != VarGiteaToken ||
 				svc.Vars[VarGiteaURL].Content != p.opts.GiteaPublicURL ||
 				!hasLive ||
 				!strings.HasSuffix(token.Content, newest.TokenLastEight) ||
 				!coversScopes(newest.Scopes, BotScopes)
-			write := mint || svc.Vars[VarBrokerURL].Content != p.opts.BrokerPublicURL
+			write := mint || svc.Vars[VarBrokerURL].Content != p.opts.BrokerPublicURL ||
+				svc.Vars[VarGiteaURL].Key != VarGiteaURL || svc.Vars[VarBrokerURL].Key != VarBrokerURL
 			if !write {
 				continue
 			}
@@ -199,16 +211,13 @@ func (m *Mirror) deliverMateAccess(ctx context.Context, a Action) error {
 	if err != nil {
 		return fmt.Errorf("the container's variables: %w", err)
 	}
-	byKey := map[string]zerops.ServiceUserData{}
-	for _, v := range have {
-		byKey[v.Key] = v
-	}
+	held := byKey(have)
 
 	for _, spec := range []zerops.UserDataSpec{
 		{Key: VarGiteaURL, Content: m.GiteaPublicURL},
 		{Key: VarBrokerURL, Content: m.BrokerPublicURL},
 	} {
-		if err := m.writeVar(ctx, a.Service, byKey, spec); err != nil {
+		if err := m.writeVar(ctx, a.Service, held, spec); err != nil {
 			return err
 		}
 	}
@@ -231,7 +240,7 @@ func (m *Mirror) deliverMateAccess(ctx context.Context, a Action) error {
 	if err != nil {
 		return fmt.Errorf("minting generation %d: %w", newest+1, err)
 	}
-	if err := m.writeVar(ctx, a.Service, byKey, zerops.UserDataSpec{Key: VarGiteaToken, Content: minted.Value, Sensitive: true}); err != nil {
+	if err := m.writeVar(ctx, a.Service, held, zerops.UserDataSpec{Key: VarGiteaToken, Content: minted.Value, Sensitive: true}); err != nil {
 		// A 4xx is a definite refusal: nobody holds the generation just
 		// minted, and it goes again. This, not the plain writes, keeps a
 		// refusing container from piling generations up; a delete that
@@ -249,19 +258,39 @@ func (m *Mirror) deliverMateAccess(ctx context.Context, a Action) error {
 	return nil
 }
 
-// writeVar makes one variable of a container hold spec: created when missing,
-// updated when different, left alone when it already does.
-func (m *Mirror) writeVar(ctx context.Context, service string, byKey map[string]zerops.ServiceUserData, spec zerops.UserDataSpec) error {
-	cur, exists := byKey[spec.Key]
-	switch {
-	case !exists:
-		if _, err := m.Zerops.CreateUserData(ctx, service, spec); err != nil {
-			return fmt.Errorf("creating %s: %w", spec.Key, err)
+// writeVar makes one variable of a container hold spec — an upsert: updated
+// by its id when the container holds the key in any case (and renamed to
+// spec's own case, the one zcp reads), created only when it holds none, left
+// alone when it already holds the value. A create the platform refuses as a
+// duplicate means a read listed less than the container holds — the paged
+// list of 2026-09-30, or a variable written a moment ago — so the variables
+// are read again into held and the one found is updated; a variable no read
+// lists returns the refusal, since an update needs its id.
+func (m *Mirror) writeVar(ctx context.Context, service string, held map[string]zerops.ServiceUserData, spec zerops.UserDataSpec) error {
+	cur, exists := held[strings.ToUpper(spec.Key)]
+	if !exists {
+		_, err := m.Zerops.CreateUserData(ctx, service, spec)
+		if zerops.Code(err) != zerops.CodeUserDataDuplicateKey {
+			if err != nil {
+				return fmt.Errorf("creating %s: %w", spec.Key, err)
+			}
+			return nil
 		}
-	case cur.Content != spec.Content:
-		if err := m.Zerops.UpdateUserData(ctx, cur.ID, spec.Key, spec.Content); err != nil {
-			return fmt.Errorf("updating %s: %w", spec.Key, err)
+		again, readErr := m.Zerops.UserData(ctx, service)
+		if readErr != nil {
+			return fmt.Errorf("creating %s: %w; reading the container's variables again: %w", spec.Key, err, readErr)
 		}
+		clear(held)
+		maps.Copy(held, byKey(again))
+		if cur, exists = held[strings.ToUpper(spec.Key)]; !exists {
+			return fmt.Errorf("creating %s: %w, and no read lists it", spec.Key, err)
+		}
+	}
+	if cur.Content == spec.Content && cur.Key == spec.Key {
+		return nil
+	}
+	if err := m.Zerops.UpdateUserData(ctx, cur.ID, spec.Key, spec.Content); err != nil {
+		return fmt.Errorf("updating %s: %w", spec.Key, err)
 	}
 	return nil
 }

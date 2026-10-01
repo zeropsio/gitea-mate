@@ -84,6 +84,9 @@ type Fake struct {
 	Ungranted map[string]bool
 	// userData is each service's own variables, by service id.
 	userData map[string][]zerops.ServiceUserData
+	// hidden is, by service id, the variables its next list reads leave out
+	// though they exist: a create of one is still refused as a duplicate.
+	hidden map[string]hiddenUserData
 
 	// The deploy half (deploy.go): app versions by id, processes by id, which
 	// services have ever deployed, whose subdomain is on, and which version
@@ -117,6 +120,7 @@ func New(t *testing.T, clientID string) *Fake {
 		FailTimes:  map[string]int{},
 		Ungranted:  map[string]bool{},
 		userData:   map[string][]zerops.ServiceUserData{},
+		hidden:     map[string]hiddenUserData{},
 		stopped:    map[string]bool{},
 		started:    map[string]bool{},
 		versions:   map[string]*AppVersionRecord{},
@@ -199,6 +203,27 @@ func (f *Fake) SetUserData(serviceID string, entries ...zerops.ServiceUserData) 
 		list = append(list, e)
 	}
 	f.userData[serviceID] = list
+}
+
+// hiddenUserData is a list that leaves keys out for a number of reads.
+type hiddenUserData struct {
+	reads int
+	keys  map[string]bool
+}
+
+// HideUserData makes the next reads list reads of a service's variables leave
+// keys out, though the variables exist and a create of one is refused as a
+// duplicate: what a read the platform answers short looks like to the broker
+// (the paged list of 2026-09-30, or a variable written a moment ago and not
+// listed yet).
+func (f *Fake) HideUserData(serviceID string, reads int, keys ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	h := hiddenUserData{reads: reads, keys: map[string]bool{}}
+	for _, k := range keys {
+		h.keys[k] = true
+	}
+	f.hidden[serviceID] = h
 }
 
 // UserData reads back one service's own variables, in the order they were
@@ -545,6 +570,17 @@ func (f *Fake) listUserData(w http.ResponseWriter, r *http.Request, serviceID st
 		return
 	}
 	all := f.userData[serviceID]
+	if h := f.hidden[serviceID]; h.reads > 0 {
+		h.reads--
+		f.hidden[serviceID] = h
+		var listed []zerops.ServiceUserData
+		for _, e := range all {
+			if !h.keys[e.Key] {
+				listed = append(listed, e)
+			}
+		}
+		all = listed
+	}
 	limit, offset := 20, 0
 	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
 		limit = n
@@ -560,7 +596,9 @@ func (f *Fake) listUserData(w http.ResponseWriter, r *http.Request, serviceID st
 }
 
 // createUserData is POST /service-stack/{id}/user-data: 200 with a process. A
-// write onto a service that has not deployed yet is accepted, as measured.
+// write onto a service that has not deployed yet is accepted, as measured. A
+// key the service holds already, in any case, is refused as the platform
+// refuses it (400 userDataDuplicateKey, measured 2026-09-30).
 func (f *Fake) createUserData(w http.ResponseWriter, r *http.Request, serviceID string) {
 	var spec zerops.UserDataSpec
 	_ = json.NewDecoder(r.Body).Decode(&spec)
@@ -574,8 +612,9 @@ func (f *Fake) createUserData(w http.ResponseWriter, r *http.Request, serviceID 
 		return
 	}
 	for _, e := range f.userData[serviceID] {
-		if e.Key == spec.Key {
-			writeErr(w, http.StatusBadRequest, "userDataKeyAlreadyExists", "that key exists; update it")
+		if strings.EqualFold(e.Key, spec.Key) {
+			writeErr(w, http.StatusBadRequest, "userDataDuplicateKey",
+				"Service environment variable key '"+spec.Key+"' is not unique (case insensitive).")
 			return
 		}
 	}
