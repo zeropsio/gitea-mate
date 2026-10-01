@@ -332,7 +332,7 @@ func TestResultLogsCountsOnly(t *testing.T) {
 	}
 	for _, attr := range v.Group() {
 		switch attr.Key {
-		case "planned", "applied", "destructive", "problems", "failures", "awaiting_sign_in":
+		case "planned", "applied", "destructive", "problems", "failures", "awaiting_sign_in", "mates_waiting":
 		default:
 			t.Errorf("the log carries %q, which is not a count", attr.Key)
 		}

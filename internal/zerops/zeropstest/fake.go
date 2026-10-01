@@ -84,6 +84,12 @@ type Fake struct {
 	Ungranted map[string]bool
 	// userData is each service's own variables, by service id.
 	userData map[string][]zerops.ServiceUserData
+	// searchIndex, when set, is what POST /project/search answers in place
+	// of the projects GET /project/{id} reads: an index that lags.
+	searchIndex []zerops.Project
+	// hidden is, by service id, the variables its next list reads leave out
+	// though they exist: a create of one is still refused as a duplicate.
+	hidden map[string]hiddenUserData
 
 	// The deploy half (deploy.go): app versions by id, processes by id, which
 	// services have ever deployed, whose subdomain is on, and which version
@@ -117,6 +123,7 @@ func New(t *testing.T, clientID string) *Fake {
 		FailTimes:  map[string]int{},
 		Ungranted:  map[string]bool{},
 		userData:   map[string][]zerops.ServiceUserData{},
+		hidden:     map[string]hiddenUserData{},
 		stopped:    map[string]bool{},
 		started:    map[string]bool{},
 		versions:   map[string]*AppVersionRecord{},
@@ -178,6 +185,23 @@ func (f *Fake) SetProjects(p ...zerops.Project) {
 	f.projects = p
 }
 
+// FreezeSearch makes POST /project/search answer the projects as they are
+// now while later SetProjects calls reach GET /project/{id} alone: the
+// platform's search index lagging its own reads (0.5–2.6 s, measured).
+// ThawSearch catches it up.
+func (f *Fake) FreezeSearch() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.searchIndex = append([]zerops.Project{}, f.projects...)
+}
+
+// ThawSearch makes the search answer what GET answers again.
+func (f *Fake) ThawSearch() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.searchIndex = nil
+}
+
 // SetServices replaces one project's services.
 func (f *Fake) SetServices(projectID string, s ...zerops.Service) {
 	f.mu.Lock()
@@ -199,6 +223,27 @@ func (f *Fake) SetUserData(serviceID string, entries ...zerops.ServiceUserData) 
 		list = append(list, e)
 	}
 	f.userData[serviceID] = list
+}
+
+// hiddenUserData is a list that leaves keys out for a number of reads.
+type hiddenUserData struct {
+	reads int
+	keys  map[string]bool
+}
+
+// HideUserData makes the next reads list reads of a service's variables leave
+// keys out, though the variables exist and a create of one is refused as a
+// duplicate: what a read the platform answers short looks like to the broker
+// (the paged list of 2026-09-30, or a variable written a moment ago and not
+// listed yet).
+func (f *Fake) HideUserData(serviceID string, reads int, keys ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	h := hiddenUserData{reads: reads, keys: map[string]bool{}}
+	for _, k := range keys {
+		h.keys[k] = true
+	}
+	f.hidden[serviceID] = h
 }
 
 // UserData reads back one service's own variables, in the order they were
@@ -299,6 +344,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		f.createUserData(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/service-stack/"), "/user-data"))
 	case r.Method == "PUT" && strings.HasPrefix(path, "/user-data/"):
 		f.updateUserData(w, r, lastSegment(path))
+	case r.Method == "DELETE" && strings.HasPrefix(path, "/user-data/"):
+		f.deleteUserData(w, lastSegment(path))
 	case r.Method == "POST" && strings.HasSuffix(path, "/service-stack/import"):
 		f.importServices(w, r, path)
 	case r.Method == "PUT" && (strings.HasSuffix(path, "/stop") || strings.HasSuffix(path, "/start")):
@@ -449,6 +496,9 @@ func (f *Fake) projectSearch(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	items := f.projects
+	if f.searchIndex != nil {
+		items = f.searchIndex
+	}
 	for _, term := range filter.Search {
 		if term.Name == "id" {
 			var kept []zerops.Project
@@ -545,6 +595,17 @@ func (f *Fake) listUserData(w http.ResponseWriter, r *http.Request, serviceID st
 		return
 	}
 	all := f.userData[serviceID]
+	if h := f.hidden[serviceID]; h.reads > 0 {
+		h.reads--
+		f.hidden[serviceID] = h
+		var listed []zerops.ServiceUserData
+		for _, e := range all {
+			if !h.keys[e.Key] {
+				listed = append(listed, e)
+			}
+		}
+		all = listed
+	}
 	limit, offset := 20, 0
 	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
 		limit = n
@@ -560,7 +621,9 @@ func (f *Fake) listUserData(w http.ResponseWriter, r *http.Request, serviceID st
 }
 
 // createUserData is POST /service-stack/{id}/user-data: 200 with a process. A
-// write onto a service that has not deployed yet is accepted, as measured.
+// write onto a service that has not deployed yet is accepted, as measured. A
+// key the service holds already, in any case, is refused as the platform
+// refuses it (400 userDataDuplicateKey, measured 2026-09-30).
 func (f *Fake) createUserData(w http.ResponseWriter, r *http.Request, serviceID string) {
 	var spec zerops.UserDataSpec
 	_ = json.NewDecoder(r.Body).Decode(&spec)
@@ -574,8 +637,9 @@ func (f *Fake) createUserData(w http.ResponseWriter, r *http.Request, serviceID 
 		return
 	}
 	for _, e := range f.userData[serviceID] {
-		if e.Key == spec.Key {
-			writeErr(w, http.StatusBadRequest, "userDataKeyAlreadyExists", "that key exists; update it")
+		if strings.EqualFold(e.Key, spec.Key) {
+			writeErr(w, http.StatusBadRequest, "userDataDuplicateKey",
+				"Service environment variable key '"+spec.Key+"' is not unique (case insensitive).")
 			return
 		}
 	}
@@ -590,7 +654,9 @@ func (f *Fake) createUserData(w http.ResponseWriter, r *http.Request, serviceID 
 }
 
 // updateUserData is PUT /user-data/{id}. The body must carry the key beside
-// the content; the platform refuses one without it.
+// the content; the platform refuses one without it. Whether the platform
+// renames a variable whose stored key differs in case is not measured, so the
+// fake keeps the stored key: nothing may rely on a PUT to rename.
 func (f *Fake) updateUserData(w http.ResponseWriter, r *http.Request, id string) {
 	var spec zerops.UserDataSpec
 	_ = json.NewDecoder(r.Body).Decode(&spec)
@@ -608,9 +674,31 @@ func (f *Fake) updateUserData(w http.ResponseWriter, r *http.Request, id string)
 			if !f.userDataReachable(w, serviceID) {
 				return
 			}
-			f.userData[serviceID][i].Key = spec.Key
 			f.userData[serviceID][i].Content = spec.Content
 			writeJSON(w, 200, f.userData[serviceID][i])
+			return
+		}
+	}
+	writeErr(w, http.StatusNotFound, "userDataNotFound", "no such variable")
+}
+
+// deleteUserData is DELETE /user-data/{id}: 200 with a process.
+func (f *Fake) deleteUserData(w http.ResponseWriter, id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for serviceID, list := range f.userData {
+		for i, e := range list {
+			if e.ID != id {
+				continue
+			}
+			if !f.userDataReachable(w, serviceID) {
+				return
+			}
+			f.userData[serviceID] = append(list[:i:i], list[i+1:]...)
+			f.sequence++
+			proc := zerops.Process{ID: "proc-" + itoa(f.sequence), ServiceStackID: serviceID, Status: zerops.ProcessFinished, ActionName: "stack.userData.delete"}
+			f.processes[proc.ID] = proc
+			writeJSON(w, 200, proc)
 			return
 		}
 	}

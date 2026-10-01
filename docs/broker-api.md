@@ -54,24 +54,42 @@ the way it makes teams and bots true:
    `all` as every scope, a write scope as including its category's read. `write:issue` is what
    attaches a picture to the Mate's own pull request — Gitea's attachment routes are issue-scope and
    refuse a token without it (`403 required=[write:issue]`, measured on 1.27.2).
-3. **The Mate's environment** — with the broker's Zerops token, which the app granted `BASIC_USER`
-   on the Mate's project when it registered it, the loop finds the project's `zcp@1` service and
+3. **The Mate's environment** — with the broker's Zerops token (org `BASIC_USER`, which reaches
+   every Mate; an older org `READ_ONLY` token holds a per-project grant the app adds), the loop finds the project's `zcp@1` service and
    writes three service variables on it: `GITEA_URL` and `MATE_BROKER_URL` (plain) and
-   `GITEA_TOKEN` (sensitive). A variable already holding the right value is not written; a
-   `GITEA_URL` naming another Gitea means the token there is not ours, so the loop mints a new
+   `GITEA_TOKEN` (sensitive). Each write is an upsert: a variable the container holds — its key in
+   any case, since the platform holds one per key case-insensitively (`400 userDataDuplicateKey`) —
+   is updated by its id (one held under another case is deleted and created under its own name,
+   a token as it is), and only a key it does not hold is created; a create
+   refused as a duplicate means a read listed less than the container holds, so the loop reads the
+   variables again and updates the one found. A variable already holding the right value is not
+   written; a `GITEA_URL` naming another Gitea means the token there is not ours, so the loop mints a new
    generation and writes all three; a stale `MATE_BROKER_URL` alone is put right as a plain write. The loop never restarts the container: zcp reads these from the
    container's live env store, which the platform rewrites within seconds of the write (measured
    2026-09-16 and 2026-09-17).
 
-Ordering makes this safe at sign-up. The registry entry is written before the Mate's project has a
-container, and a write onto a service that is still `NEW` or `READY_TO_DEPLOY` is accepted and
+Ordering makes this safe at sign-up. The press that adds a Mate writes the registry entry in the
+foreground, right after it imports zcp, and nothing in a browser runs after it: the loop needs the
+entry and the `zcp@1` service, and nothing else — not the Mate's own key lowered, not a restart,
+not a later tag. A write onto a service that is still `NEW` or `READY_TO_DEPLOY` is accepted and
 present once it is `ACTIVE` (measured 2026-09-17), so the variables are usually there before zcp
 first looks. When they are not — the account's first project, where this broker is itself still
 building — zcp waits with backoff and the loop catches up on its first pass. A Mate registered
 later (an older project tagged into a group) is served on the next pass the same way.
 
+When that pass runs. A Zerops tag fires no Gitea hook, so the loop watches the registry: every 15
+seconds it reads the Gitea project's tags (`GET /project/{id}`, on the token it holds already) and
+passes at once when the registry differs from the one its last pass acted on; a pass reads the
+registry the same way, never from the lagging project search. When any pass — the watch's, a
+tick's, a hook's — meets a changed registry or leaves more Mates waiting than the last, and a Mate
+still waits — its `zcp@1` not listed, a write refused — the loop passes again every 30 seconds for
+five minutes, then falls back to the interval (three minutes). A pass takes 6
+seconds at the median and 40 at most (21 Mates, measured 2026-10-01), so a new Mate's variables land
+about 14 seconds after its press and within 95 at worst; the interval alone took about 96 seconds
+and up to 220.
+
 What the loop cannot do it reports and retries: a Mate project the broker's token does not reach
-(the app has not granted it yet), a project with no `zcp@1` service (nothing to write to), a
+(an older org `READ_ONLY` token the app has not granted the project yet), a project with no `zcp@1` service (nothing to write to), a
 platform refusal. None of these stops the pass for the other Mates. The plain variables are written
 first, and a generation is minted only after them; when `GITEA_TOKEN`'s own write is then refused
 (a 4xx), the generation just minted is deleted again. That rollback, not the plain writes (a

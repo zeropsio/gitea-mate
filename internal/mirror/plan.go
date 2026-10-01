@@ -102,6 +102,9 @@ type State struct {
 	// Registry is the parsed registry, and Problems what it could not take.
 	Registry registry.Registry
 	Problems []registry.Problem
+	// RegistryFingerprint is the registry as read, before deleted projects
+	// are taken out (registry.Fingerprint).
+	RegistryFingerprint string
 	// Gitea is the current Gitea state.
 	Gitea GiteaState
 	// Mates names each Mate project, so a bot can carry its Mate's name.
@@ -667,7 +670,9 @@ func (p *planner) planBots() {
 				p.do(Action{Kind: ShapeBot, Org: g.Slug, Login: login, FullName: name})
 				continue
 			}
-			if !user.Restricted || !user.Active {
+			// A bot made before the search listed its Mate's project has no
+			// name; it takes the Mate's once a pass knows it.
+			if !user.Restricted || !user.Active || (name != "" && user.FullName != name) {
 				p.do(Action{Kind: ShapeBot, Org: g.Slug, Login: login, FullName: name})
 			}
 		}

@@ -95,7 +95,14 @@ type Result struct {
 	// yet. It is information, not a problem: the account is made at the first
 	// sign-in.
 	AwaitingSignIn int
-	Plan           Plan
+	// MatesWaiting is how many registered Mates the pass left without their
+	// Git access: one it could not read, or whose delivery failed or was held
+	// back. The loop passes for them again sooner for a while after the
+	// registry changed.
+	MatesWaiting int
+	// Registry is the registry the pass acted on (registry.Fingerprint).
+	Registry string
+	Plan     Plan
 }
 
 // LogValue is what the loop logs: counts and nothing that identifies a
@@ -108,6 +115,7 @@ func (r Result) LogValue() slog.Value {
 		slog.Int("problems", len(r.Problems)),
 		slog.Int("failures", len(r.Failures)),
 		slog.Int("awaiting_sign_in", r.AwaitingSignIn),
+		slog.Int("mates_waiting", r.MatesWaiting),
 	)
 }
 
@@ -162,6 +170,7 @@ func (m *Mirror) Pass(ctx context.Context) (Result, error) {
 		Destructive:    plan.Destructive(),
 		Problems:       plan.Problems,
 		AwaitingSignIn: len(plan.AwaitingSignIn),
+		Registry:       state.RegistryFingerprint,
 		Plan:           plan,
 	}
 	if n := perGroup[""]; n > cap {
@@ -175,10 +184,41 @@ func (m *Mirror) Pass(ctx context.Context) (Result, error) {
 		}
 	}
 
-	applied, failures := m.Apply(ctx, apply)
+	applied, failures, failed := m.apply(ctx, apply)
 	result.Applied = applied
 	result.Failures = failures
+	result.MatesWaiting = matesWaiting(state, plan, apply, failed)
 	return result, nil
+}
+
+// matesWaiting counts the registered Mates a pass leaves without their Git
+// access: the ones it could not read, and the ones whose delivery was planned
+// and then failed or held back by the cap.
+func matesWaiting(state State, planned, applied Plan, failed []Action) int {
+	waiting := map[string]bool{}
+	for _, g := range state.Registry.Groups {
+		for _, prj := range g.Projects {
+			if _, read := state.MateServices[prj.ID]; prj.Kind == roles.KindMate && !read {
+				waiting[prj.ID] = true
+			}
+		}
+	}
+	for _, a := range planned.Actions {
+		if a.Kind == DeliverMateAccess {
+			waiting[a.Project] = true
+		}
+	}
+	for _, a := range applied.Actions {
+		if a.Kind == DeliverMateAccess {
+			delete(waiting, a.Project)
+		}
+	}
+	for _, a := range failed {
+		if a.Kind == DeliverMateAccess {
+			waiting[a.Project] = true
+		}
+	}
+	return len(waiting)
 }
 
 // Gather reads everything a pass needs. Any read that fails, or a project
@@ -285,22 +325,22 @@ func ReadOrgWith(ctx context.Context, z *zerops.Client, clientID, giteaProjectID
 		return State{}, fmt.Errorf("%w: the project list: %w", ErrUnreadable, err)
 	}
 
-	var giteaProject *zerops.Project
-	for i := range projects.Projects {
-		if projects.Projects[i].ID == giteaProjectID {
-			giteaProject = &projects.Projects[i]
-		}
-	}
-	if giteaProject == nil {
-		return State{}, fmt.Errorf("%w: the registry lives on project %s, which the project list does not carry", ErrUnreadable, giteaProjectID)
+	// The registry is read from the project itself, not from the search: the
+	// search's index lags the platform's reads by seconds (0.5–2.6 s,
+	// measured), and the loop's watch reads the project the same way, so a
+	// pass never acts on a registry older than the one the watch saw.
+	giteaProject, err := z.Project(ctx, giteaProjectID)
+	if err != nil {
+		return State{}, fmt.Errorf("%w: the registry on project %s: %w", ErrUnreadable, giteaProjectID, err)
 	}
 	reg, problems := registry.Parse(giteaProject.TagList)
 
 	state := State{
-		Registry:  reg,
-		Problems:  problems,
-		Overrides: map[string]map[string]roles.Role{},
-		Mates:     map[string]string{},
+		Registry:            reg,
+		RegistryFingerprint: registry.Fingerprint(giteaProject.TagList),
+		Problems:            problems,
+		Overrides:           map[string]map[string]roles.Role{},
+		Mates:               map[string]string{},
 	}
 
 	// clientUserId -> Zerops user id, so a project's userRoles can name people.
@@ -509,17 +549,36 @@ func (m *Mirror) gatherGitea(ctx context.Context, reg registry.Registry) (GiteaS
 // recorded and the pass continues: the next pass re-plans from whatever is
 // true then, which is the whole point of a reconcile.
 func (m *Mirror) Apply(ctx context.Context, plan Plan) (int, []string) {
+	applied, failures, _ := m.apply(ctx, plan)
+	return applied, failures
+}
+
+// apply is Apply that also answers which actions failed.
+func (m *Mirror) apply(ctx context.Context, plan Plan) (int, []string, []Action) {
 	applied := 0
 	var failures []string
+	var failed []Action
 	for _, a := range plan.Actions {
 		if err := m.perform(ctx, a); err != nil {
 			failures = append(failures, a.String()+": "+err.Error())
+			failed = append(failed, a)
 			m.log().Warn("mirror action failed", "action", a.String(), "err", err.Error())
 			continue
 		}
 		applied++
 	}
-	return applied, failures
+	return applied, failures, failed
+}
+
+// Registry reads the registry as the Gitea project carries it now — one call,
+// GET /project/{id}, on the project the broker's token holds — for the loop's
+// watch to compare with the one its last pass acted on.
+func (m *Mirror) Registry(ctx context.Context) (string, error) {
+	project, err := m.Zerops.Project(ctx, m.GiteaProjectID)
+	if err != nil {
+		return "", err
+	}
+	return registry.Fingerprint(project.TagList), nil
 }
 
 func (m *Mirror) perform(ctx context.Context, a Action) error {
@@ -596,10 +655,15 @@ func (m *Mirror) perform(ctx context.Context, a Action) error {
 		return err
 	case ShapeBot:
 		yes, no, zero := true, false, 0
-		_, err := m.Gitea.EditUser(ctx, a.Login, gitea.UserEdit{
+		edit := gitea.UserEdit{
 			Active: &yes, Restricted: &yes, MaxRepoCreation: &zero,
-			AllowCreateOrganization: &no, FullName: &a.FullName,
-		})
+			AllowCreateOrganization: &no,
+		}
+		// A name a pass does not know is left as it is, never blanked.
+		if a.FullName != "" {
+			edit.FullName = &a.FullName
+		}
+		_, err := m.Gitea.EditUser(ctx, a.Login, edit)
 		return err
 	case AddTeamMember:
 		id, err := m.teamID(ctx, a.Org, a.Team)

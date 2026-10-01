@@ -52,6 +52,12 @@ type UserDataSpec struct {
 	Sensitive bool   `json:"sensitive"`
 }
 
+// CodeUserDataDuplicateKey is the platform's refusal of a create whose key
+// the service holds already, compared in any case (measured 2026-09-30:
+// "Service environment variable key 'GITEA_URL' is not unique (case
+// insensitive)"). A variable that exists is updated by its id instead.
+const CodeUserDataDuplicateKey = "userDataDuplicateKey"
+
 // CreateUserData is POST /service-stack/{id}/user-data. It answers a process,
 // which the caller may wait on and the rights loop does not: the value is
 // present within seconds either way.
@@ -59,6 +65,13 @@ func (c *Client) CreateUserData(ctx context.Context, serviceID string, spec User
 	var out Process
 	_, err := c.do(ctx, "POST", "/service-stack/"+url.PathEscape(serviceID)+"/user-data", spec, &out)
 	return out, err
+}
+
+// DeleteUserData is DELETE /user-data/{id}. It answers a process, which the
+// rights loop does not wait on.
+func (c *Client) DeleteUserData(ctx context.Context, id string) error {
+	_, err := c.do(ctx, "DELETE", "/user-data/"+url.PathEscape(id), nil, nil)
+	return err
 }
 
 // UpdateUserData is PUT /user-data/{id}. The body carries the key beside the

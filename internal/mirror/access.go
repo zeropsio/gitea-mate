@@ -3,6 +3,7 @@ package mirror
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/zeropsio/gitea-mate/internal/gitea"
@@ -80,19 +81,28 @@ func (m *Mirror) readMate(ctx context.Context, projectID string) (MateService, s
 	if err != nil {
 		return MateService{}, unreachable("its container's variables", err)
 	}
-	out := MateService{ServiceID: zcp.ID, Vars: map[string]zerops.ServiceUserData{}}
-	for _, v := range vars {
-		out.Vars[v.Key] = v
-	}
-	return out, ""
+	return MateService{ServiceID: zcp.ID, Vars: byKey(vars)}, ""
 }
 
-// unreachable words a failed read. A 403 or 404 is the ordinary state of a
-// Mate the app has registered and not yet granted the broker.
+// byKey indexes a container's variables by their key in upper case: the
+// platform holds one variable per key in any case (400 userDataDuplicateKey,
+// "not unique (case insensitive)"), so a `gitea_url` is the GITEA_URL a
+// delivery updates, never one it creates beside it.
+func byKey(vars []zerops.ServiceUserData) map[string]zerops.ServiceUserData {
+	out := make(map[string]zerops.ServiceUserData, len(vars))
+	for _, v := range vars {
+		out[strings.ToUpper(v.Key)] = v
+	}
+	return out
+}
+
+// unreachable words a failed read. The app mints the broker's token at org
+// BASIC_USER, which reaches every Mate as the press registers it; a 403 or 404
+// is an older token at org READ_ONLY on a Mate the app has not granted it.
 func unreachable(what string, err error) string {
 	switch status := zerops.Status(err); status {
 	case 403, 404:
-		return fmt.Sprintf("%s could not be read (%d): the broker's token does not reach the project; the app has not granted it yet", what, status)
+		return fmt.Sprintf("%s could not be read (%d): the broker's token does not reach the project; an org READ_ONLY broker token reaches a Mate only once the app has granted it", what, status)
 	default:
 		return fmt.Sprintf("%s could not be read: %v", what, err)
 	}
@@ -131,7 +141,10 @@ func (p *planner) planMateAccess() {
 				!hasLive ||
 				!strings.HasSuffix(token.Content, newest.TokenLastEight) ||
 				!coversScopes(newest.Scopes, BotScopes)
-			write := mint || svc.Vars[VarBrokerURL].Content != p.opts.BrokerPublicURL
+			// A variable held under another case is one zcp does not read: it
+			// is replaced under its own name, the token as it is, unminted.
+			write := mint || svc.Vars[VarBrokerURL].Content != p.opts.BrokerPublicURL ||
+				miscased(svc.Vars, VarGiteaURL, VarBrokerURL, VarGiteaToken)
 			if !write {
 				continue
 			}
@@ -141,6 +154,16 @@ func (p *planner) planMateAccess() {
 			})
 		}
 	}
+}
+
+// miscased reports whether a container holds any of keys under another case.
+func miscased(vars map[string]zerops.ServiceUserData, keys ...string) bool {
+	for _, k := range keys {
+		if v, ok := vars[k]; ok && v.Key != k {
+			return true
+		}
+	}
+	return false
 }
 
 // coversScopes reports whether a token minted with have may do everything
@@ -199,20 +222,20 @@ func (m *Mirror) deliverMateAccess(ctx context.Context, a Action) error {
 	if err != nil {
 		return fmt.Errorf("the container's variables: %w", err)
 	}
-	byKey := map[string]zerops.ServiceUserData{}
-	for _, v := range have {
-		byKey[v.Key] = v
-	}
+	held := byKey(have)
 
 	for _, spec := range []zerops.UserDataSpec{
 		{Key: VarGiteaURL, Content: m.GiteaPublicURL},
 		{Key: VarBrokerURL, Content: m.BrokerPublicURL},
 	} {
-		if err := m.writeVar(ctx, a.Service, byKey, spec); err != nil {
+		if err := m.writeVar(ctx, a.Service, held, spec); err != nil {
 			return err
 		}
 	}
 	if !a.Mint {
+		if tok, ok := held[VarGiteaToken]; ok && tok.Key != VarGiteaToken {
+			return m.writeVar(ctx, a.Service, held, zerops.UserDataSpec{Key: VarGiteaToken, Content: tok.Content, Sensitive: true})
+		}
 		return nil
 	}
 
@@ -231,7 +254,7 @@ func (m *Mirror) deliverMateAccess(ctx context.Context, a Action) error {
 	if err != nil {
 		return fmt.Errorf("minting generation %d: %w", newest+1, err)
 	}
-	if err := m.writeVar(ctx, a.Service, byKey, zerops.UserDataSpec{Key: VarGiteaToken, Content: minted.Value, Sensitive: true}); err != nil {
+	if err := m.writeVar(ctx, a.Service, held, zerops.UserDataSpec{Key: VarGiteaToken, Content: minted.Value, Sensitive: true}); err != nil {
 		// A 4xx is a definite refusal: nobody holds the generation just
 		// minted, and it goes again. This, not the plain writes, keeps a
 		// refusing container from piling generations up; a delete that
@@ -249,19 +272,61 @@ func (m *Mirror) deliverMateAccess(ctx context.Context, a Action) error {
 	return nil
 }
 
-// writeVar makes one variable of a container hold spec: created when missing,
-// updated when different, left alone when it already does.
-func (m *Mirror) writeVar(ctx context.Context, service string, byKey map[string]zerops.ServiceUserData, spec zerops.UserDataSpec) error {
-	cur, exists := byKey[spec.Key]
-	switch {
-	case !exists:
-		if _, err := m.Zerops.CreateUserData(ctx, service, spec); err != nil {
-			return fmt.Errorf("creating %s: %w", spec.Key, err)
+// writeVar makes one variable of a container hold spec — an upsert: updated
+// by its id when the container holds the key in any case (and renamed to
+// spec's own case, the one zcp reads), created only when it holds none, left
+// alone when it already holds the value. A create the platform refuses as a
+// duplicate means a read listed less than the container holds — the paged
+// list of 2026-09-30, or a variable written a moment ago — so the variables
+// are read again into held and the one found is updated; a variable no read
+// lists returns the refusal, since an update needs its id.
+func (m *Mirror) writeVar(ctx context.Context, service string, held map[string]zerops.ServiceUserData, spec zerops.UserDataSpec) error {
+	cur, exists := held[strings.ToUpper(spec.Key)]
+	if !exists {
+		_, err := m.Zerops.CreateUserData(ctx, service, spec)
+		if zerops.Code(err) != zerops.CodeUserDataDuplicateKey {
+			if err != nil {
+				return fmt.Errorf("creating %s: %w", spec.Key, err)
+			}
+			return nil
 		}
-	case cur.Content != spec.Content:
-		if err := m.Zerops.UpdateUserData(ctx, cur.ID, spec.Key, spec.Content); err != nil {
-			return fmt.Errorf("updating %s: %w", spec.Key, err)
+		again, readErr := m.Zerops.UserData(ctx, service)
+		if readErr != nil {
+			return fmt.Errorf("creating %s: %w; reading the container's variables again: %w", spec.Key, err, readErr)
 		}
+		clear(held)
+		maps.Copy(held, byKey(again))
+		if cur, exists = held[strings.ToUpper(spec.Key)]; !exists {
+			return fmt.Errorf("creating %s: %w, and no read lists it", spec.Key, err)
+		}
+	}
+	if cur.Key != spec.Key {
+		return m.replaceVar(ctx, service, held, cur, spec)
+	}
+	if cur.Content == spec.Content {
+		return nil
+	}
+	if err := m.Zerops.UpdateUserData(ctx, cur.ID, spec.Key, spec.Content); err != nil {
+		return fmt.Errorf("updating %s: %w", spec.Key, err)
+	}
+	return nil
+}
+
+// replaceVar moves a variable held under another case to spec's own: it is
+// deleted by its id and created anew, two calls whose semantics are known,
+// where an update's renaming of a key is not measured. It is one attempt a
+// pass — a delivery writes each variable once — and a refusal is said at Info
+// and returned, so the next pass tries again and nothing is minted past it.
+func (m *Mirror) replaceVar(ctx context.Context, service string, held map[string]zerops.ServiceUserData, cur zerops.ServiceUserData, spec zerops.UserDataSpec) error {
+	err := m.Zerops.DeleteUserData(ctx, cur.ID)
+	if err == nil {
+		delete(held, strings.ToUpper(spec.Key))
+		_, err = m.Zerops.CreateUserData(ctx, service, spec)
+	}
+	if err != nil {
+		m.log().Info("a variable held under another case could not be moved to its own name; the next pass tries again",
+			"service", service, "key", spec.Key, "err", err.Error())
+		return fmt.Errorf("moving %s to its own name: %w", spec.Key, err)
 	}
 	return nil
 }
