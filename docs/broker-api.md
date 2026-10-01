@@ -59,7 +59,8 @@ the way it makes teams and bots true:
    writes three service variables on it: `GITEA_URL` and `MATE_BROKER_URL` (plain) and
    `GITEA_TOKEN` (sensitive). Each write is an upsert: a variable the container holds — its key in
    any case, since the platform holds one per key case-insensitively (`400 userDataDuplicateKey`) —
-   is updated by its id under its own name, and only a key it does not hold is created; a create
+   is updated by its id (one held under another case is deleted and created under its own name,
+   a token as it is), and only a key it does not hold is created; a create
    refused as a duplicate means a read listed less than the container holds, so the loop reads the
    variables again and updates the one found. A variable already holding the right value is not
    written; a `GITEA_URL` naming another Gitea means the token there is not ours, so the loop mints a new
@@ -78,9 +79,11 @@ later (an older project tagged into a group) is served on the next pass the same
 
 When that pass runs. A Zerops tag fires no Gitea hook, so the loop watches the registry: every 15
 seconds it reads the Gitea project's tags (`GET /project/{id}`, on the token it holds already) and
-passes at once when the registry differs from the one its last pass acted on. While a Mate that pass
-could not serve yet still waits — its `zcp@1` not listed, a write refused — it passes again every
-30 seconds for five minutes, then falls back to the interval (three minutes). A pass takes 6
+passes at once when the registry differs from the one its last pass acted on; a pass reads the
+registry the same way, never from the lagging project search. When any pass — the watch's, a
+tick's, a hook's — meets a changed registry or leaves more Mates waiting than the last, and a Mate
+still waits — its `zcp@1` not listed, a write refused — the loop passes again every 30 seconds for
+five minutes, then falls back to the interval (three minutes). A pass takes 6
 seconds at the median and 40 at most (21 Mates, measured 2026-10-01), so a new Mate's variables land
 about 14 seconds after its press and within 95 at worst; the interval alone took about 96 seconds
 and up to 220.
