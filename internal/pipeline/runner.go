@@ -202,6 +202,9 @@ func (p *Pipeline) importRunner(ctx context.Context, slug, hostname string) erro
 	}
 
 	if err := p.sweepRunners(ctx, slug); err != nil {
+		if errors.Is(err, errSweepHeld) {
+			return nil // said once, by the sweep
+		}
 		return err
 	}
 
@@ -317,6 +320,10 @@ type sweepHold struct {
 	next   time.Time
 }
 
+// errSweepHeld is a sweep that did not finish and has said so: the import
+// waits, and its caller has nothing more to report.
+var errSweepHeld = errors.New("the sweep is held")
+
 // sweepWaits reports a group whose last sweep failed and whose next may not
 // start yet: its import waits, and nothing is read or logged until then.
 func (p *Pipeline) sweepWaits(slug string) bool {
@@ -366,8 +373,8 @@ func (p *Pipeline) sweepFailed(ctx context.Context, slug string, deleted int, re
 		attrs = append(attrs, "remain", remain)
 	}
 	p.log().Warn("the runner registrations of a group could not all be deleted, so its runner is not imported yet", attrs...)
-	return fmt.Errorf("the runner registrations of %s are not all deleted; the import waits until %s",
-		slug, hold.next.Format(time.RFC3339))
+	return fmt.Errorf("the runner registrations of %s are not all deleted; the import waits until %s: %w",
+		slug, hold.next.Format(time.RFC3339), errSweepHeld)
 }
 
 // ---------------------------------------------------------------------------

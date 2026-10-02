@@ -220,8 +220,12 @@ func TestASweepThatFailsHoldsTheImport(t *testing.T) {
 				t.Fatalf("deleted %v and imported %d, want the tainted runner deleted and none imported",
 					w.zerops.DeletedServices, len(w.zerops.Imports))
 			}
-			if n := strings.Count(logs.String(), "registrations of a group"); n != 1 {
-				t.Fatalf("the failed sweep was logged %d times, want once:\n%s", n, logs)
+			want := []string{
+				"a group's runner ran unreviewed code; it is replaced before any key goes near it",
+				"the runner registrations of a group could not all be deleted, so its runner is not imported yet",
+			}
+			if got := warnings(logs); !slices.Equal(got, want) {
+				t.Fatalf("the failed replacement warned %q, want %q", got, want)
 			}
 			if !strings.Contains(logs.String(), tc.deleted+" ") {
 				t.Fatalf("the failed sweep did not count %s:\n%s", tc.deleted, logs)
@@ -441,4 +445,21 @@ func TestASweepStopsWithItsContext(t *testing.T) {
 	if left := w.gitea.Runners("acme"); len(left) != 0 || len(w.zerops.Imports) != 1 {
 		t.Fatalf("the next import left %d registrations and imported %d, want 0 and 1", len(left), len(w.zerops.Imports))
 	}
+}
+
+// warnings is the message of every WARN line in a log, in order.
+func warnings(logs *lockedBuffer) []string {
+	var out []string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if !strings.Contains(line, "level=WARN") {
+			continue
+		}
+		_, msg, ok := strings.Cut(line, `msg="`)
+		if !ok {
+			continue
+		}
+		msg, _, _ = strings.Cut(msg, `"`)
+		out = append(out, msg)
+	}
+	return out
 }
