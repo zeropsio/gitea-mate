@@ -181,6 +181,15 @@ touched:
    the runner service was created fails check 1, the runner may hold a process that reads the next
    job's key: `503 runner_tainted`, the runner is deleted and imported afresh, and the deploy is
    dispatched again (`503 runner_unknown` when the runner cannot be found or aged).
+   Between the deletion and the import, every runner registration of the group's org is deleted
+   (`GET` + `DELETE /orgs/{org}/actions/runners…`, at most four pages of 50 per attempt): a root
+   job could have copied the runner's own credential, which fetches jobs until its registration
+   is gone, and the org's registration token. Gitea 1.27.2 offers no API that resets that token —
+   `POST …/registration-token` answers the org's latest active one and mints only when there is
+   none — so the replacement registers with the same token, and a registration somebody makes
+   with it after the sweep is not told apart from the broker's. Registrations left over hold the
+   import back until a pass sweeps them; the sweep is a taint's alone, and a broker restarted
+   between the deletion and the import forgets it.
 7. **The key.** The environment's deploy token, from the variable `MATE_DEPLOY_TOKEN_{HEX}` on the
    broker's own service (`docs/vocabulary.md`): `424 no_deploy_token` when nobody minted one.
 
