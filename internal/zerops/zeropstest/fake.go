@@ -78,6 +78,14 @@ type Fake struct {
 	// FailDeletes makes the process a deletion answers end FAILED — what a
 	// service the platform would not remove looks like.
 	FailDeletes bool
+	// FailImports makes a service-stack import a 400 whose message quotes the
+	// document — what a refusal that echoes its input looks like.
+	FailImports bool
+	// importBuild, when set, makes an import do what the platform's does: each
+	// service in the document appears READY_TO_DEPLOY, made now, and the import
+	// answers its stack.create and stack.build processes, the build ending
+	// with this status. Unset, an import is only recorded.
+	importBuild string
 	// Ungranted is the projects this API's tokens were never granted: a
 	// service search on one, and the user data of its services, answer 403 —
 	// what a Mate project the app has not yet granted the broker looks like.
@@ -731,7 +739,54 @@ func (f *Fake) importServices(w http.ResponseWriter, r *http.Request, path strin
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Imports = append(f.Imports, Import{ProjectID: projectID, Yaml: body.Yaml})
-	writeJSON(w, 200, map[string]any{"serviceStacks": []any{}})
+	if f.FailImports {
+		writeErr(w, 400, "invalidImportYaml", "the import could not be read: "+body.Yaml)
+		return
+	}
+	if f.importBuild == "" {
+		writeJSON(w, 200, map[string]any{"serviceStacks": []any{}})
+		return
+	}
+	type process struct {
+		ID string `json:"id"`
+	}
+	type stack struct {
+		ID        string    `json:"id"`
+		Name      string    `json:"name"`
+		Processes []process `json:"processes"`
+	}
+	var stacks []stack
+	for _, line := range strings.Split(body.Yaml, "\n") {
+		hostname, ok := strings.CutPrefix(strings.TrimSpace(line), "- hostname: ")
+		if !ok {
+			continue
+		}
+		f.sequence++
+		service := zerops.Service{
+			ID: "svc-imported-" + itoa(f.sequence), ProjectID: projectID, ClientID: f.ClientID,
+			Name: hostname, Status: "READY_TO_DEPLOY", Created: f.Now,
+		}
+		if f.importBuild == zerops.ProcessFinished {
+			service.Status = "ACTIVE"
+		}
+		f.services[projectID] = append(f.services[projectID], service)
+		created := zerops.Process{ID: "proc-" + itoa(f.sequence) + "-create", ServiceStackID: service.ID,
+			Status: zerops.ProcessFinished, ActionName: "stack.create"}
+		build := zerops.Process{ID: "proc-" + itoa(f.sequence) + "-build", ServiceStackID: service.ID,
+			Status: f.importBuild, ActionName: "stack.build"}
+		f.processes[created.ID], f.processes[build.ID] = created, build
+		stacks = append(stacks, stack{ID: service.ID, Name: hostname,
+			Processes: []process{{ID: created.ID}, {ID: build.ID}}})
+	}
+	writeJSON(w, 200, map[string]any{"serviceStacks": stacks})
+}
+
+// BuildImports makes every later import create its services and end their
+// builds with status: FAILED is a build that could not fetch its inputs.
+func (f *Fake) BuildImports(status string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.importBuild = status
 }
 
 func (f *Fake) stopStart(w http.ResponseWriter, path string) {

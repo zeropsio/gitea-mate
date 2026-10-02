@@ -77,6 +77,16 @@ type Pipeline struct {
 	runnerImport map[string]bool
 	// replacing is the runners being thrown away right now, by hostname.
 	replacing map[string]bool
+	// runnerWork is every runner build being watched and every runner
+	// replacement running on the broker's own context.
+	runnerWork sync.WaitGroup
+	// failedBuilds is the runner services, by id, whose build the broker
+	// watched end without finishing. runnerRepairs is, by hostname, when each
+	// replacement of a broken runner started since that group's runner last
+	// ran. Both are memory only: a restart forgets them, and the age rule and
+	// the next pass find a broken runner again.
+	failedBuilds  map[string]bool
+	runnerRepairs map[string][]time.Time
 }
 
 func (p *Pipeline) log() *slog.Logger {

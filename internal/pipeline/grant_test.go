@@ -292,13 +292,7 @@ func TestARunnerThatRanABranchsWorkflowGetsNoKey(t *testing.T) {
 		if refusal.Code != "runner_tainted" || refusal.Status != http.StatusServiceUnavailable || grant.Token != "" {
 			t.Fatalf("refused %+v with %+v, want runner_tainted and no key", refusal, grant)
 		}
-		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) {
-			if len(w.zerops.DeletedServices) > 0 {
-				break
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
+		w.pipe.WaitRunnerWork()
 		if len(w.zerops.DeletedServices) != 1 || w.zerops.DeletedServices[0] != "svc-runner" {
 			t.Fatalf("deleted %v, want the tainted runner", w.zerops.DeletedServices)
 		}

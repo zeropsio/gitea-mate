@@ -93,6 +93,9 @@ type Fake struct {
 
 	// Calls is every "METHOD /path" the fake served.
 	Calls []string
+	// registrations counts the runner registration tokens minted: each one is
+	// fresh, as Gitea's are.
+	registrations int
 	// Fail forces a status for one "METHOD /path".
 	Fail map[string]int
 }
@@ -419,7 +422,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && strings.HasPrefix(path, "/orgs/") && strings.HasSuffix(path, "/actions/runs"):
 		f.listRuns(w, r, seg(path, 2))
 	case r.Method == "POST" && strings.HasSuffix(path, "/actions/runners/registration-token"):
-		writeJSON(w, 200, map[string]string{"token": "fake-registration-token"})
+		f.registrations++
+		writeJSON(w, 200, map[string]string{"token": "fake-registration-" + "token-" + strconv.Itoa(f.registrations)})
 	case r.Method == "POST" && strings.HasSuffix(path, "/teams"):
 		f.createTeam(w, r, seg(path, 2))
 	case r.Method == "GET" && strings.HasSuffix(path, "/teams"):
