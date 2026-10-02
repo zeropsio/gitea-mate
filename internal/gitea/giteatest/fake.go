@@ -100,6 +100,13 @@ type Fake struct {
 	registrations int
 	// Fail forces a status for one "METHOD /path".
 	Fail map[string]int
+	// Trace, when set, hears every "METHOD /path" as it is served — a test
+	// that orders this fake's calls against another's.
+	Trace func(call string)
+	// ReorderRunners, when set, rearranges an org's runners before each
+	// listing is paged: Gitea orders them by a status computed from the clock,
+	// so a row can move between two reads.
+	ReorderRunners func([]gitea.Runner) []gitea.Runner
 }
 
 // New starts a fake Gitea with a site admin and closes it when the test ends.
@@ -372,7 +379,11 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.Calls = append(f.Calls, key)
 	forced := f.Fail[key]
+	trace := f.Trace
 	f.mu.Unlock()
+	if trace != nil {
+		trace(key)
+	}
 
 	if forced != 0 {
 		fail(w, forced, "the test forced this refusal")
@@ -1257,7 +1268,10 @@ func (f *Fake) listRunners(w http.ResponseWriter, r *http.Request, org string) {
 	if limit < 1 || limit > 50 {
 		limit = 50
 	}
-	all := f.runners[org]
+	all := slices.Clone(f.runners[org])
+	if f.ReorderRunners != nil {
+		all = f.ReorderRunners(all)
+	}
 	start := min((page-1)*limit, len(all))
 	end := min(start+limit, len(all))
 	writeJSON(w, 200, map[string]any{"total_count": len(all), "runners": all[start:end]})

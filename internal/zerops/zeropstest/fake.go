@@ -62,6 +62,9 @@ type Fake struct {
 	// Requests logs every call, so a test can assert that a refused pass wrote
 	// nothing.
 	Requests []string
+	// Trace, when set, hears every "METHOD /path" as it is served — a test
+	// that orders this fake's calls against another's.
+	Trace func(call string)
 	// stopped and started track PUT /service-stack/{id}/stop|start. They are
 	// read through IsStopped and Started, under the lock: the fake serves
 	// requests on its own goroutines, so a test that indexed the map directly
@@ -329,7 +332,11 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	identity, known := f.identities[bearer(r)]
+	trace := f.Trace
 	f.mu.Unlock()
+	if trace != nil {
+		trace(key)
+	}
 
 	if forced != 0 {
 		writeErr(w, forced, "forced", "the test forced this refusal")
