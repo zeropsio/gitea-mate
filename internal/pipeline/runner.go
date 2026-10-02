@@ -313,16 +313,28 @@ sweep:
 	return p.sweepFailed(ctx, slug, deleted, remain, err)
 }
 
-// sweepHold is a group whose sweep failed: how many attempts in a row, and
-// when the next may start.
+// sweepHold is a group whose sweep did not finish: how many attempts in a
+// row deleted nothing, and when the next may start.
 type sweepHold struct {
-	failed int
-	next   time.Time
+	stalled int
+	next    time.Time
 }
 
 // errSweepHeld is a sweep that did not finish and has said so: the import
 // waits, and its caller has nothing more to report.
 var errSweepHeld = errors.New("the sweep is held")
+
+// sweepWait is how long a group's import waits after a sweep that did not
+// finish, given how many attempts in a row deleted nothing: the base wait
+// after one that deleted something, then twice as long for each that did not,
+// up to the cap — a broken runner's rebuild waits.
+func sweepWait(stalled int) time.Duration {
+	wait := runnerRepairBackoff
+	for i := 1; i < stalled && wait < runnerRepairBackoffCap; i++ {
+		wait *= 2
+	}
+	return min(wait, runnerRepairBackoffCap)
+}
 
 // sweepWaits reports a group whose last sweep failed and whose next may not
 // start yet: its import waits, and nothing is read or logged until then.
@@ -344,9 +356,10 @@ func (p *Pipeline) sweepDone(slug string, deleted int) {
 }
 
 // sweepFailed holds a group's import back after a sweep that did not finish,
-// for the waits a broken runner's rebuild keeps — two minutes, doubling up to
-// six hours — and says so once. A sweep its caller's context cut short is not
-// the org's fault and starts no wait.
+// for sweepWait, and says so once. An attempt that deleted something made
+// progress, so the next waits only the base wait; only attempts that deleted
+// nothing double it. A sweep its caller's context cut short is not the org's
+// fault and starts no wait.
 func (p *Pipeline) sweepFailed(ctx context.Context, slug string, deleted int, remain int64, err error) error {
 	if ctx.Err() != nil {
 		p.log().Info("a sweep of a group's runner registrations was cut short; the next import sweeps again",
@@ -358,16 +371,16 @@ func (p *Pipeline) sweepFailed(ctx context.Context, slug string, deleted int, re
 		p.sweepHeld = map[string]sweepHold{}
 	}
 	hold := p.sweepHeld[slug]
-	hold.failed++
-	wait := runnerRepairBackoff
-	for i := 1; i < hold.failed && wait < runnerRepairBackoffCap; i++ {
-		wait *= 2
+	if deleted > 0 {
+		hold.stalled = 0
+	} else {
+		hold.stalled++
 	}
-	hold.next = p.now().Add(min(wait, runnerRepairBackoffCap))
+	hold.next = p.now().Add(sweepWait(hold.stalled))
 	p.sweepHeld[slug] = hold
 	p.mu.Unlock()
 
-	attrs := []any{"group", slug, "deleted", deleted, "failed_in_a_row", hold.failed,
+	attrs := []any{"group", slug, "deleted", deleted, "stalled_in_a_row", hold.stalled,
 		"next", hold.next.Format(time.RFC3339), "err", err.Error()}
 	if remain >= 0 {
 		attrs = append(attrs, "remain", remain)

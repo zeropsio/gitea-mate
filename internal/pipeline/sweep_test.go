@@ -12,6 +12,7 @@ import (
 
 	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/gitea"
+	"github.com/zeropsio/gitea-mate/internal/pipeline"
 	"github.com/zeropsio/gitea-mate/internal/registry"
 	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
@@ -260,7 +261,7 @@ func TestASweepThatFailsHoldsTheImport(t *testing.T) {
 func TestASweepIsBounded(t *testing.T) {
 	t.Parallel()
 	w, logs, at := taintedWorld(t)
-	for range 4*50 - 1 { // with the two seeded: one past the bound
+	for range 2*4*50 - 1 { // with the two seeded: two attempts' worth and one more
 		w.gitea.AddRunner("acme", "runneracme-x")
 	}
 	taint(t, w)
@@ -271,44 +272,73 @@ func TestASweepIsBounded(t *testing.T) {
 	if len(w.zerops.Imports) != 0 {
 		t.Fatalf("imported %d runners with registrations left, want none", len(w.zerops.Imports))
 	}
-	if !strings.Contains(logs.String(), "remain=1") {
-		t.Fatalf("the log does not say one registration remains:\n%s", logs)
+	if !strings.Contains(logs.String(), "remain=201") {
+		t.Fatalf("the log does not say 201 registrations remain:\n%s", logs)
 	}
 
+	// An attempt that deleted something is retried at the base wait, never a
+	// doubled one: the second at two minutes, the third two minutes after.
 	waiting(w)
 	at(2*time.Minute + time.Second)
 	pass(t, w)
+	if n := callsTo(w, deleteRunner); n != 400 || len(w.zerops.Imports) != 0 {
+		t.Fatalf("after the second attempt %d were deleted and %d runners imported, want 400 and 0", n, len(w.zerops.Imports))
+	}
+	at(4*time.Minute + 2*time.Second)
+	pass(t, w)
 	if left := w.gitea.Runners("acme"); len(left) != 0 || len(w.zerops.Imports) != 1 {
-		t.Fatalf("after the second attempt the org holds %d and %d runners were imported, want 0 and 1",
+		t.Fatalf("after the third attempt the org holds %d and %d runners were imported, want 0 and 1",
 			len(left), len(w.zerops.Imports))
 	}
 }
 
-// TestASweepSurvivesRowsThatMove — Gitea orders an org's runners by a status
-// it computes from the clock, so a row can cross a page boundary between two
-// reads. The sweep lists the first page again after each round of deletions
-// and ends only when the org holds none.
-func TestASweepSurvivesRowsThatMove(t *testing.T) {
+// TestASweepThatDeletesNothingWaitsLonger — an attempt that deleted nothing
+// doubles the wait before the next: a list that keeps failing is read at two
+// minutes, then four, then eight.
+func TestASweepThatDeletesNothingWaitsLonger(t *testing.T) {
 	t.Parallel()
-	w, _, _ := taintedWorld(t)
-	for range 58 { // sixty in all: more than a page
-		w.gitea.AddRunner("acme", "runneracme-x")
+	w, _, at := taintedWorld(t)
+	w.gitea.Fail[listRunners] = http.StatusServiceUnavailable
+	taint(t, w)
+	waiting(w)
+
+	clock := time.Duration(0)
+	for _, wait := range []time.Duration{2 * time.Minute, 4 * time.Minute, 8 * time.Minute} {
+		lists := callsTo(w, listRunners)
+		at(clock + wait - time.Second)
+		pass(t, w)
+		if n := callsTo(w, listRunners); n != lists {
+			t.Fatalf("a pass a second inside the %s wait listed the registrations", wait)
+		}
+		clock += wait
+		at(clock)
+		pass(t, w)
+		if n := callsTo(w, listRunners); n != lists+1 {
+			t.Fatalf("the pass at the end of the %s wait listed the registrations %d times, want once", wait, n-lists)
+		}
 	}
-	reads := 0
+}
+
+// TestASweepWhoseListKeepsADeletedRowIsHeld — a registration Gitea still lists
+// after the sweep deleted it is no progress: the round ends, the import is
+// held, and the attempt says so once.
+func TestASweepWhoseListKeepsADeletedRowIsHeld(t *testing.T) {
+	t.Parallel()
+	w, logs, _ := taintedWorld(t)
+	ghost := w.gitea.Runners("acme")[0]
 	w.gitea.ReorderRunners = func(runners []gitea.Runner) []gitea.Runner {
-		reads++
-		if reads%2 == 0 {
-			slices.Reverse(runners)
+		if !slices.ContainsFunc(runners, func(r gitea.Runner) bool { return r.ID == ghost.ID }) {
+			runners = append(runners, ghost)
 		}
 		return runners
 	}
 	taint(t, w)
 
-	if left := w.gitea.Runners("acme"); len(left) != 0 {
-		t.Fatalf("the org still holds %d registrations, want none", len(left))
+	if len(w.zerops.Imports) != 0 {
+		t.Fatalf("imported %d runners while a deleted registration is still listed, want none", len(w.zerops.Imports))
 	}
-	if len(w.zerops.Imports) != 1 {
-		t.Fatalf("imported %d runners, want the replacement", len(w.zerops.Imports))
+	if n := strings.Count(logs.String(), "already deleted"); n != 1 {
+		t.Fatalf("the held sweep said why %d times, want once:\n%s", n, logs)
 	}
 }
 
@@ -341,6 +371,34 @@ func TestAPassNeverSweepsARunnerAWebhookImported(t *testing.T) {
 	}
 	if left := w.gitea.Runners("acme"); !slices.ContainsFunc(left, func(r gitea.Runner) bool { return r.ID == live }) {
 		t.Fatalf("the org holds %+v, want the live runner's registration kept", left)
+	}
+}
+
+// TestASweepSurvivesRowsThatMove — Gitea orders an org's runners by a status
+// it computes from the clock, so a row can cross a page boundary between two
+// reads. The sweep lists the first page again after each round of deletions
+// and ends only when the org holds none.
+func TestASweepSurvivesRowsThatMove(t *testing.T) {
+	t.Parallel()
+	w, _, _ := taintedWorld(t)
+	for range 58 { // sixty in all: more than a page
+		w.gitea.AddRunner("acme", "runneracme-x")
+	}
+	reads := 0
+	w.gitea.ReorderRunners = func(runners []gitea.Runner) []gitea.Runner {
+		reads++
+		if reads%2 == 0 {
+			slices.Reverse(runners)
+		}
+		return runners
+	}
+	taint(t, w)
+
+	if left := w.gitea.Runners("acme"); len(left) != 0 {
+		t.Fatalf("the org still holds %d registrations, want none", len(left))
+	}
+	if len(w.zerops.Imports) != 1 {
+		t.Fatalf("imported %d runners, want the replacement", len(w.zerops.Imports))
 	}
 }
 
@@ -462,4 +520,26 @@ func warnings(logs *lockedBuffer) []string {
 		out = append(out, msg)
 	}
 	return out
+}
+
+// TestTheSweepsWait — the base wait after an attempt that deleted something,
+// doubled for each in a row that deleted nothing, never past six hours.
+func TestTheSweepsWait(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		stalled int
+		want    time.Duration
+	}{
+		{0, 2 * time.Minute},
+		{1, 2 * time.Minute},
+		{2, 4 * time.Minute},
+		{3, 8 * time.Minute},
+		{8, 256 * time.Minute},
+		{9, 6 * time.Hour},
+		{40, 6 * time.Hour},
+	} {
+		if got := pipeline.SweepWait(tc.stalled); got != tc.want {
+			t.Errorf("SweepWait(%d) = %s, want %s", tc.stalled, got, tc.want)
+		}
+	}
 }
