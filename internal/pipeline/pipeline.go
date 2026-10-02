@@ -80,13 +80,15 @@ type Pipeline struct {
 	// runnerWork is every runner build being watched and every runner
 	// replacement running on the broker's own context.
 	runnerWork sync.WaitGroup
-	// failedBuilds is the runner services, by id, whose build the broker
-	// watched end without finishing. runnerRepairs is, by hostname, when each
-	// replacement of a broken runner started since that group's runner last
-	// ran. Both are memory only: a restart forgets them, and the age rule and
-	// the next pass find a broken runner again.
-	failedBuilds  map[string]bool
-	runnerRepairs map[string][]time.Time
+	// queuedAt is, by runner hostname, when a job of its group last queued —
+	// what lets a group whose builds keep failing try again. runnerStopped is
+	// the hostnames whose builds stopped being retried, and sharedSaid those
+	// two groups share that the log has named. All three are memory only: what
+	// bounds a rebuild is read from the platform, and a restart only means one
+	// more read of it.
+	queuedAt      map[string]time.Time
+	runnerStopped map[string]bool
+	sharedSaid    map[string]bool
 }
 
 func (p *Pipeline) log() *slog.Logger {
