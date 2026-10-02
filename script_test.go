@@ -8,11 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // gitea/wait-for-url.sh is what stands between Gitea's `admin auth add-oauth`
@@ -561,5 +564,56 @@ func TestGiteaRuntimeShipsTheVerifier(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "- gitea/verify-admin.sh") {
 		t.Error("zerops.yaml does not deploy gitea/verify-admin.sh")
+	}
+}
+
+// TestEveryBuildDownloadRetries: a build that fetches its inputs fails on one
+// dropped TLS handshake unless curl retries. Run 4 (2026-10-02) lost a group's
+// first runner to `exit status 35` on a URL that answered 200 a minute later,
+// and plain --retry does not count exit 35 as transient, so every download in
+// a build or prepare command retries on any error, with a bound on each
+// connect.
+func TestEveryBuildDownloadRetries(t *testing.T) {
+	raw, err := os.ReadFile("zerops.yaml")
+	if err != nil {
+		t.Fatalf("reading zerops.yaml: %v", err)
+	}
+	var doc struct {
+		Zerops []struct {
+			Setup string `yaml:"setup"`
+			Build struct {
+				Prepare []string `yaml:"prepareCommands"`
+				Build   []string `yaml:"buildCommands"`
+			} `yaml:"build"`
+			Run struct {
+				Prepare []string `yaml:"prepareCommands"`
+			} `yaml:"run"`
+		} `yaml:"zerops"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parsing zerops.yaml: %v", err)
+	}
+	invokes := regexp.MustCompile(`(^|[;&|]\s*)curl\s`)
+	downloads := 0
+	for _, setup := range doc.Zerops {
+		var commands []string
+		commands = append(commands, setup.Build.Prepare...)
+		commands = append(commands, setup.Build.Build...)
+		commands = append(commands, setup.Run.Prepare...)
+		for _, command := range commands {
+			if !invokes.MatchString(command) {
+				continue
+			}
+			downloads++
+			for _, flag := range []string{"--retry ", "--retry-all-errors", "--connect-timeout "} {
+				if !strings.Contains(command, flag) {
+					t.Errorf("setup %s: %q has no %s", setup.Setup, command, strings.TrimSpace(flag))
+				}
+			}
+		}
+	}
+	// gitea's binary, the runner's binary and zcli.
+	if downloads < 3 {
+		t.Fatalf("found %d downloads, want at least 3", downloads)
 	}
 }
