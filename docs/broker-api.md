@@ -237,7 +237,7 @@ A group's runner service is imported when its first job queues, and that job wai
 registers. A runner whose build failed never registers — run 4 (2026-10-02) lost one to a single
 dropped TLS handshake on a download: the service sat `READY_TO_DEPLOY`, nothing started it, and the
 job would have waited for good. So the broker treats a broken runner like a missing one: it deletes
-the service and imports a fresh one with a freshly minted registration token.
+the service and imports a fresh one, with the org's registration token read for the import.
 
 - **Broken** is a runner service that is `READY_TO_DEPLOY` — it has never run — whose newest build
   ended `FAILED` or `CANCELED`, or that is older than 20 minutes (a runner's build takes about two)
@@ -251,15 +251,20 @@ the service and imports a fresh one with a freshly minted registration token.
   until Gitea cancels it after 24 h), and that is the record: each pass reads the newest page of
   runs of every registered group that has no runner service — one internal Gitea read per such
   group — and imports a runner for one with a job waiting, within the bounds below.
-- **Bounds**, read from the platform's own list of the hostname's `stack.build` processes
-  (`GET /project/{id}/process`, which keeps a deleted service's processes under its name) — only
-  when a runner may need building, so a restart does not lift them:
+- **Bounds**, read from the platform's own list of the runners' `stack.build` processes
+  (`GET /project/{id}/process?actionNameContains=stack.build`: newest first, filtered before the
+  page is cut, and a deleted service's processes stay under its name) — read once per pass or
+  webhook, only when a runner may need building, and never for a hostname two groups share — so a
+  restart does not lift them:
   - one replacement at a time per group, a tainted runner's included, and none while a build of
     the hostname is still moving;
   - the first failed build is replaced at once; after that each attempt waits twice as long, from 2
     minutes up to 6 hours, and no more than 3 start in any hour;
-  - 5 failed builds in a row stop it until one of the group's jobs queues again — a person pushing
-    is the signal to try once more; a build that finished starts the count again;
+  - 5 failed builds in a row stop it. Only a person's push lifts the stop: a `queued` job whose run
+    Gitea says a `push` started — a commit somebody landed, a person or a Mate working for one.
+    The broker's own runs are dispatches (it re-dispatches a behind stage's deploy every 20
+    minutes), and neither those nor a schedule lift it. A lift allows one more build, which still
+    waits out the backoff and the hourly cap; a build that finished starts the count again;
   - every attempt, hold and stop is logged, never the token.
 - **A hostname two groups share** (`acme-2` and `acme2`: the slug loses its dashes and is cut to 25
   characters) is never replaced or imported for a waiting job, and the log says so once.
