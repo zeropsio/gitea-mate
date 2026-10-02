@@ -471,9 +471,10 @@ func TestEveryImportSweepsTheGroupsOrgOnce(t *testing.T) {
 	}
 }
 
-// TestASweepStopsWithItsContext — a sweep inside a pass with a deadline (the
-// first sign-in's) stops at the first deletion after the deadline, logs once,
-// and starts no wait: the next import sweeps at once.
+// TestASweepStopsWithItsContext — a sweep its context ends (a webhook's
+// two-minute deadline, or the broker shutting down) stops at the first
+// deletion after the end, logs once, and starts no wait: the next import
+// sweeps at once.
 func TestASweepStopsWithItsContext(t *testing.T) {
 	t.Parallel()
 	w, logs, _ := brokenWorld(t)
