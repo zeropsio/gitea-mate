@@ -572,7 +572,7 @@ func TestGiteaRuntimeShipsTheVerifier(t *testing.T) {
 // first runner to `exit status 35` on a URL that answered 200 a minute later,
 // and plain --retry does not count exit 35 as transient, so every download in
 // a build or prepare command retries on any error, with a bound on each
-// connect.
+// connect and a floor on its speed — a stalled transfer is an error too.
 func TestEveryBuildDownloadRetries(t *testing.T) {
 	raw, err := os.ReadFile("zerops.yaml")
 	if err != nil {
@@ -605,7 +605,7 @@ func TestEveryBuildDownloadRetries(t *testing.T) {
 				continue
 			}
 			downloads++
-			for _, flag := range []string{"--retry ", "--retry-all-errors", "--connect-timeout "} {
+			for _, flag := range []string{"--retry ", "--retry-all-errors", "--connect-timeout ", "--speed-limit ", "--speed-time "} {
 				if !strings.Contains(command, flag) {
 					t.Errorf("setup %s: %q has no %s", setup.Setup, command, strings.TrimSpace(flag))
 				}
