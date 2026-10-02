@@ -279,22 +279,28 @@ the service and imports a fresh one, with the org's registration token read for 
 ### A runner's import sweeps its org
 
 Every import of a group's runner — a first one, a broken one's replacement, a tainted one's —
-first deletes every runner registration of the group's org. An import happens only when the group
-has no runner service, so each registration then is a dead container's (a recreated container
-leaves its old one behind, offline) or one somebody made with the org's token: none is the
-broker's. The sweep keeps no memory of a taint, so a broker restarted between a tainted runner's
+first deletes every runner registration of the group's org. The import reads the Gitea project's
+services again under its own lock and does nothing when the runner's hostname is there — a pass
+decides from the list it read when it started, and a webhook may have imported the runner since,
+and the runner registered. So the group has no runner service when the sweep runs, and each
+registration then is a dead container's (a recreated container leaves its old one behind,
+offline) or one somebody made with the org's token: none is the broker's. The sweep keeps no memory of a taint, so a broker restarted between a tainted runner's
 deletion and its replacement still sweeps.
 
 - It reads the first page of `GET /orgs/{org}/actions/runners`, deletes what it lists
   (`DELETE /orgs/{org}/actions/runners/{id}`; a 404 counts as deleted), and reads the first page
   again until the org holds none — Gitea orders the list by a status it computes from the clock,
-  so a row can move between pages. An org that holds nothing costs one read; a tainted runner's
-  replacement, about two reads and a deletion per registration.
+  so a row can move between pages. Every import attempt costs one more read of the services; an
+  org that holds nothing then costs one read of its registrations, a tainted runner's replacement
+  about two and a deletion per registration.
 - At most four rounds of 50 per attempt. A list or a deletion that fails, or registrations left
-  after the fourth round, hold the import back for the waits a broken runner's rebuild keeps — 2
-  minutes, doubling up to 6 hours — and a pass or webhook inside the wait reads nothing. The
-  attempt is logged once, with counts, never an id per line and never the token. A sweep its
-  caller's deadline cuts short (the first sign-in's pass) stops at once and starts no wait.
+  after the fourth round, hold the import back: 2 minutes after an attempt that deleted
+  something, and for attempts in a row that deleted nothing 2, 4, 8 … minutes up to 6 hours (a
+  broken runner's rebuild waits). A pass inside the wait makes no call for the group's runner
+  beyond the service list it reads anyway; a webhook inside it still reads the services and the
+  runners' builds on its way to the import, but no registrations. The attempt is logged once, with counts, never an
+  id per line and never the token. A sweep whose context ends — a webhook's two-minute deadline,
+  or the broker shutting down — stops at once and starts no wait.
 - Nothing is read while a group's runner runs: a grant, a deploy pass and a runner's start make
   no call to the org's registrations.
 
