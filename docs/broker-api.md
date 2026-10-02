@@ -239,20 +239,30 @@ dropped TLS handshake on a download: the service sat `READY_TO_DEPLOY`, nothing 
 job would have waited for good. So the broker treats a broken runner like a missing one: it deletes
 the service and imports a fresh one with a freshly minted registration token.
 
-- **Broken** is a runner service that is `READY_TO_DEPLOY` — it has never run — and either the
-  build the broker watched after its import ended `FAILED` or `CANCELED`, or the service is older
-  than 20 minutes (a runner's build takes about two). One younger than that is still building and is
-  left alone.
+- **Broken** is a runner service that is `READY_TO_DEPLOY` — it has never run — whose newest build
+  ended `FAILED` or `CANCELED`, or that is older than 20 minutes (a runner's build takes about two)
+  with none of its builds still moving: a slow build is never cut short.
 - **Who notices:** the import's own build processes, followed until they end (polled only while the
   build runs, at most 20 minutes); every `workflow_job` `queued`; and every deploy pass, from the
   service list it reads anyway — the webhook that would ask was the one that made the runner, so no
   second `queued` may come.
-- **Bounds:** one replacement at a time per group, a tainted runner's included. Each attempt waits
-  twice as long as the one before, from 2 minutes up to 6 hours, and no more than 3 are made in any
-  hour; the count starts again once the group's runner has run. An attempt the bound holds back is
-  logged with when the next may start, and every attempt and its outcome is logged — never the token.
-  The count lives in the broker's memory: a restart forgets it, and the age rule finds the runner
-  again.
+- **Owed a runner:** a replacement deletes before it imports, so a failed import, or a restart in
+  between, leaves the group with no runner. The job it was made for still waits in Gitea (`queued`,
+  until Gitea cancels it after 24 h), and that is the record: each pass reads the newest page of
+  runs of every registered group that has no runner service — one internal Gitea read per such
+  group — and imports a runner for one with a job waiting, within the bounds below.
+- **Bounds**, read from the platform's own list of the hostname's `stack.build` processes
+  (`GET /project/{id}/process`, which keeps a deleted service's processes under its name) — only
+  when a runner may need building, so a restart does not lift them:
+  - one replacement at a time per group, a tainted runner's included, and none while a build of
+    the hostname is still moving;
+  - the first failed build is replaced at once; after that each attempt waits twice as long, from 2
+    minutes up to 6 hours, and no more than 3 start in any hour;
+  - 5 failed builds in a row stop it until one of the group's jobs queues again — a person pushing
+    is the signal to try once more; a build that finished starts the count again;
+  - every attempt, hold and stop is logged, never the token.
+- **A hostname two groups share** (`acme-2` and `acme2`: the slug loses its dashes and is cut to 25
+  characters) is never replaced or imported for a waiting job, and the log says so once.
 - A job that queues while a replacement runs waits, as it does for a first import.
 
 ## `POST /person/token` — a person's own Gitea access, for the app (guide 4.4)
