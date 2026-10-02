@@ -171,7 +171,8 @@ type runnerPool struct {
 	quiet     time.Duration
 
 	// importRunner makes a group's runner service the first time one of its
-	// workflows queues a job.
+	// workflows queues a job, and decides about one that has never run: a
+	// runner still building is left to finish, a broken one is replaced.
 	importRunner func(context.Context, string) error
 
 	mu     sync.Mutex
@@ -211,14 +212,16 @@ func (p *runnerPool) wake(ctx context.Context, org string) {
 	p.cancelSleep(org)
 
 	service, ok := p.service(ctx, org)
-	if !ok {
+	if !ok || service.Status == "READY_TO_DEPLOY" {
 		// A group whose first workflow has not run yet has no runner service.
-		// Importing it is what makes this job the group's first.
+		// Importing it is what makes this job the group's first. One that has
+		// never run cannot be started: it is still building, or its build
+		// failed and it has to be replaced, which the importer decides.
 		if p.importRunner == nil {
 			return
 		}
 		if err := p.importRunner(ctx, org); err != nil {
-			p.log.Error("the group's runner could not be imported", "org", org, "err", err.Error())
+			p.log.Error("the group's runner could not be imported or replaced", "org", org, "err", err.Error())
 			return
 		}
 		// The import starts the service itself; a job that queued with no
