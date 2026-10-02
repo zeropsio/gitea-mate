@@ -225,11 +225,35 @@ Caller: Gitea. `X-Gitea-Signature` is the hex HMAC-SHA256 of the raw body with
 | `create` of a tag `v*` on the group repo | re-checks the pusher's production rights in Zerops, writes `mate/release/{tag}` `success` (approved) or `failure` (refused) on the tagged commit, deploys an approved tag's commits |
 | `pull_request` merged on the group repo | imports the recipe delta into each environment built from it, re-reads environments — whoever merged it, a person or a Mate (D31) |
 | `pull_request` opened on the group repo by a Mate's bot | nudges the rights loop, whose next pass merges it when it only adds files — a Mate's first recipe lands by itself (D23); one that changes a file `main` carries waits for a person with write, who merges it or asks a Mate to (D31) |
-| `workflow_job` `queued` | starts the group's runner service if it is stopped |
+| `workflow_job` `queued` | imports the group's runner service if it has none, starts it if it is stopped, replaces it if it is broken (below) |
 | `workflow_job` `completed` | notes the time; a quiet spell (default 15 min) stops the runner |
 | anything else | `204`, ignored |
 
 Always `204` once the signature is good, whatever the payload; the work runs after the response.
+
+### A broken runner is replaced
+
+A group's runner service is imported when its first job queues, and that job waits until the runner
+registers. A runner whose build failed never registers — run 4 (2026-10-02) lost one to a single
+dropped TLS handshake on a download: the service sat `READY_TO_DEPLOY`, nothing started it, and the
+job would have waited for good. So the broker treats a broken runner like a missing one: it deletes
+the service and imports a fresh one with a freshly minted registration token.
+
+- **Broken** is a runner service that is `READY_TO_DEPLOY` — it has never run — and either the
+  build the broker watched after its import ended `FAILED` or `CANCELED`, or the service is older
+  than 20 minutes (a runner's build takes about two). One younger than that is still building and is
+  left alone.
+- **Who notices:** the import's own build processes, followed until they end (polled only while the
+  build runs, at most 20 minutes); every `workflow_job` `queued`; and every deploy pass, from the
+  service list it reads anyway — the webhook that would ask was the one that made the runner, so no
+  second `queued` may come.
+- **Bounds:** one replacement at a time per group, a tainted runner's included. Each attempt waits
+  twice as long as the one before, from 2 minutes up to 6 hours, and no more than 3 are made in any
+  hour; the count starts again once the group's runner has run. An attempt the bound holds back is
+  logged with when the next may start, and every attempt and its outcome is logged — never the token.
+  The count lives in the broker's memory: a restart forgets it, and the age rule finds the runner
+  again.
+- A job that queues while a replacement runs waits, as it does for a first import.
 
 ## `POST /person/token` — a person's own Gitea access, for the app (guide 4.4)
 
