@@ -525,3 +525,28 @@ func TestDispatchWorkflow(t *testing.T) {
 		t.Errorf("a repository with no such workflow must answer not found, got %v", err)
 	}
 }
+
+// TestQueuedOrgRuns: a run that waits for a runner is `queued` (measured
+// 2026-09-16 with no runner registered); every other status is not waiting.
+func TestQueuedOrgRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		statuses []string
+		want     int
+	}{
+		{"no runs", nil, 0},
+		{"all done", []string{"completed", "completed"}, 0},
+		{"one waits", []string{"queued", "in_progress", "completed"}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := giteatest.New(t)
+			for i, status := range tc.statuses {
+				f.AddRun("acme", gitea.Run{ID: int64(i + 1), Status: status})
+			}
+			got, err := f.Client().QueuedOrgRuns(context.Background(), "acme")
+			if err != nil || got != tc.want {
+				t.Fatalf("QueuedOrgRuns = %d, %v, want %d", got, err, tc.want)
+			}
+		})
+	}
+}

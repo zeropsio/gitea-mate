@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -204,10 +205,22 @@ type Process struct {
 	ServiceStackID string `json:"serviceStackId"`
 	Status         string `json:"status"`
 	ActionName     string `json:"actionName"`
-	AppVersion     *struct {
+	// Created is when the platform made the process, on its own clock.
+	Created time.Time `json:"created"`
+	// ServiceStacks is the services the process acts on, by id and hostname.
+	// A deleted service's processes keep its name (run 4, 2026-10-02: the
+	// failed `stack.build` of a deleted runner stayed listed under it).
+	ServiceStacks []ProcessStack `json:"serviceStacks"`
+	AppVersion    *struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
 	} `json:"appVersion"`
+}
+
+// ProcessStack is one service a process acts on.
+type ProcessStack struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // The process statuses that end one.
@@ -231,6 +244,35 @@ func (c *Client) Process(ctx context.Context, processID string) (Process, error)
 	var out Process
 	_, err := c.do(ctx, "GET", "/process/"+url.PathEscape(processID), nil, &out)
 	return out, err
+}
+
+// projectProcessLimit is one read of a project's processes. The platform
+// keeps only recent processes: limit=1000 answered a Gitea project's whole
+// list, 22 processes, 78 KB (measured 2026-10-02).
+const projectProcessLimit = 1000
+
+// ProjectProcesses is GET /project/{id}/process: a project's processes, live
+// and ended, read directly rather than through the search index, so one that
+// has just started is already there. action, when not empty, keeps those whose
+// actionName contains it.
+//
+// Measured on a Gitea project, 2026-10-02: the answer is `{list: [...]}` with
+// no total; it is newest first, paged by limit and offset; and
+// `actionNameContains` filters on the platform before the page is cut, so
+// `stack.build` with a limit of 5 answered the project's three builds. A
+// deleted service's processes stay listed under its name (run 4's audit read
+// the failed build of a runner deleted hours before). Callers still sort by
+// created and rely on no order.
+func (c *Client) ProjectProcesses(ctx context.Context, projectID, action string) ([]Process, error) {
+	query := url.Values{"limit": {strconv.Itoa(projectProcessLimit)}}
+	if action != "" {
+		query.Set("actionNameContains", action)
+	}
+	var out struct {
+		List []Process `json:"list"`
+	}
+	_, err := c.do(ctx, "GET", "/project/"+url.PathEscape(projectID)+"/process?"+query.Encode(), nil, &out)
+	return out.List, err
 }
 
 // DefaultPollInterval is how often a deploy asks the platform where it is.

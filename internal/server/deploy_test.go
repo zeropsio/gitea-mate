@@ -211,40 +211,59 @@ func TestAJobsReport(t *testing.T) {
 	}
 }
 
-// fakeRunners records which groups were asked for a runner.
+// fakeRunners records which groups were asked for a runner, and for which job.
 type fakeRunners struct {
 	asked []string
+	jobs  []deploy.QueuedJob
 	err   error
 }
 
-func (f *fakeRunners) EnsureRunner(_ context.Context, org string) error {
+func (f *fakeRunners) EnsureRunner(_ context.Context, org string, job deploy.QueuedJob) error {
 	f.asked = append(f.asked, org)
+	f.jobs = append(f.jobs, job)
 	return f.err
 }
 
-// TestAQueuedJobImportsTheGroupsFirstRunner is guide 1.6: a group whose first
-// workflow appears gets its runner service imported, and one that already has
-// one is only started.
-func TestAQueuedJobImportsTheGroupsFirstRunner(t *testing.T) {
-	r := newRig(t)
-	runners := &fakeRunners{}
-	r.server.deps.Runners = runners
-	r.server.runners.importRunner = r.server.ensureRunner
+// TestAQueuedJobAsksForARunnerThatNeverRan is guide 1.6: a group whose first
+// workflow appears gets its runner service imported. The pool starts a runner
+// that is asleep, and hands every runner that has never run to the importer, which
+// alone decides whether it is still building or broken.
+func TestAQueuedJobAsksForARunnerThatNeverRan(t *testing.T) {
+	for _, tc := range []struct {
+		status  string
+		asked   bool
+		started bool
+	}{
+		{status: "", asked: true},
+		{status: "ACTIVE"},
+		{status: "STARTING"},
+		{status: "STOPPED", started: true},
+		{status: "READY_TO_DEPLOY", asked: true},
+	} {
+		t.Run("runner "+tc.status, func(t *testing.T) {
+			r := newRig(t)
+			runners := &fakeRunners{}
+			r.server.deps.Runners = runners
+			r.server.runners.importRunner = r.server.ensureRunner
+			if tc.status != "" {
+				r.zerops.SetServices(giteaPrj, zerops.Service{
+					ID: "svc-runner", ProjectID: giteaPrj, Name: registry.RunnerHostname("acme"), Status: tc.status,
+				})
+			}
 
-	r.server.runners.handle(context.Background(), "acme", []byte(`{"action":"queued"}`))
-	if len(runners.asked) != 1 || runners.asked[0] != "acme" {
-		t.Fatalf("the importer was asked for %v, want acme once", runners.asked)
-	}
-
-	// With the service in the project, the pool starts it and imports nothing.
-	r.zerops.SetServices(giteaPrj, zerops.Service{
-		ID: "svc-runner", ProjectID: giteaPrj, Name: registry.RunnerHostname("acme"), Status: "STOPPED",
-	})
-	r.server.runners.handle(context.Background(), "acme", []byte(`{"action":"queued"}`))
-	if len(runners.asked) != 1 {
-		t.Fatalf("a group that already has a runner was imported again: %v", runners.asked)
-	}
-	if !r.zerops.Started("svc-runner") {
-		t.Fatal("the existing runner was not started")
+			r.server.runners.handle(context.Background(), "acme",
+				[]byte(`{"action":"queued","workflow_job":{"run_id":41},"repository":{"full_name":"acme/api"}}`))
+			if asked := len(runners.asked) == 1; asked != tc.asked {
+				t.Fatalf("the importer was asked %v, want asked=%v", runners.asked, tc.asked)
+			}
+			// The importer is told which run queued: whether a person started
+			// it is what may let a stopped runner build again.
+			if want := (deploy.QueuedJob{Owner: "acme", Repo: "api", RunID: 41}); tc.asked && runners.jobs[0] != want {
+				t.Fatalf("the importer was told %+v, want %+v", runners.jobs[0], want)
+			}
+			if started := r.zerops.Started("svc-runner"); started != tc.started {
+				t.Fatalf("started = %v, want %v", started, tc.started)
+			}
+		})
 	}
 }

@@ -352,6 +352,9 @@ func (f *Fake) AddProcess(p zerops.Process) {
 
 // deleteService is DELETE /service-stack/{id}.
 func (f *Fake) deleteService(w http.ResponseWriter, serviceID string) {
+	if f.HoldDeletes != nil {
+		<-f.HoldDeletes
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for projectID, list := range f.services {

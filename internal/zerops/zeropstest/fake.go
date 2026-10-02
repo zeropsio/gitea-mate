@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,6 +79,17 @@ type Fake struct {
 	// FailDeletes makes the process a deletion answers end FAILED — what a
 	// service the platform would not remove looks like.
 	FailDeletes bool
+	// FailImports makes a service-stack import a 400 whose message quotes the
+	// document — what a refusal that echoes its input looks like.
+	FailImports bool
+	// HoldDeletes, when set, keeps every service deletion waiting until it is
+	// closed — a deletion still in flight.
+	HoldDeletes chan struct{}
+	// importBuild, when set, makes an import do what the platform's does: each
+	// service in the document appears READY_TO_DEPLOY, made now, and the import
+	// answers its stack.create and stack.build processes, the build ending
+	// with this status. Unset, an import is only recorded.
+	importBuild string
 	// Ungranted is the projects this API's tokens were never granted: a
 	// service search on one, and the user data of its services, answer 403 —
 	// what a Mate project the app has not yet granted the broker looks like.
@@ -266,6 +278,19 @@ func (f *Fake) Project(id string) (zerops.Project, bool) {
 	return zerops.Project{}, false
 }
 
+// Served counts the requests made to one "METHOD /path".
+func (f *Fake) Served(key string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, r := range f.Requests {
+		if r == key {
+			n++
+		}
+	}
+	return n
+}
+
 // Wrote reports whether any request other than a read was made.
 func (f *Fake) Wrote() bool {
 	f.mu.Lock()
@@ -332,6 +357,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		f.memberList(w, path, identity)
 	case key == "POST /project/search":
 		f.projectSearch(w, r)
+	case r.Method == "GET" && strings.HasPrefix(path, "/project/") && strings.HasSuffix(path, "/process"):
+		f.projectProcesses(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/project/"), "/process"))
 	case r.Method == "GET" && strings.HasPrefix(path, "/project/"):
 		f.project(w, path)
 	case r.Method == "PUT" && strings.HasPrefix(path, "/project/"):
@@ -731,7 +758,83 @@ func (f *Fake) importServices(w http.ResponseWriter, r *http.Request, path strin
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Imports = append(f.Imports, Import{ProjectID: projectID, Yaml: body.Yaml})
-	writeJSON(w, 200, map[string]any{"serviceStacks": []any{}})
+	if f.FailImports {
+		writeErr(w, 400, "invalidImportYaml", "the import could not be read: "+body.Yaml)
+		return
+	}
+	if f.importBuild == "" {
+		writeJSON(w, 200, map[string]any{"serviceStacks": []any{}})
+		return
+	}
+	type process struct {
+		ID string `json:"id"`
+	}
+	type stack struct {
+		ID        string    `json:"id"`
+		Name      string    `json:"name"`
+		Processes []process `json:"processes"`
+	}
+	var stacks []stack
+	for _, line := range strings.Split(body.Yaml, "\n") {
+		hostname, ok := strings.CutPrefix(strings.TrimSpace(line), "- hostname: ")
+		if !ok {
+			continue
+		}
+		f.sequence++
+		service := zerops.Service{
+			ID: "svc-imported-" + itoa(f.sequence), ProjectID: projectID, ClientID: f.ClientID,
+			Name: hostname, Status: "READY_TO_DEPLOY", Created: f.Now,
+		}
+		if f.importBuild == zerops.ProcessFinished {
+			service.Status = "ACTIVE"
+		}
+		f.services[projectID] = append(f.services[projectID], service)
+		actsOn := []zerops.ProcessStack{{ID: service.ID, Name: hostname}}
+		created := zerops.Process{ID: "proc-" + itoa(f.sequence) + "-create", ProjectID: projectID,
+			Status: zerops.ProcessFinished, ActionName: "stack.create", Created: f.Now, ServiceStacks: actsOn}
+		build := zerops.Process{ID: "proc-" + itoa(f.sequence) + "-build", ProjectID: projectID,
+			Status: f.importBuild, ActionName: "stack.build", Created: f.Now, ServiceStacks: actsOn}
+		f.processes[created.ID], f.processes[build.ID] = created, build
+		stacks = append(stacks, stack{ID: service.ID, Name: hostname,
+			Processes: []process{{ID: created.ID}, {ID: build.ID}}})
+	}
+	writeJSON(w, 200, map[string]any{"serviceStacks": stacks})
+}
+
+// projectProcesses is GET /project/{id}/process as measured: the project's
+// processes, live and ended, newest first, filtered by actionNameContains
+// before the page is cut by limit and offset, with no total.
+func (f *Fake) projectProcesses(w http.ResponseWriter, r *http.Request, projectID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	query := r.URL.Query()
+	action := query.Get("actionNameContains")
+	list := []zerops.Process{}
+	for _, process := range f.processes {
+		if process.ProjectID == projectID && strings.Contains(process.ActionName, action) {
+			list = append(list, process)
+		}
+	}
+	sort.SliceStable(list, func(i, j int) bool {
+		if !list[i].Created.Equal(list[j].Created) {
+			return list[i].Created.After(list[j].Created)
+		}
+		return list[i].ID > list[j].ID
+	})
+	offset, _ := strconv.Atoi(query.Get("offset"))
+	list = list[min(offset, len(list)):]
+	if limit, err := strconv.Atoi(query.Get("limit")); err == nil && limit < len(list) {
+		list = list[:limit]
+	}
+	writeJSON(w, 200, map[string]any{"list": list})
+}
+
+// BuildImports makes every later import create its services and end their
+// builds with status: FAILED is a build that could not fetch its inputs.
+func (f *Fake) BuildImports(status string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.importBuild = status
 }
 
 func (f *Fake) stopStart(w http.ResponseWriter, path string) {

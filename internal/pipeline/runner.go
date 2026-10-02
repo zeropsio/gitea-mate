@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/registry"
@@ -17,25 +18,57 @@ import (
 // ---------------------------------------------------------------------------
 
 // reconcileRunners deletes the runner service of a group that left the
-// registry. A runner is the one service the broker created by itself, so it is
-// the one it may remove; nothing else in a project is ever deleted.
+// registry, replaces a registered group's runner that is broken, and imports
+// one for a registered group that has none while a job of it waits. A runner
+// is the one service the broker created by itself, so it is the one it may
+// remove; nothing else in a project is ever deleted.
+//
+// A broken runner is looked for here as well as on a webhook because the
+// webhook that would ask was the one that made it: a runner is imported only
+// when a job queues, so one that never ran has a job waiting on it, and no
+// second `queued` may ever come. The service list is the one this pass reads
+// anyway. A group with no runner costs one read of its org's newest runs in
+// Gitea: a replacement deletes before it imports, and an import that failed,
+// or a restart in between, leaves the waiting job as the only record that the
+// group is owed one.
 func (p *Pipeline) reconcileRunners(ctx context.Context, reg registry.Registry) []string {
 	services, err := p.Zerops.Services(ctx, p.ClientID, p.GiteaProjectID)
 	if err != nil {
 		return []string{"the Gitea project's services: " + err.Error()}
 	}
-	wanted := map[string]bool{}
+	wanted := map[string]string{}
 	for _, group := range reg.Groups {
-		wanted[registry.RunnerHostname(group.Slug)] = true
+		wanted[registry.RunnerHostname(group.Slug)] = group.Slug
 	}
 
 	var problems []string
 	var stale []zerops.Service
+	present := map[string]bool{}
+	book := &buildBook{p: p}
 	for _, service := range zerops.WithoutSystem(services) {
-		if !strings.HasPrefix(service.Name, runnerPrefix) || wanted[service.Name] {
+		if !strings.HasPrefix(service.Name, runnerPrefix) {
+			continue
+		}
+		present[service.Name] = true
+		if slug, ok := wanted[service.Name]; ok {
+			if p.RunnerImport != "" {
+				if err := p.mendRunner(ctx, reg, slug, service, book, nil); err != nil {
+					problems = append(problems, err.Error())
+				}
+			}
 			continue
 		}
 		stale = append(stale, service)
+	}
+	if p.RunnerImport != "" {
+		for _, group := range reg.Groups {
+			if present[registry.RunnerHostname(group.Slug)] {
+				continue
+			}
+			if err := p.owedRunner(ctx, reg, group.Slug, book); err != nil {
+				problems = append(problems, err.Error())
+			}
+		}
 	}
 	sort.Slice(stale, func(i, j int) bool { return stale[i].Name < stale[j].Name })
 	for _, service := range stale {
@@ -70,18 +103,25 @@ const (
 	runnerTokenPlaceholder    = "__TOKEN__"
 )
 
-// EnsureRunner imports a group's Actions runner if the Gitea project does not
-// have one yet. It is what a group's first `workflow_job` `queued` calls: a job
-// that queues with no runner online waits, and one registered afterwards takes
-// it within a second of starting (ledger 2026-09-16).
+// EnsureRunner gives a group an Actions runner that can run. It is what a
+// group's `workflow_job` `queued` calls: a job that queues with no runner online
+// waits, and one registered afterwards takes it within a second of starting
+// (ledger 2026-09-16).
+//
+//   - No runner service: one is imported.
+//   - A runner that has run, or is still building: nothing.
+//   - A broken runner — one that exists and can never run: it is deleted and
+//     imported afresh, within the bounds of [Pipeline.mayRebuild].
+//
+// A job a person queued — a push — is also what lets a group whose builds keep
+// failing try once more.
 //
 // The registration token goes into the import document and nowhere else — not
 // a log, not an error, not a file.
-func (p *Pipeline) EnsureRunner(ctx context.Context, org string) error {
+func (p *Pipeline) EnsureRunner(ctx context.Context, org string, job deploy.QueuedJob) error {
 	if p.RunnerImport == "" {
 		return errors.New("the broker holds no runner import document")
 	}
-
 	state, err := p.State(ctx)
 	if err != nil {
 		return err
@@ -90,18 +130,40 @@ func (p *Pipeline) EnsureRunner(ctx context.Context, org string) error {
 	if !known {
 		return fmt.Errorf("the org %s is not a registered group", org)
 	}
-	hostname := registry.RunnerHostname(group.Slug)
+	return p.reviewRunner(ctx, state.Registry, group.Slug, &queuedSignal{job: job})
+}
 
+// reviewRunner imports the group's runner if it has none and replaces it if it
+// is broken. It is EnsureRunner once the group is known, and what a watched
+// build that failed asks for.
+func (p *Pipeline) reviewRunner(ctx context.Context, reg registry.Registry, slug string, signal *queuedSignal) error {
+	hostname := registry.RunnerHostname(slug)
 	services, err := p.Zerops.Services(ctx, p.ClientID, p.GiteaProjectID)
 	if err != nil {
 		return fmt.Errorf("the Gitea project's services: %w", err)
 	}
+	book := &buildBook{p: p}
 	for _, service := range services {
 		if service.Name == hostname {
-			return nil
+			return p.mendRunner(ctx, reg, slug, service, book, signal)
 		}
 	}
+	if p.busy(hostname) || (p.stopped(hostname) && !p.byPerson(ctx, signal)) {
+		return nil
+	}
+	builds, err := book.of(ctx, hostname)
+	if err != nil {
+		return err
+	}
+	if !p.mayRebuild(ctx, slug, hostname, builds, signal) {
+		return nil
+	}
+	return p.importRunner(ctx, slug, hostname)
+}
 
+// importRunner imports a fresh runner for a group, with a registration token
+// read for the import, and watches its build.
+func (p *Pipeline) importRunner(ctx context.Context, slug, hostname string) error {
 	// One import at a time per group: two `queued` deliveries arrive within a
 	// second of each other, and the platform would make two services.
 	p.mu.Lock()
@@ -122,23 +184,435 @@ func (p *Pipeline) EnsureRunner(ctx context.Context, org string) error {
 
 	// Org scope, never the instance-wide route: labels route jobs, but only
 	// the registration scope isolates them (guide 1.6).
-	token, err := p.Gitea.RunnerRegistrationToken(ctx, group.Slug)
+	token, err := p.Gitea.RunnerRegistrationToken(ctx, slug)
 	if err != nil {
-		return fmt.Errorf("a registration token for %s: %w", group.Slug, err)
+		return fmt.Errorf("a registration token for %s: %w", slug, err)
 	}
 	if token == "" {
-		return fmt.Errorf("Gitea answered an empty registration token for %s", group.Slug)
+		return fmt.Errorf("Gitea answered an empty registration token for %s", slug)
 	}
 
 	document := strings.ReplaceAll(p.RunnerImport, runnerHostnamePlaceholder, hostname)
 	document = strings.ReplaceAll(document, runnerTokenPlaceholder, token)
-	if _, err := p.Zerops.ImportServices(ctx, p.GiteaProjectID, document); err != nil {
+	result, err := p.Zerops.ImportServices(ctx, p.GiteaProjectID, document)
+	if err != nil {
 		// The error can carry the document, and the document carries the
 		// token, so only the fact is reported.
 		return fmt.Errorf("the runner %s could not be imported (%d)", hostname, zerops.Status(err))
 	}
-	p.log().Info("a group's runner was imported", "group", group.Slug, "hostname", hostname)
+	p.log().Info("a group's runner was imported", "group", slug, "hostname", hostname)
+	for _, stack := range result.ServiceStacks {
+		if stack.Name != hostname {
+			continue
+		}
+		processes := make([]string, 0, len(stack.Processes))
+		for _, process := range stack.Processes {
+			processes = append(processes, process.ID)
+		}
+		p.watchRunnerBuild(slug, hostname, processes)
+	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// A broken runner
+// ---------------------------------------------------------------------------
+
+// The platform's status of a service that has never run: no app version is
+// active, so there is nothing to start (ledger 2026-09-16, run 4 2026-10-02).
+const serviceReadyToDeploy = "READY_TO_DEPLOY"
+
+// runnerBuildBound is how long a runner may take to build before one that has
+// still never run, with no build of it moving, is called broken. A runner's
+// whole build took 121 s on 2026-10-02 (run 4), and a failed one 54 s; twenty
+// minutes is ten times the longer.
+const runnerBuildBound = 20 * time.Minute
+
+// How rebuilding a group's runner is bounded, so a build that fails for good —
+// and mails every member of the org each time it does — cannot loop. The first
+// failed build is replaced at once; after that each attempt waits twice as long
+// as the one before, from two minutes up to six hours, no more than three start
+// in any hour, and five failed builds in a row stop it. Only a person's push
+// lifts a stop, for one more build that still keeps those waits: the broker
+// dispatches the deploy workflow again every twenty minutes while a stage is
+// behind, and that job must not rebuild a runner that cannot build. The count
+// is read from the platform's own record of the builds, so a restart does not
+// lift it, and a build that finished starts it again.
+const (
+	runnerRepairBackoff    = 2 * time.Minute
+	runnerRepairBackoffCap = 6 * time.Hour
+	runnerRepairsPerHour   = 3
+	runnerStopAfter        = 5
+)
+
+// runnerBuild is one `stack.build` of a runner hostname, as the platform lists
+// it — a deleted service's included.
+type runnerBuild struct {
+	serviceID string
+	status    string
+	created   time.Time
+}
+
+// buildBook reads the platform's runner builds once — one pass, one webhook —
+// and answers them per hostname, newest first. It reads only when a runner may
+// need building: one that never ran, or a group with a job waiting and no
+// runner.
+type buildBook struct {
+	p      *Pipeline
+	read   bool
+	builds map[string][]runnerBuild
+	err    error
+}
+
+func (b *buildBook) of(ctx context.Context, hostname string) ([]runnerBuild, error) {
+	if !b.read {
+		b.read = true
+		b.builds = map[string][]runnerBuild{}
+		processes, err := b.p.Zerops.ProjectProcesses(ctx, b.p.GiteaProjectID, "stack.build")
+		if err != nil {
+			b.err = fmt.Errorf("the runners' builds: %w", err)
+		}
+		for _, process := range processes {
+			if process.ActionName != "stack.build" {
+				continue
+			}
+			for _, stack := range process.ServiceStacks {
+				if strings.HasPrefix(stack.Name, runnerPrefix) {
+					b.builds[stack.Name] = append(b.builds[stack.Name],
+						runnerBuild{serviceID: stack.ID, status: process.Status, created: process.Created})
+				}
+			}
+		}
+		for _, builds := range b.builds {
+			sort.SliceStable(builds, func(i, j int) bool { return builds[i].created.After(builds[j].created) })
+		}
+	}
+	return b.builds[hostname], b.err
+}
+
+// queuedSignal is the job a `queued` delivery named, and whether a person
+// started its run — read from Gitea at most once, and only when a stop is in
+// the way.
+type queuedSignal struct {
+	job    deploy.QueuedJob
+	asked  bool
+	person bool
+}
+
+// byPerson reports a queued job whose run a push started. The broker starts
+// runs only by dispatching the deploy workflow (D27), and writes no commit to a
+// service repository, so a `push` run is a commit somebody landed — a person,
+// or a Mate working for one. A dispatch, a schedule, or a run that cannot be
+// read is not.
+func (p *Pipeline) byPerson(ctx context.Context, signal *queuedSignal) bool {
+	if signal == nil || signal.job.RunID == 0 {
+		return false
+	}
+	if !signal.asked {
+		signal.asked = true
+		run, err := p.Gitea.GetRun(ctx, signal.job.Owner, signal.job.Repo, signal.job.RunID)
+		if err != nil {
+			p.log().Warn("the run a queued job belongs to could not be read", "repository",
+				signal.job.Owner+"/"+signal.job.Repo, "run", signal.job.RunID, "err", err.Error())
+			return false
+		}
+		signal.person = run.Event == "push"
+	}
+	return signal.person
+}
+
+// brokenRunner says why a runner service can never run, or "" when it has run
+// or may yet. A runner that never ran is READY_TO_DEPLOY. It is broken once its
+// newest build ended without finishing, or once it is older than any build
+// with none of its builds still moving — a slow build is never cut short.
+func brokenRunner(service zerops.Service, builds []runnerBuild, now time.Time) string {
+	if service.Status != serviceReadyToDeploy {
+		return ""
+	}
+	for _, build := range builds {
+		if build.serviceID != service.ID {
+			continue
+		}
+		if !(zerops.Process{Status: build.status}).Done() {
+			return ""
+		}
+		if build.status != zerops.ProcessFinished {
+			return "its build ended " + build.status
+		}
+		break
+	}
+	if !service.Created.IsZero() && now.Sub(service.Created) > runnerBuildBound {
+		return "it has not deployed " + runnerBuildBound.String() + " after it was made"
+	}
+	return ""
+}
+
+// mendRunner replaces the group's runner if it is broken. A runner that runs
+// lifts a stop.
+func (p *Pipeline) mendRunner(ctx context.Context, reg registry.Registry, slug string, service zerops.Service,
+	book *buildBook, signal *queuedSignal) error {
+	if service.Status != serviceReadyToDeploy {
+		switch service.Status {
+		case "ACTIVE", "STARTING", "STOPPING", "STOPPED":
+			p.mu.Lock()
+			delete(p.runnerStopped, service.Name)
+			p.mu.Unlock()
+		}
+		return nil
+	}
+	if p.sharedRunner(reg, service.Name) || (p.stopped(service.Name) && !p.byPerson(ctx, signal)) {
+		return nil
+	}
+	builds, err := book.of(ctx, service.Name)
+	if err != nil {
+		return err
+	}
+	why := brokenRunner(service, builds, p.now())
+	if why == "" || !p.mayRebuild(ctx, slug, service.Name, builds, signal) {
+		return nil
+	}
+	return p.repairRunner(ctx, slug, service, why)
+}
+
+// owedRunner imports a runner for a registered group that has none while one
+// of its jobs waits in Gitea.
+func (p *Pipeline) owedRunner(ctx context.Context, reg registry.Registry, slug string, book *buildBook) error {
+	hostname := registry.RunnerHostname(slug)
+	if p.stopped(hostname) || p.busy(hostname) || p.sharedRunner(reg, hostname) {
+		return nil
+	}
+	queued, err := p.Gitea.QueuedOrgRuns(ctx, slug)
+	if err != nil {
+		return fmt.Errorf("the waiting jobs of %s: %w", slug, err)
+	}
+	if queued == 0 {
+		return nil
+	}
+	builds, err := book.of(ctx, hostname)
+	if err != nil {
+		return err
+	}
+	if !p.mayRebuild(ctx, slug, hostname, builds, nil) {
+		return nil
+	}
+	p.log().Warn("a group with a job waiting has no runner; one is imported", "group", slug, "hostname", hostname, "waiting", queued)
+	return p.importRunner(ctx, slug, hostname)
+}
+
+// mayRebuild decides from the platform's record of a runner's builds whether
+// another may start now, and logs a refusal — once for a stop.
+func (p *Pipeline) mayRebuild(ctx context.Context, slug, hostname string, builds []runnerBuild, signal *queuedSignal) bool {
+	if len(builds) > 0 && !(zerops.Process{Status: builds[0].status}).Done() {
+		return false // one is building
+	}
+	var failures []runnerBuild
+	for _, build := range builds {
+		if build.status == zerops.ProcessFinished {
+			break
+		}
+		failures = append(failures, build)
+	}
+	if len(failures) == 0 {
+		return true
+	}
+	if len(failures) >= runnerStopAfter {
+		p.mu.Lock()
+		lifted := p.lifted[hostname].After(failures[0].created)
+		p.mu.Unlock()
+		switch {
+		case lifted:
+		case p.byPerson(ctx, signal):
+			p.mu.Lock()
+			if p.lifted == nil {
+				p.lifted = map[string]time.Time{}
+			}
+			p.lifted[hostname] = p.now()
+			delete(p.runnerStopped, hostname)
+			p.mu.Unlock()
+			p.log().Warn("a person pushed, so a runner stopped after failed builds may build once more",
+				"group", slug, "hostname", hostname, "failed_in_a_row", len(failures))
+		default:
+			p.mu.Lock()
+			said := p.runnerStopped[hostname]
+			if p.runnerStopped == nil {
+				p.runnerStopped = map[string]bool{}
+			}
+			p.runnerStopped[hostname] = true
+			p.mu.Unlock()
+			if !said {
+				p.log().Warn("a runner's builds keep failing, so it is stopped until a person pushes",
+					"group", slug, "hostname", hostname, "failed_in_a_row", len(failures))
+			}
+			return false
+		}
+	}
+	// The oldest failure in the run is the build that started it; every later
+	// one is a replacement.
+	attempts := make([]time.Time, 0, len(failures)-1)
+	for i := len(failures) - 2; i >= 0; i-- {
+		attempts = append(attempts, failures[i].created)
+	}
+	now := p.now()
+	if next := nextRepair(attempts, now); now.Before(next) {
+		p.log().Warn("a broken runner's rebuild is held back", "group", slug, "hostname", hostname,
+			"failed_in_a_row", len(failures), "next", next.Format(time.RFC3339))
+		return false
+	}
+	return true
+}
+
+// stopped reports a group whose builds kept failing, until a person pushes or
+// its runner runs. Remembering it spares the pass a read of the platform's
+// processes every five minutes; a restart forgets it and reads once.
+func (p *Pipeline) stopped(hostname string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.runnerStopped[hostname]
+}
+
+// busy reports a runner being imported or replaced right now.
+func (p *Pipeline) busy(hostname string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.runnerImport[hostname] || p.replacing[hostname]
+}
+
+// sharedRunner reports a hostname two registered groups map to: the slug loses
+// its dashes and is cut to 25 characters, so `acme-2` and `acme2` name one
+// runner. Replacing it for one group would take it from the other, so the
+// broker never does, and says so once.
+func (p *Pipeline) sharedRunner(reg registry.Registry, hostname string) bool {
+	var slugs []string
+	for _, group := range reg.Groups {
+		if registry.RunnerHostname(group.Slug) == hostname {
+			slugs = append(slugs, group.Slug)
+		}
+	}
+	if len(slugs) < 2 {
+		return false
+	}
+	p.mu.Lock()
+	said := p.sharedSaid[hostname]
+	if p.sharedSaid == nil {
+		p.sharedSaid = map[string]bool{}
+	}
+	p.sharedSaid[hostname] = true
+	p.mu.Unlock()
+	if !said {
+		p.log().Warn("two groups share one runner hostname, so the broker never replaces it",
+			"hostname", hostname, "groups", strings.Join(slugs, ","))
+	}
+	return true
+}
+
+// repairRunner deletes a broken runner and imports a fresh one. One replacement runs at a time per group, a tainted
+// runner's included. A job that queues meanwhile waits, as it does for a first
+// import; if the import fails, the pass imports one while that job waits.
+func (p *Pipeline) repairRunner(ctx context.Context, slug string, runner zerops.Service, why string) error {
+	p.mu.Lock()
+	if p.replacing == nil {
+		p.replacing = map[string]bool{}
+	}
+	if p.replacing[runner.Name] {
+		p.mu.Unlock()
+		return nil
+	}
+	p.replacing[runner.Name] = true
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		delete(p.replacing, runner.Name)
+		p.mu.Unlock()
+	}()
+
+	p.log().Warn("a broken runner is being replaced", "group", slug, "hostname", runner.Name, "why", why)
+	process, err := p.Zerops.DeleteService(ctx, runner.ID)
+	if err != nil {
+		return fmt.Errorf("the broken runner %s could not be deleted: %w", runner.Name, err)
+	}
+	final, err := p.Zerops.AwaitProcess(ctx, process.ID, p.PollInterval)
+	if err != nil {
+		return fmt.Errorf("the deletion of the broken runner %s could not be followed: %w", runner.Name, err)
+	}
+	if final.Status != zerops.ProcessFinished {
+		return fmt.Errorf("the deletion of the broken runner %s ended as %s", runner.Name, final.Status)
+	}
+	if err := p.importRunner(ctx, slug, runner.Name); err != nil {
+		p.log().Warn("a broken runner was deleted and its replacement could not be imported; a pass imports one while a job waits",
+			"group", slug, "hostname", runner.Name, "err", err.Error())
+		return err
+	}
+	p.log().Info("a broken runner was replaced", "group", slug, "hostname", runner.Name)
+	return nil
+}
+
+// nextRepair is the earliest time another replacement may start, given when
+// each replacement since the run of failed builds began started, oldest first.
+func nextRepair(attempts []time.Time, now time.Time) time.Time {
+	if len(attempts) == 0 {
+		return time.Time{}
+	}
+	wait := runnerRepairBackoff
+	for i := 1; i < len(attempts) && wait < runnerRepairBackoffCap; i++ {
+		wait *= 2
+	}
+	wait = min(wait, runnerRepairBackoffCap)
+	next := attempts[len(attempts)-1].Add(wait)
+
+	var lastHour []time.Time
+	for _, at := range attempts {
+		if now.Sub(at) < time.Hour {
+			lastHour = append(lastHour, at)
+		}
+	}
+	if len(lastHour) >= runnerRepairsPerHour {
+		if hourly := lastHour[len(lastHour)-runnerRepairsPerHour].Add(time.Hour); hourly.After(next) {
+			next = hourly
+		}
+	}
+	return next
+}
+
+// watchRunnerBuild follows the processes an import answered for a runner. A
+// build that ends without finishing asks for the runner to be looked at again
+// at once, rather than on the next pass. It runs on the broker's own context
+// and polls only while the build runs.
+func (p *Pipeline) watchRunnerBuild(slug, hostname string, processes []string) {
+	if len(processes) == 0 {
+		return
+	}
+	base := p.Base
+	if base == nil {
+		base = context.Background()
+	}
+	p.runnerWork.Add(1)
+	go func() {
+		defer p.runnerWork.Done()
+		ctx, cancel := context.WithTimeout(base, runnerBuildBound)
+		defer cancel()
+		for _, id := range processes {
+			final, err := p.Zerops.AwaitProcess(ctx, id, p.PollInterval)
+			if err != nil {
+				// A build still moving at the bound, or a read that failed:
+				// the pass takes it from here.
+				p.log().Info("a runner's build could not be followed to its end", "hostname", hostname, "err", err.Error())
+				return
+			}
+			if final.Status == zerops.ProcessFinished {
+				continue
+			}
+			p.log().Warn("a runner's build failed", "group", slug, "hostname", hostname,
+				"action", final.ActionName, "status", final.Status)
+			state, err := p.State(ctx)
+			if err == nil {
+				err = p.reviewRunner(ctx, state.Registry, slug, nil)
+			}
+			if err != nil {
+				p.log().Warn("a runner whose build failed could not be replaced", "group", slug, "hostname", hostname, "err", err.Error())
+			}
+			return
+		}
+	}()
 }
 
 // ---------------------------------------------------------------------------
@@ -207,12 +681,22 @@ func (p *Pipeline) replaceRunner(slug string, runner zerops.Service) {
 	if base == nil {
 		base = context.Background()
 	}
+	p.runnerWork.Add(1)
 	go func() {
+		defer p.runnerWork.Done()
 		defer func() {
 			p.mu.Lock()
 			delete(p.replacing, runner.Name)
 			p.mu.Unlock()
 		}()
+		state, err := p.State(base)
+		if err != nil {
+			p.log().Warn("a tainted runner was left: the registry could not be read", "hostname", runner.Name, "err", err.Error())
+			return
+		}
+		if p.sharedRunner(state.Registry, runner.Name) {
+			return
+		}
 		process, err := p.Zerops.DeleteService(base, runner.ID)
 		if err != nil {
 			p.log().Warn("a tainted runner could not be deleted", "hostname", runner.Name, "err", err.Error())
@@ -224,9 +708,10 @@ func (p *Pipeline) replaceRunner(slug string, runner zerops.Service) {
 			return
 		}
 		p.log().Info("a tainted runner was deleted", "hostname", runner.Name)
-		if err := p.EnsureRunner(base, slug); err != nil {
+		if err := p.importRunner(base, slug, runner.Name); err != nil {
+			// The catch-up below still starts the deploy again; its job waits,
+			// and the pass imports a runner while it does.
 			p.log().Warn("a fresh runner could not be imported", "group", slug, "err", err.Error())
-			return
 		}
 		plan, err := p.Plan(base, slug)
 		if err != nil {

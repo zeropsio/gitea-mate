@@ -77,6 +77,17 @@ type Pipeline struct {
 	runnerImport map[string]bool
 	// replacing is the runners being thrown away right now, by hostname.
 	replacing map[string]bool
+	// runnerWork is every runner build being watched and every runner
+	// replacement running on the broker's own context.
+	runnerWork sync.WaitGroup
+	// lifted is, by runner hostname, when a person's push last let a runner
+	// whose builds kept failing build once more. runnerStopped is the
+	// hostnames stopped since, and sharedSaid those two groups share that the
+	// log has named. All three are memory only: what bounds a rebuild is read
+	// from the platform, so a restart keeps a stop and only means one more read.
+	lifted        map[string]time.Time
+	runnerStopped map[string]bool
+	sharedSaid    map[string]bool
 }
 
 func (p *Pipeline) log() *slog.Logger {

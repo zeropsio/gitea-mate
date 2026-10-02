@@ -8,11 +8,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // gitea/wait-for-url.sh is what stands between Gitea's `admin auth add-oauth`
@@ -561,5 +565,79 @@ func TestGiteaRuntimeShipsTheVerifier(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "- gitea/verify-admin.sh") {
 		t.Error("zerops.yaml does not deploy gitea/verify-admin.sh")
+	}
+}
+
+// TestEveryBuildDownloadRetries: a build that fetches its inputs fails on one
+// dropped TLS handshake unless the fetch retries. Run 4 (2026-10-02) lost a
+// group's first runner to curl's `exit status 35` on a URL that answered 200 a
+// minute later, and plain --retry does not count exit 35 as transient. So
+// every curl or wget in a build or prepare command retries on any error, with
+// a bound on each connect and a floor on its speed — a stalled transfer is an
+// error too — and every apt-get that reaches a mirror retries as well.
+func TestEveryBuildDownloadRetries(t *testing.T) {
+	raw, err := os.ReadFile("zerops.yaml")
+	if err != nil {
+		t.Fatalf("reading zerops.yaml: %v", err)
+	}
+	var doc struct {
+		Zerops []struct {
+			Setup string `yaml:"setup"`
+			Build struct {
+				Prepare []string `yaml:"prepareCommands"`
+				Build   []string `yaml:"buildCommands"`
+			} `yaml:"build"`
+			Run struct {
+				Prepare []string `yaml:"prepareCommands"`
+			} `yaml:"run"`
+		} `yaml:"zerops"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parsing zerops.yaml: %v", err)
+	}
+	wants := map[string][]string{
+		"curl":    {"--retry ", "--retry-all-errors", "--connect-timeout ", "--speed-limit ", "--speed-time "},
+		"wget":    {"--tries=", "--retry-connrefused", "--timeout="},
+		"apt-get": {"-o Acquire::Retries="},
+	}
+	// A command is cut at every place another program may start, so a fetch
+	// is found wherever it sits: after `&&`, in a pipe, in `$( )`.
+	separators := regexp.MustCompile("&&|\\|\\||[;|&()`]|\\$\\(")
+	fetcher := regexp.MustCompile(`(^|\s)(curl|wget)(\s|$)`)
+	downloads := 0
+	for _, setup := range doc.Zerops {
+		var commands []string
+		commands = append(commands, setup.Build.Prepare...)
+		commands = append(commands, setup.Build.Build...)
+		commands = append(commands, setup.Run.Prepare...)
+		for _, command := range commands {
+			for _, part := range separators.Split(command, -1) {
+				words := strings.Fields(part)
+				for len(words) > 0 && (words[0] == "sudo" || strings.Contains(words[0], "=")) {
+					words = words[1:]
+				}
+				program := ""
+				switch {
+				case len(words) > 1 && (words[0] == "apt-get" || words[0] == "apt") &&
+					(slices.Contains(words, "update") || slices.Contains(words, "install")):
+					// A package named curl is not a fetch.
+					program = "apt-get"
+				case fetcher.MatchString(part):
+					program = fetcher.FindStringSubmatch(part)[2]
+					downloads++
+				default:
+					continue
+				}
+				for _, flag := range wants[program] {
+					if !strings.Contains(part, flag) {
+						t.Errorf("setup %s: %q has no %s", setup.Setup, strings.TrimSpace(part), strings.TrimSpace(flag))
+					}
+				}
+			}
+		}
+	}
+	// gitea's binary, the runner's binary and zcli.
+	if downloads < 3 {
+		t.Fatalf("found %d downloads, want at least 3", downloads)
 	}
 }

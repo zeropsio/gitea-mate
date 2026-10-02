@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/registry"
 	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
@@ -152,9 +153,24 @@ func orgOfPayload(raw []byte) string {
 // The runner pool
 // ---------------------------------------------------------------------------
 
-// workflowJobPayload is the part of a workflow_job delivery the pool reads.
+// workflowJobPayload is the part of a workflow_job delivery the pool reads:
+// the action, and which run of which repository the job belongs to (measured
+// 2026-09-16: a `queued` delivery carries `workflow_job.run_id` and
+// `repository.full_name`).
 type workflowJobPayload struct {
-	Action string `json:"action"`
+	Action      string `json:"action"`
+	WorkflowJob struct {
+		RunID int64 `json:"run_id"`
+	} `json:"workflow_job"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+// job is the queued job the delivery names.
+func (w workflowJobPayload) job() deploy.QueuedJob {
+	owner, repo, _ := strings.Cut(w.Repository.FullName, "/")
+	return deploy.QueuedJob{Owner: owner, Repo: repo, RunID: w.WorkflowJob.RunID}
 }
 
 // runnerPool wakes a group's runner service when a job queues and puts it back
@@ -171,14 +187,15 @@ type runnerPool struct {
 	quiet     time.Duration
 
 	// importRunner makes a group's runner service the first time one of its
-	// workflows queues a job.
-	importRunner func(context.Context, string) error
+	// workflows queues a job, and decides about one that has never run: a
+	// runner still building is left to finish, a broken one is replaced.
+	importRunner func(context.Context, string, deploy.QueuedJob) error
 
 	mu     sync.Mutex
 	timers map[string]*time.Timer
 }
 
-func newRunnerPool(z *zerops.Client, log *slog.Logger, clientID, projectID string, quiet time.Duration, importRunner func(context.Context, string) error) *runnerPool {
+func newRunnerPool(z *zerops.Client, log *slog.Logger, clientID, projectID string, quiet time.Duration, importRunner func(context.Context, string, deploy.QueuedJob) error) *runnerPool {
 	if quiet <= 0 {
 		quiet = 15 * time.Minute
 	}
@@ -198,7 +215,7 @@ func (p *runnerPool) handle(ctx context.Context, org string, raw []byte) {
 	}
 	switch payload.Action {
 	case "queued":
-		p.wake(ctx, org)
+		p.wake(ctx, org, payload.job())
 	case "completed":
 		p.sleepAfterQuietSpell(org)
 	}
@@ -207,18 +224,20 @@ func (p *runnerPool) handle(ctx context.Context, org string, raw []byte) {
 // wake starts the group's runner service if it is stopped. A job that queues
 // with no runner online waits: a runner registered afterwards takes it within a
 // second of starting (ledger 2026-09-16).
-func (p *runnerPool) wake(ctx context.Context, org string) {
+func (p *runnerPool) wake(ctx context.Context, org string, job deploy.QueuedJob) {
 	p.cancelSleep(org)
 
 	service, ok := p.service(ctx, org)
-	if !ok {
+	if !ok || service.Status == "READY_TO_DEPLOY" {
 		// A group whose first workflow has not run yet has no runner service.
-		// Importing it is what makes this job the group's first.
+		// Importing it is what makes this job the group's first. One that has
+		// never run cannot be started: it is still building, or its build
+		// failed and it has to be replaced, which the importer decides.
 		if p.importRunner == nil {
 			return
 		}
-		if err := p.importRunner(ctx, org); err != nil {
-			p.log.Error("the group's runner could not be imported", "org", org, "err", err.Error())
+		if err := p.importRunner(ctx, org, job); err != nil {
+			p.log.Error("the group's runner could not be imported or replaced", "org", org, "err", err.Error())
 			return
 		}
 		// The import starts the service itself; a job that queued with no

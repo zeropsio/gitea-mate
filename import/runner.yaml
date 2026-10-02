@@ -16,7 +16,9 @@
 # zcli is on this service and no credential is: a job that deploys asks the
 # broker, which hands it one environment's key for the length of one push, and
 # only while this runner has run nothing but default-branch jobs (D27). A
-# runner that ran a branch's own workflow is deleted and imported afresh.
+# runner that ran a branch's own workflow is deleted and imported afresh, and
+# so is one whose build failed (docs/broker-api.md, "A broken runner is
+# replaced").
 #
 # Idle, the service is stopped; the broker starts it on a `workflow_job`
 # `queued` webhook and stops it again after a quiet spell. Under load the

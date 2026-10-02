@@ -54,6 +54,7 @@ app at registration — on a collision the app numbers it (`acme-2`, `acme-3`) �
 |---|---|
 | the Gitea project | tagged `mate:tool:gitea`; services `db`, `volume`, `web`, `broker`, and `runner{slugcompact}` per group |
 | a runner service's hostname | `runner` + the slug with `-` removed, cut to 25 characters (Zerops hostnames are `[a-z0-9]`, 25 max) |
+| a broken runner | a runner service that is `READY_TO_DEPLOY` (it has never run) whose newest build failed, or that is older than 20 minutes with no build of it moving; the broker replaces it within bounds and stops after five failed builds in a row until a person pushes (`broker-api.md`, *A broken runner is replaced*) |
 | the broker's token | `mate-broker`: org `BASIC_USER`, which reaches the Gitea project, every group stage and production and every Mate project as it is made — so the rights loop can deliver the Mate's Gitea access (`broker-api.md`) with no grant per project. A token minted before that is org `READ_ONLY`, and the app grants it `BASIC_USER` on each such project as it makes it |
 | a Mate's token | `zcp-{project}` (the platform's), lowered to `NO_ACCESS` + `BASIC_USER` on its project; replacements `zcp-{project}/{generation}` |
 | a door throwaway | `mate-door:{projectId}:{nonce}` — `NO_ACCESS`, no grants, no flags |

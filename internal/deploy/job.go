@@ -11,6 +11,15 @@ import (
 	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
 
+// QueuedJob is the job a `workflow_job` `queued` delivery names: the run it
+// belongs to, in the repository it runs for. A zero RunID is a delivery that
+// named none.
+type QueuedJob struct {
+	Owner string
+	Repo  string
+	RunID int64
+}
+
 // Target is one service of one environment and the commit it should run.
 // Everything a caller could try to influence is already decided: the sha comes
 // from protected state (resolve.go), never from a request.

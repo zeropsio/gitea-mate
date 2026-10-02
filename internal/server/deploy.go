@@ -21,9 +21,9 @@ type Deploys interface {
 }
 
 // RunnerImporter imports a group's Actions runner the first time one of its
-// workflows queues a job.
+// workflows queues a job, and replaces one that exists but can never run.
 type RunnerImporter interface {
-	EnsureRunner(ctx context.Context, org string) error
+	EnsureRunner(ctx context.Context, org string, job deploy.QueuedJob) error
 }
 
 // actionsLogin is the synthetic user a job's token resolves to (measured
@@ -174,10 +174,10 @@ func writeRefusal(w http.ResponseWriter, s *Server, err error) {
 // ---------------------------------------------------------------------------
 
 // ensureRunner is what the runner pool calls when a group's runner service does
-// not exist yet.
-func (s *Server) ensureRunner(ctx context.Context, org string) error {
+// not exist yet, or has never run.
+func (s *Server) ensureRunner(ctx context.Context, org string, job deploy.QueuedJob) error {
 	if s.deps.Runners == nil {
 		return errors.New("this broker imports no runners")
 	}
-	return s.deps.Runners.EnsureRunner(ctx, org)
+	return s.deps.Runners.EnsureRunner(ctx, org, job)
 }

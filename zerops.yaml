@@ -7,6 +7,14 @@ zerops:
   # has no network-dependent prepare, the version is pinned in exactly one
   # place, and a container that restarts at three in the morning does not
   # depend on dl.gitea.com being up.
+  #
+  # Every download retries on any error: one dropped TLS handshake (curl exit
+  # 35, which plain --retry does not count as transient) failed a group's
+  # runner build on 2026-10-02 against a URL that answered a minute later. A
+  # transfer slower than 1 KiB/s for 30 s is dropped and retried too, so a
+  # stalled download does not hold a build until the platform's own timeout.
+  # The checksum still decides what is kept. apt-get retries a mirror the same
+  # way: a blip there fails a build just as surely.
   # ---------------------------------------------------------------------------
   - setup: gitea
     build:
@@ -17,11 +25,11 @@ zerops:
         # https://dl.gitea.com/gitea/1.27.2/gitea-1.27.2-linux-amd64.sha256
         GITEA_SHA256: aa4e624ca6aa58a824a75562caecc2d206fcab8c70bc8fab765b456f182844fd
       prepareCommands:
-        - sudo apt-get update
-        - sudo apt-get install -y --no-install-recommends ca-certificates curl
+        - sudo apt-get -o Acquire::Retries=5 update
+        - sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends ca-certificates curl
       buildCommands:
         - mkdir -p bin
-        - curl -fsSL -o bin/gitea "https://dl.gitea.com/gitea/${GITEA_VERSION}/gitea-${GITEA_VERSION}-linux-amd64"
+        - curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 20 --speed-limit 1024 --speed-time 30 -o bin/gitea "https://dl.gitea.com/gitea/${GITEA_VERSION}/gitea-${GITEA_VERSION}-linux-amd64"
         - printf '%s  bin/gitea\n' "${GITEA_SHA256}" | sha256sum -c -
         - chmod 755 bin/gitea
       deployFiles:
@@ -64,14 +72,14 @@ zerops:
       volume:
         hostname: volume
       prepareCommands:
-        - sudo apt-get update
+        - sudo apt-get -o Acquire::Retries=5 update
         # git for the repositories, postgresql-client for init.sh's role and
         # database creation, ca-certificates for the broker's discovery URL.
         # Nothing is downloaded at runtime.
         # curl is admin-init.sh's wait for the broker's discovery URL and
         # verify-admin.sh's one authenticated call; nothing here downloads
         # anything at runtime.
-        - sudo apt-get install -y --no-install-recommends git ca-certificates postgresql-client curl
+        - sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends git ca-certificates postgresql-client curl
         - sudo mkdir -p /etc/gitea
         - sudo chown root:zerops /etc/gitea
         - sudo chmod 770 /etc/gitea
@@ -110,8 +118,8 @@ zerops:
         - port: 8080
           httpSupport: true
       prepareCommands:
-        - sudo apt-get update
-        - sudo apt-get install -y --no-install-recommends ca-certificates
+        - sudo apt-get -o Acquire::Retries=5 update
+        - sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends ca-certificates
       # One container: the sign-in codes and the runner's quiet-spell timers
       # live in its memory, and a restart only means signing in again.
       start: ./broker
@@ -136,14 +144,14 @@ zerops:
         ZCLI_VERSION: v1.1.2
         ZCLI_SHA256: b85d5cda8158d2be2e4eb42f4ed27ed0896f5d03ad31366c0da8fba48f49ffd7
       prepareCommands:
-        - sudo apt-get update
-        - sudo apt-get install -y --no-install-recommends ca-certificates curl
+        - sudo apt-get -o Acquire::Retries=5 update
+        - sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends ca-certificates curl
       buildCommands:
         - mkdir -p bin
-        - curl -fsSL -o bin/gitea-runner "https://dl.gitea.com/gitea-runner/${GITEA_RUNNER_VERSION}/gitea-runner-${GITEA_RUNNER_VERSION}-linux-amd64"
+        - curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 20 --speed-limit 1024 --speed-time 30 -o bin/gitea-runner "https://dl.gitea.com/gitea-runner/${GITEA_RUNNER_VERSION}/gitea-runner-${GITEA_RUNNER_VERSION}-linux-amd64"
         - printf '%s  bin/gitea-runner\n' "${GITEA_RUNNER_SHA256}" | sha256sum -c -
         - chmod 755 bin/gitea-runner
-        - curl -fsSL -o bin/zcli "https://github.com/zeropsio/zcli/releases/download/${ZCLI_VERSION}/zcli-linux-amd64"
+        - curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 20 --speed-limit 1024 --speed-time 30 -o bin/zcli "https://github.com/zeropsio/zcli/releases/download/${ZCLI_VERSION}/zcli-linux-amd64"
         - printf '%s  bin/zcli\n' "${ZCLI_SHA256}" | sha256sum -c -
         - chmod 755 bin/zcli
       deployFiles:
@@ -159,13 +167,13 @@ zerops:
         # isolates them, and this runner is registered to one group's org.
         RUNNER_LABELS: ubuntu-latest:host,ubuntu-26.04:host
       prepareCommands:
-        - sudo apt-get update
+        - sudo apt-get -o Acquire::Retries=5 update
         # Jobs run in host mode directly on the container, so ship what
         # workflows need: git for checkouts, nodejs for JS actions, and zcli
         # (the build's bin/zcli, linked onto the path by runner-init.sh) for
         # the deploy step. No Zerops credential at rest, ever: a job is handed
         # one environment's key by the broker for the length of one push.
-        - sudo apt-get install -y --no-install-recommends git ca-certificates curl nodejs
+        - sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends git ca-certificates curl nodejs
       initCommands:
         - ./gitea/runner-init.sh
       start: /var/www/bin/gitea-runner daemon
