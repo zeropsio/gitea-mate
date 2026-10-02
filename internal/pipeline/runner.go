@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/zeropsio/gitea-mate/internal/deploy"
+	"github.com/zeropsio/gitea-mate/internal/gitea"
 	"github.com/zeropsio/gitea-mate/internal/registry"
 	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
@@ -161,9 +162,13 @@ func (p *Pipeline) reviewRunner(ctx context.Context, reg registry.Registry, slug
 	return p.importRunner(ctx, slug, hostname)
 }
 
-// importRunner imports a fresh runner for a group, with a registration token
-// read for the import, and watches its build.
+// importRunner sweeps the group's org of runner registrations, imports a
+// fresh runner with a registration token read for the import, and watches its
+// build. A group whose last sweep failed waits out its hold first.
 func (p *Pipeline) importRunner(ctx context.Context, slug, hostname string) error {
+	if p.sweepWaits(slug) {
+		return nil
+	}
 	// One import at a time per group: two `queued` deliveries arrive within a
 	// second of each other, and the platform would make two services.
 	p.mu.Lock()
@@ -181,6 +186,27 @@ func (p *Pipeline) importRunner(ctx context.Context, slug, hostname string) erro
 		delete(p.runnerImport, hostname)
 		p.mu.Unlock()
 	}()
+
+	// The caller decided from a service list it read earlier — a pass reads
+	// one when it starts — and a webhook may have imported the runner since,
+	// and the runner registered. The sweep deletes every registration of the
+	// org, so it runs only on a list read now, under this import's own lock.
+	services, err := p.Zerops.Services(ctx, p.ClientID, p.GiteaProjectID)
+	if err != nil {
+		return fmt.Errorf("the Gitea project's services: %w", err)
+	}
+	for _, service := range services {
+		if service.Name == hostname {
+			return nil
+		}
+	}
+
+	if err := p.sweepRunners(ctx, slug); err != nil {
+		if errors.Is(err, errSweepHeld) {
+			return nil // said once, by the sweep
+		}
+		return err
+	}
 
 	// Org scope, never the instance-wide route: labels route jobs, but only
 	// the registration scope isolates them (guide 1.6).
@@ -212,6 +238,156 @@ func (p *Pipeline) importRunner(ctx context.Context, slug, hostname string) erro
 		p.watchRunnerBuild(slug, hostname, processes)
 	}
 	return nil
+}
+
+// runnerSweepRounds bounds one sweep of an org's runner registrations: four
+// rounds of one page of fifty. A group's org holds its runner's containers and
+// the offline registrations recreated containers leave behind, so one round is
+// the rule.
+const runnerSweepRounds = 4
+
+// sweepRunners deletes every runner registration of the group's org. It runs
+// before every import of the group's runner, when the group has no runner
+// service — a first one, a broken one's replacement, a tainted one's — so
+// every registration of the org then is a dead container's or one somebody
+// made with the org's token: none is the broker's. It keeps no memory of a
+// taint, so a restart cannot skip it, and costs one list when the org holds
+// nothing.
+//
+// A job that ran as root on a tainted container could copy two things: the
+// runner's own credential, which fetches jobs until its registration is
+// deleted, and the org's registration token. Gitea 1.27.2 has no API that
+// resets that token — the org route answers the latest active one and mints
+// only when there is none (routers/api/v1/shared/runners.go:27-38) — so the
+// replacement registers with the same token.
+//
+// Gitea orders the list by a status it computes from the clock, so a row can
+// move between two pages. The sweep therefore reads the first page, deletes
+// what it lists, and reads it again until the org holds none. A registration
+// already gone counts as deleted. Whatever is left after the bound, a deletion
+// that fails, or a list that fails holds the import back (see sweepWaits).
+func (p *Pipeline) sweepRunners(ctx context.Context, slug string) error {
+	deleted := 0
+	remain := int64(-1)
+	seen := map[int64]bool{}
+	var err error
+sweep:
+	for round := 0; ; round++ {
+		runners, total, listErr := p.Gitea.OrgRunners(ctx, slug, 1)
+		if listErr != nil {
+			err = fmt.Errorf("the list: %w", listErr)
+			break
+		}
+		remain = total
+		if len(runners) == 0 && total == 0 {
+			p.sweepDone(slug, deleted)
+			return nil
+		}
+		if round == runnerSweepRounds {
+			err = fmt.Errorf("%d rounds ended with registrations left", runnerSweepRounds)
+			break
+		}
+		progressed := false
+		for _, runner := range runners {
+			if seen[runner.ID] {
+				continue
+			}
+			seen[runner.ID] = true
+			if ctx.Err() != nil {
+				err = ctx.Err()
+				break sweep
+			}
+			if deleteErr := p.Gitea.DeleteOrgRunner(ctx, slug, runner.ID); deleteErr != nil && !gitea.IsNotFound(deleteErr) {
+				err = fmt.Errorf("the deletion of registration %d: %w", runner.ID, deleteErr)
+				break sweep
+			}
+			deleted++
+			remain--
+			progressed = true
+		}
+		if !progressed {
+			err = errors.New("the list still names registrations already deleted")
+			break
+		}
+	}
+	return p.sweepFailed(ctx, slug, deleted, remain, err)
+}
+
+// sweepHold is a group whose sweep did not finish: how many attempts in a
+// row deleted nothing, and when the next may start.
+type sweepHold struct {
+	stalled int
+	next    time.Time
+}
+
+// errSweepHeld is a sweep that did not finish and has said so: the import
+// waits, and its caller has nothing more to report.
+var errSweepHeld = errors.New("the sweep is held")
+
+// sweepWait is how long a group's import waits after a sweep that did not
+// finish, given how many attempts in a row deleted nothing: the base wait
+// after one that deleted something, then twice as long for each that did not,
+// up to the cap — a broken runner's rebuild waits.
+func sweepWait(stalled int) time.Duration {
+	wait := runnerRepairBackoff
+	for i := 1; i < stalled && wait < runnerRepairBackoffCap; i++ {
+		wait *= 2
+	}
+	return min(wait, runnerRepairBackoffCap)
+}
+
+// sweepWaits reports a group whose last sweep failed and whose next may not
+// start yet: its import waits, and nothing is read or logged until then.
+func (p *Pipeline) sweepWaits(slug string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	hold, held := p.sweepHeld[slug]
+	return held && p.now().Before(hold.next)
+}
+
+func (p *Pipeline) sweepDone(slug string, deleted int) {
+	p.mu.Lock()
+	delete(p.sweepHeld, slug)
+	p.mu.Unlock()
+	if deleted > 0 {
+		p.log().Info("a group's old runner registrations were deleted before its runner is imported",
+			"group", slug, "deleted", deleted)
+	}
+}
+
+// sweepFailed holds a group's import back after a sweep that did not finish,
+// for sweepWait, and says so once. An attempt that deleted something made
+// progress, so the next waits only the base wait; only attempts that deleted
+// nothing double it. A sweep its caller's context cut short is not the org's
+// fault and starts no wait.
+func (p *Pipeline) sweepFailed(ctx context.Context, slug string, deleted int, remain int64, err error) error {
+	if ctx.Err() != nil {
+		p.log().Info("a sweep of a group's runner registrations was cut short; the next import sweeps again",
+			"group", slug, "deleted", deleted)
+		return fmt.Errorf("the runner registrations of %s: %w", slug, ctx.Err())
+	}
+	p.mu.Lock()
+	if p.sweepHeld == nil {
+		p.sweepHeld = map[string]sweepHold{}
+	}
+	hold := p.sweepHeld[slug]
+	if deleted > 0 {
+		hold.stalled = 0
+	} else {
+		hold.stalled++
+	}
+	hold.next = p.now().Add(sweepWait(hold.stalled))
+	p.sweepHeld[slug] = hold
+	p.mu.Unlock()
+
+	attrs := []any{"group", slug, "deleted", deleted, "stalled_in_a_row", hold.stalled,
+		"next", hold.next.Format(time.RFC3339), "err", err.Error()}
+	if remain >= 0 {
+		attrs = append(attrs, "remain", remain)
+	}
+	p.log().Warn("the runner registrations of a group could not all be deleted, so its runner is not imported yet", attrs...)
+	return fmt.Errorf("the runner registrations of %s are not all deleted; the import waits until %s: %w",
+		slug, hold.next.Format(time.RFC3339), errSweepHeld)
 }
 
 // ---------------------------------------------------------------------------
@@ -378,7 +554,7 @@ func (p *Pipeline) mendRunner(ctx context.Context, reg registry.Registry, slug s
 // of its jobs waits in Gitea.
 func (p *Pipeline) owedRunner(ctx context.Context, reg registry.Registry, slug string, book *buildBook) error {
 	hostname := registry.RunnerHostname(slug)
-	if p.stopped(hostname) || p.busy(hostname) || p.sharedRunner(reg, hostname) {
+	if p.stopped(hostname) || p.busy(hostname) || p.sweepWaits(slug) || p.sharedRunner(reg, hostname) {
 		return nil
 	}
 	queued, err := p.Gitea.QueuedOrgRuns(ctx, slug)

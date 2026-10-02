@@ -419,6 +419,50 @@ func TestRunnerRegistrationToken(t *testing.T) {
 	}
 }
 
+// TestOrgRunners: an org's runner registrations are listed a page at a time
+// and deleted one by one; another org's are neither listed nor touched.
+func TestOrgRunners(t *testing.T) {
+	f := giteatest.New(t)
+	c := f.Client()
+	ctx := context.Background()
+	for _, org := range []string{"acme", "beta"} {
+		if _, err := c.CreateOrg(ctx, org, org); err != nil {
+			t.Fatalf("CreateOrg: %v", err)
+		}
+	}
+	var want []int64
+	for range 51 { // one more than a page
+		want = append(want, f.AddRunner("acme", "runneracme-1"))
+	}
+	other := f.AddRunner("beta", "runnerbeta-1")
+
+	got, total, err := c.OrgRunners(ctx, "acme", 1)
+	if err != nil || total != 51 || len(got) != 50 || got[0].ID != want[0] {
+		t.Fatalf("OrgRunners page 1 = %d runners of %d, %v", len(got), total, err)
+	}
+	got, _, err = c.OrgRunners(ctx, "acme", 2)
+	if err != nil || len(got) != 1 || got[0].ID != want[50] {
+		t.Fatalf("OrgRunners page 2 = %+v, %v", got, err)
+	}
+
+	if err := c.DeleteOrgRunner(ctx, "acme", want[0]); err != nil {
+		t.Fatalf("DeleteOrgRunner: %v", err)
+	}
+	if err := c.DeleteOrgRunner(ctx, "acme", want[0]); !gitea.IsNotFound(err) {
+		t.Errorf("a second DeleteOrgRunner = %v, want 404", err)
+	}
+	// Gitea scopes the route by the org: another org's runner is a 404.
+	if err := c.DeleteOrgRunner(ctx, "acme", other); !gitea.IsNotFound(err) {
+		t.Errorf("DeleteOrgRunner of beta's runner through acme = %v, want 404", err)
+	}
+	if n := len(f.Runners("acme")); n != 50 {
+		t.Errorf("acme holds %d runners, want 50", n)
+	}
+	if n := len(f.Runners("beta")); n != 1 {
+		t.Errorf("beta holds %d runners, want its one", n)
+	}
+}
+
 func TestAllRepoUnits(t *testing.T) {
 	units := gitea.AllRepoUnits("read")
 	for _, want := range []string{"repo.code", "repo.pulls", "repo.actions", "repo.releases"} {

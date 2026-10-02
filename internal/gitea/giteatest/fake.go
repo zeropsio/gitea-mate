@@ -77,8 +77,9 @@ type Fake struct {
 	tagRules      map[string][]gitea.TagProtection
 	hooks         map[string][]gitea.Hook // org -> hooks
 	statuses      map[string][]gitea.CommitStatus
-	jobs          map[string]gitea.Job   // "org/repo/jobID"
-	runs          map[string][]gitea.Run // org -> its runs, newest first
+	jobs          map[string]gitea.Job      // "org/repo/jobID"
+	runs          map[string][]gitea.Run    // org -> its runs, newest first
+	runners       map[string][]gitea.Runner // org -> its runner registrations, oldest first
 	// Dispatches is every workflow dispatch the fake accepted, as
 	// "org/repo workflow@ref key=value …" with the inputs in key order.
 	Dispatches []string
@@ -99,6 +100,13 @@ type Fake struct {
 	registrations int
 	// Fail forces a status for one "METHOD /path".
 	Fail map[string]int
+	// Trace, when set, hears every "METHOD /path" as it is served — a test
+	// that orders this fake's calls against another's.
+	Trace func(call string)
+	// ReorderRunners, when set, rearranges an org's runners before each
+	// listing is paged: Gitea orders them by a status computed from the clock,
+	// so a row can move between two reads.
+	ReorderRunners func([]gitea.Runner) []gitea.Runner
 }
 
 // New starts a fake Gitea with a site admin and closes it when the test ends.
@@ -120,6 +128,7 @@ func New(t *testing.T) *Fake {
 		hooks:         map[string][]gitea.Hook{},
 		statuses:      map[string][]gitea.CommitStatus{},
 		jobs:          map[string]gitea.Job{},
+		runners:       map[string][]gitea.Runner{},
 		files:         map[string]string{},
 		branches:      map[string]string{},
 		tags:          map[string][]gitea.Tag{},
@@ -370,7 +379,11 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.Calls = append(f.Calls, key)
 	forced := f.Fail[key]
+	trace := f.Trace
 	f.mu.Unlock()
+	if trace != nil {
+		trace(key)
+	}
 
 	if forced != 0 {
 		fail(w, forced, "the test forced this refusal")
@@ -422,6 +435,10 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		f.listOrgs(w)
 	case r.Method == "GET" && strings.HasPrefix(path, "/orgs/") && strings.HasSuffix(path, "/actions/runs"):
 		f.listRuns(w, r, seg(path, 2))
+	case r.Method == "GET" && strings.HasPrefix(path, "/orgs/") && strings.HasSuffix(path, "/actions/runners"):
+		f.listRunners(w, r, seg(path, 2))
+	case r.Method == "DELETE" && strings.HasPrefix(path, "/orgs/") && seg(path, 3) == "actions" && seg(path, 4) == "runners":
+		f.deleteRunner(w, seg(path, 2), seg(path, 5))
 	case r.Method == "POST" && strings.HasSuffix(path, "/actions/runners/registration-token"):
 		writeJSON(w, 200, map[string]string{"token": "fake-registration-" + "token-" + strconv.Itoa(f.registrations)})
 	case r.Method == "POST" && strings.HasSuffix(path, "/teams"):
@@ -1220,6 +1237,59 @@ func (f *Fake) dispatch(w http.ResponseWriter, r *http.Request, full, workflow s
 	}
 	f.Dispatches = append(f.Dispatches, line)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// AddRunner registers a runner to an org, as a runner holding the org's
+// registration token does, and answers the id Gitea gives it.
+func (f *Fake) AddRunner(org, name string) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := f.id()
+	f.runners[org] = append(f.runners[org], gitea.Runner{ID: id, Name: name, Status: "online"})
+	return id
+}
+
+// Runners is an org's runner registrations, oldest first.
+func (f *Fake) Runners(org string) []gitea.Runner {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.runners[org])
+}
+
+// listRunners is GET /orgs/{org}/actions/runners.
+func (f *Fake) listRunners(w http.ResponseWriter, r *http.Request, org string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 50
+	}
+	all := slices.Clone(f.runners[org])
+	if f.ReorderRunners != nil {
+		all = f.ReorderRunners(all)
+	}
+	start := min((page-1)*limit, len(all))
+	end := min(start+limit, len(all))
+	writeJSON(w, 200, map[string]any{"total_count": len(all), "runners": all[start:end]})
+}
+
+// deleteRunner is DELETE /orgs/{org}/actions/runners/{id}: a runner of
+// another org is a 404, as Gitea scopes the route by the org.
+func (f *Fake) deleteRunner(w http.ResponseWriter, org, id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, runner := range f.runners[org] {
+		if strconv.FormatInt(runner.ID, 10) == id {
+			f.runners[org] = slices.Delete(f.runners[org], i, i+1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+	fail(w, http.StatusNotFound, "No permission to access this runner")
 }
 
 // ResetRegistrationToken makes the next registration token a different one.

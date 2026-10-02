@@ -776,6 +776,34 @@ func (c *Client) RunnerRegistrationToken(ctx context.Context, org string) (strin
 	return out.Token, err
 }
 
+// Runner is one runner registration of an org, as GET
+// /orgs/{org}/actions/runners lists it. Its name and labels are whatever the
+// registrant chose; only the id is Gitea's.
+type Runner struct {
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Busy   bool   `json:"busy"`
+}
+
+// OrgRunners is one page of GET /orgs/{org}/actions/runners — the org's own
+// registrations, never the instance's — and how many the org holds in all.
+func (c *Client) OrgRunners(ctx context.Context, org string, page int) ([]Runner, int64, error) {
+	var out struct {
+		Runners []Runner `json:"runners"`
+		Total   int64    `json:"total_count"`
+	}
+	err := c.do(ctx, http.MethodGet, withPage("/orgs/"+esc(org)+"/actions/runners", page), nil, &out, authToken)
+	return out.Runners, out.Total, err
+}
+
+// DeleteOrgRunner is DELETE /orgs/{org}/actions/runners/{id}. It takes the
+// registration away, and with it the credential the runner holds: a copy of
+// that credential can no longer fetch a job. A runner of another org is a 404.
+func (c *Client) DeleteOrgRunner(ctx context.Context, org string, id int64) error {
+	return c.do(ctx, http.MethodDelete, "/orgs/"+esc(org)+"/actions/runners/"+itoa(id), nil, nil, authToken)
+}
+
 // Run is one workflow run, as GET /orgs/{org}/actions/runs answers it. The two
 // repositories are what tells a fork's run from the repository's own, and the
 // default branch rides on the repository, so one read says whether a run was
