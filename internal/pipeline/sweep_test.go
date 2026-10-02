@@ -308,6 +308,38 @@ func TestASweepSurvivesRowsThatMove(t *testing.T) {
 	}
 }
 
+// TestAPassNeverSweepsARunnerAWebhookImported — a pass decides a group is
+// owed a runner from the services it read when it started. A webhook may
+// import that runner meanwhile, and the runner register; the pass's import
+// reads the services again and leaves the live registration alone.
+func TestAPassNeverSweepsARunnerAWebhookImported(t *testing.T) {
+	t.Parallel()
+	w, _, _ := brokenWorld(t)
+	w.zerops.BuildImports(zerops.ProcessFinished)
+	waiting(w)
+	var live int64
+	var once sync.Once
+	w.gitea.Trace = func(call string) {
+		if !strings.HasPrefix(call, "GET /orgs/acme/actions/runs") {
+			return
+		}
+		once.Do(func() {
+			if err := w.pipe.EnsureRunner(context.Background(), "acme", deploy.QueuedJob{}); err != nil {
+				t.Errorf("the webhook's EnsureRunner: %v", err)
+			}
+			live = w.gitea.AddRunner("acme", "runneracme-live")
+		})
+	}
+	pass(t, w)
+
+	if len(w.zerops.Imports) != 1 {
+		t.Fatalf("imported %d runners, want the webhook's one", len(w.zerops.Imports))
+	}
+	if left := w.gitea.Runners("acme"); !slices.ContainsFunc(left, func(r gitea.Runner) bool { return r.ID == live }) {
+		t.Fatalf("the org holds %+v, want the live runner's registration kept", left)
+	}
+}
+
 // TestEveryImportSweepsTheGroupsOrgOnce — at an import the group has no
 // runner service, so every registration of its org is a dead container's or
 // somebody else's: a first import and a broken runner's replacement find an

@@ -187,6 +187,20 @@ func (p *Pipeline) importRunner(ctx context.Context, slug, hostname string) erro
 		p.mu.Unlock()
 	}()
 
+	// The caller decided from a service list it read earlier — a pass reads
+	// one when it starts — and a webhook may have imported the runner since,
+	// and the runner registered. The sweep deletes every registration of the
+	// org, so it runs only on a list read now, under this import's own lock.
+	services, err := p.Zerops.Services(ctx, p.ClientID, p.GiteaProjectID)
+	if err != nil {
+		return fmt.Errorf("the Gitea project's services: %w", err)
+	}
+	for _, service := range services {
+		if service.Name == hostname {
+			return nil
+		}
+	}
+
 	if err := p.sweepRunners(ctx, slug); err != nil {
 		return err
 	}
