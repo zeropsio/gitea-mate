@@ -181,15 +181,12 @@ touched:
    the runner service was created fails check 1, the runner may hold a process that reads the next
    job's key: `503 runner_tainted`, the runner is deleted and imported afresh, and the deploy is
    dispatched again (`503 runner_unknown` when the runner cannot be found or aged).
-   Between the deletion and the import, every runner registration of the group's org is deleted
-   (`GET` + `DELETE /orgs/{org}/actions/runners…`, at most four pages of 50 per attempt): a root
-   job could have copied the runner's own credential, which fetches jobs until its registration
-   is gone, and the org's registration token. Gitea 1.27.2 offers no API that resets that token —
-   `POST …/registration-token` answers the org's latest active one and mints only when there is
-   none — so the replacement registers with the same token, and a registration somebody makes
-   with it after the sweep is not told apart from the broker's. Registrations left over hold the
-   import back until a pass sweeps them; the sweep is a taint's alone, and a broker restarted
-   between the deletion and the import forgets it.
+   A root job could have copied the runner's own credential, which fetches jobs until its
+   registration is gone, and the org's registration token. Gitea 1.27.2 offers no API that resets
+   that token — `POST …/registration-token` answers the org's latest active one and mints only
+   when there is none — so the replacement registers with the same token, and a registration
+   somebody makes with it after the replacement is not told apart from the broker's. What the
+   broker can do it does at every import (*A runner's import sweeps its org*, below).
 7. **The key.** The environment's deploy token, from the variable `MATE_DEPLOY_TOKEN_{HEX}` on the
    broker's own service (`docs/vocabulary.md`): `424 no_deploy_token` when nobody minted one.
 
@@ -278,6 +275,28 @@ the service and imports a fresh one, with the org's registration token read for 
 - **A hostname two groups share** (`acme-2` and `acme2`: the slug loses its dashes and is cut to 25
   characters) is never replaced or imported for a waiting job, and the log says so once.
 - A job that queues while a replacement runs waits, as it does for a first import.
+
+### A runner's import sweeps its org
+
+Every import of a group's runner — a first one, a broken one's replacement, a tainted one's —
+first deletes every runner registration of the group's org. An import happens only when the group
+has no runner service, so each registration then is a dead container's (a recreated container
+leaves its old one behind, offline) or one somebody made with the org's token: none is the
+broker's. The sweep keeps no memory of a taint, so a broker restarted between a tainted runner's
+deletion and its replacement still sweeps.
+
+- It reads the first page of `GET /orgs/{org}/actions/runners`, deletes what it lists
+  (`DELETE /orgs/{org}/actions/runners/{id}`; a 404 counts as deleted), and reads the first page
+  again until the org holds none — Gitea orders the list by a status it computes from the clock,
+  so a row can move between pages. An org that holds nothing costs one read; a tainted runner's
+  replacement, about two reads and a deletion per registration.
+- At most four rounds of 50 per attempt. A list or a deletion that fails, or registrations left
+  after the fourth round, hold the import back for the waits a broken runner's rebuild keeps — 2
+  minutes, doubling up to 6 hours — and a pass or webhook inside the wait reads nothing. The
+  attempt is logged once, with counts, never an id per line and never the token. A sweep its
+  caller's deadline cuts short (the first sign-in's pass) stops at once and starts no wait.
+- Nothing is read while a group's runner runs: a grant, a deploy pass and a runner's start make
+  no call to the org's registrations.
 
 ## `POST /person/token` — a person's own Gitea access, for the app (guide 4.4)
 
