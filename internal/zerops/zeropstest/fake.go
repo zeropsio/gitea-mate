@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -357,7 +358,7 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	case key == "POST /project/search":
 		f.projectSearch(w, r)
 	case r.Method == "GET" && strings.HasPrefix(path, "/project/") && strings.HasSuffix(path, "/process"):
-		f.projectProcesses(w, strings.TrimSuffix(strings.TrimPrefix(path, "/project/"), "/process"))
+		f.projectProcesses(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/project/"), "/process"))
 	case r.Method == "GET" && strings.HasPrefix(path, "/project/"):
 		f.project(w, path)
 	case r.Method == "PUT" && strings.HasPrefix(path, "/project/"):
@@ -800,16 +801,30 @@ func (f *Fake) importServices(w http.ResponseWriter, r *http.Request, path strin
 	writeJSON(w, 200, map[string]any{"serviceStacks": stacks})
 }
 
-// projectProcesses is GET /project/{id}/process: every process the fake holds
-// for the project, live and ended.
-func (f *Fake) projectProcesses(w http.ResponseWriter, projectID string) {
+// projectProcesses is GET /project/{id}/process as measured: the project's
+// processes, live and ended, newest first, filtered by actionNameContains
+// before the page is cut by limit and offset, with no total.
+func (f *Fake) projectProcesses(w http.ResponseWriter, r *http.Request, projectID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	query := r.URL.Query()
+	action := query.Get("actionNameContains")
 	list := []zerops.Process{}
 	for _, process := range f.processes {
-		if process.ProjectID == projectID {
+		if process.ProjectID == projectID && strings.Contains(process.ActionName, action) {
 			list = append(list, process)
 		}
+	}
+	sort.SliceStable(list, func(i, j int) bool {
+		if !list[i].Created.Equal(list[j].Created) {
+			return list[i].Created.After(list[j].Created)
+		}
+		return list[i].ID > list[j].ID
+	})
+	offset, _ := strconv.Atoi(query.Get("offset"))
+	list = list[min(offset, len(list)):]
+	if limit, err := strconv.Atoi(query.Get("limit")); err == nil && limit < len(list) {
+		list = list[:limit]
 	}
 	writeJSON(w, 200, map[string]any{"list": list})
 }

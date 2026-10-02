@@ -93,8 +93,9 @@ type Fake struct {
 
 	// Calls is every "METHOD /path" the fake served.
 	Calls []string
-	// registrations counts the runner registration tokens minted: each one is
-	// fresh, as Gitea's are.
+	// registrations numbers the org's runner registration token. Gitea answers
+	// the org's latest active token rather than a new one per call, so the
+	// fake answers the same token until a test resets it.
 	registrations int
 	// Fail forces a status for one "METHOD /path".
 	Fail map[string]int
@@ -422,7 +423,6 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && strings.HasPrefix(path, "/orgs/") && strings.HasSuffix(path, "/actions/runs"):
 		f.listRuns(w, r, seg(path, 2))
 	case r.Method == "POST" && strings.HasSuffix(path, "/actions/runners/registration-token"):
-		f.registrations++
 		writeJSON(w, 200, map[string]string{"token": "fake-registration-" + "token-" + strconv.Itoa(f.registrations)})
 	case r.Method == "POST" && strings.HasSuffix(path, "/teams"):
 		f.createTeam(w, r, seg(path, 2))
@@ -1220,6 +1220,13 @@ func (f *Fake) dispatch(w http.ResponseWriter, r *http.Request, full, workflow s
 	}
 	f.Dispatches = append(f.Dispatches, line)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ResetRegistrationToken makes the next registration token a different one.
+func (f *Fake) ResetRegistrationToken() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.registrations++
 }
 
 // run is GET /repos/{o}/{r}/actions/runs/{id}.

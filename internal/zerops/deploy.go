@@ -246,21 +246,32 @@ func (c *Client) Process(ctx context.Context, processID string) (Process, error)
 	return out, err
 }
 
-// projectProcessLimit is one read of a project's processes. The direct read
-// pages by limit; zcp reads a thousand in one page, and a project's whole
-// history rarely holds more.
+// projectProcessLimit is one read of a project's processes. The platform
+// keeps only recent processes: limit=1000 answered a Gitea project's whole
+// list, 22 processes, 78 KB (measured 2026-10-02).
 const projectProcessLimit = 1000
 
 // ProjectProcesses is GET /project/{id}/process: a project's processes, live
 // and ended, read directly rather than through the search index, so one that
-// has just started is already there. It answers `{list: [...]}` (zcp's
-// GetProjectProcessesDirect; run 4's recorder read every process of the Gitea
-// project this way, 2026-10-02). The order is not relied on.
-func (c *Client) ProjectProcesses(ctx context.Context, projectID string) ([]Process, error) {
+// has just started is already there. action, when not empty, keeps those whose
+// actionName contains it.
+//
+// Measured on a Gitea project, 2026-10-02: the answer is `{list: [...]}` with
+// no total; it is newest first, paged by limit and offset; and
+// `actionNameContains` filters on the platform before the page is cut, so
+// `stack.build` with a limit of 5 answered the project's three builds. A
+// deleted service's processes stay listed under its name (run 4's audit read
+// the failed build of a runner deleted hours before). Callers still sort by
+// created and rely on no order.
+func (c *Client) ProjectProcesses(ctx context.Context, projectID, action string) ([]Process, error) {
+	query := url.Values{"limit": {strconv.Itoa(projectProcessLimit)}}
+	if action != "" {
+		query.Set("actionNameContains", action)
+	}
 	var out struct {
 		List []Process `json:"list"`
 	}
-	_, err := c.do(ctx, "GET", "/project/"+url.PathEscape(projectID)+"/process?limit="+strconv.Itoa(projectProcessLimit), nil, &out)
+	_, err := c.do(ctx, "GET", "/project/"+url.PathEscape(projectID)+"/process?"+query.Encode(), nil, &out)
 	return out.List, err
 }
 

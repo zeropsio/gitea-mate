@@ -80,13 +80,12 @@ type Pipeline struct {
 	// runnerWork is every runner build being watched and every runner
 	// replacement running on the broker's own context.
 	runnerWork sync.WaitGroup
-	// queuedAt is, by runner hostname, when a job of its group last queued —
-	// what lets a group whose builds keep failing try again. runnerStopped is
-	// the hostnames whose builds stopped being retried, and sharedSaid those
-	// two groups share that the log has named. All three are memory only: what
-	// bounds a rebuild is read from the platform, and a restart only means one
-	// more read of it.
-	queuedAt      map[string]time.Time
+	// lifted is, by runner hostname, when a person's push last let a runner
+	// whose builds kept failing build once more. runnerStopped is the
+	// hostnames stopped since, and sharedSaid those two groups share that the
+	// log has named. All three are memory only: what bounds a rebuild is read
+	// from the platform, so a restart keeps a stop and only means one more read.
+	lifted        map[string]time.Time
 	runnerStopped map[string]bool
 	sharedSaid    map[string]bool
 }

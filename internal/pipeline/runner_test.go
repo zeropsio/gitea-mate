@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zeropsio/gitea-mate/internal/deploy"
 	"github.com/zeropsio/gitea-mate/internal/gitea"
 	"github.com/zeropsio/gitea-mate/internal/pipeline"
 	"github.com/zeropsio/gitea-mate/internal/registry"
@@ -37,7 +38,7 @@ func TestARunnerIsImportedOnAGroupsFirstWorkflow(t *testing.T) {
 	w.pipe.RunnerImport = runnerImport
 	ctx := context.Background()
 
-	if err := w.pipe.EnsureRunner(ctx, "acme"); err != nil {
+	if err := w.pipe.EnsureRunner(ctx, "acme", deploy.QueuedJob{}); err != nil {
 		t.Fatalf("EnsureRunner: %v", err)
 	}
 	if len(w.zerops.Imports) != 1 {
@@ -74,7 +75,7 @@ func TestARunnerIsImportedOnlyOnce(t *testing.T) {
 		zerops.Service{ID: "svc-runner", ProjectID: giteaPrj, Name: hostname, Status: "STOPPED"},
 	)
 
-	if err := w.pipe.EnsureRunner(ctx, "acme"); err != nil {
+	if err := w.pipe.EnsureRunner(ctx, "acme", deploy.QueuedJob{}); err != nil {
 		t.Fatalf("EnsureRunner: %v", err)
 	}
 	if len(w.zerops.Imports) != 0 {
@@ -97,7 +98,7 @@ func TestEnsureRunnerRefusals(t *testing.T) {
 			t.Parallel()
 			w := newWorld(t)
 			w.pipe.RunnerImport = tc.document
-			err := w.pipe.EnsureRunner(context.Background(), tc.org)
+			err := w.pipe.EnsureRunner(context.Background(), tc.org, deploy.QueuedJob{})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("EnsureRunner = %v, want it to mention %q", err, tc.want)
 			}
@@ -243,8 +244,8 @@ func seedBuild(w *world, id, serviceID, hostname, status string, created time.Ti
 
 // TestEnsureRunnerTreatsABrokenRunnerLikeAMissingOne: a runner service that
 // exists but can never run — its build failed, or it has not deployed long
-// after a build would have — is thrown away and imported afresh, with a fresh
-// registration token. One that may yet run is left alone, a build still moving
+// after a build would have — is thrown away and imported afresh, with a
+// registration token read for the import. One that may yet run is left alone, a build still moving
 // past the age above all.
 func TestEnsureRunnerTreatsABrokenRunnerLikeAMissingOne(t *testing.T) {
 	t.Parallel()
@@ -287,7 +288,7 @@ func TestEnsureRunnerTreatsABrokenRunnerLikeAMissingOne(t *testing.T) {
 				}
 			}
 
-			if err := w.pipe.EnsureRunner(context.Background(), "acme"); err != nil {
+			if err := w.pipe.EnsureRunner(context.Background(), "acme", deploy.QueuedJob{}); err != nil {
 				t.Fatalf("EnsureRunner: %v", err)
 			}
 			w.pipe.WaitRunnerWork()
@@ -299,7 +300,7 @@ func TestEnsureRunnerTreatsABrokenRunnerLikeAMissingOne(t *testing.T) {
 				t.Fatalf("imported %d runners, want %d", len(w.zerops.Imports), tc.imports)
 			}
 			if tc.imports > 0 && !strings.Contains(w.zerops.Imports[0].Yaml, registrationToken) {
-				t.Fatalf("the import carries no fresh registration token:\n%s", w.zerops.Imports[0].Yaml)
+				t.Fatalf("the import carries no registration token:\n%s", w.zerops.Imports[0].Yaml)
 			}
 			if strings.Contains(logs.String(), registrationToken) {
 				t.Fatalf("a registration token reached the log:\n%s", logs)
@@ -308,47 +309,82 @@ func TestEnsureRunnerTreatsABrokenRunnerLikeAMissingOne(t *testing.T) {
 	}
 }
 
+// The runs a test's queued jobs belong to: a person's push, and the deploy
+// workflow the broker dispatched again (D27 — it starts jobs).
+const (
+	pushRun     = 41
+	dispatchRun = 42
+)
+
+// queuedBy is the job a `queued` delivery names for one of those runs.
+func queuedBy(run int64) deploy.QueuedJob {
+	return deploy.QueuedJob{Owner: "acme", Repo: "api", RunID: run}
+}
+
 // TestABuildThatAlwaysFailsIsBoundedAndStops is run 4 carried on: a runner's
 // build failed on a download, and the service sat READY_TO_DEPLOY with its job
 // waiting. The broker watches the build it started and replaces a runner whose
 // build failed at once; after that each attempt waits twice as long, no more
 // than three replacements start in an hour, and five failed builds in a row
-// stop it until a job queues again — each failed build mails every member of
-// the org. The count is the platform's own record of the builds, so a restart
-// does not lift it, and a build that finished starts it again.
+// stop it — each failed build mails every member of the org. Only a person's
+// push lifts the stop, for one more build that still waits out the backoff;
+// the broker's own dispatch of the deploy workflow, every twenty minutes while
+// the stage stays behind, never does. The count is the platform's own record
+// of the builds, so a restart does not lift it, and a build that finished
+// starts it again.
 func TestABuildThatAlwaysFailsIsBoundedAndStops(t *testing.T) {
 	t.Parallel()
 	w, logs, at := brokenWorld(t)
 	w.zerops.BuildImports(zerops.ProcessFailed)
-	w.gitea.AddRun("acme", gitea.Run{ID: 41, Event: "push", HeadBranch: "main", Status: gitea.RunQueued})
+	w.gitea.AddRun("acme", gitea.Run{ID: pushRun, Event: "push", HeadBranch: "main", Status: gitea.RunQueued})
+	w.gitea.AddRun("acme", gitea.Run{ID: dispatchRun, Event: "workflow_dispatch", HeadBranch: "main", Status: gitea.RunQueued})
 	ctx := context.Background()
 	hostname := registry.RunnerHostname("acme")
 
-	for _, step := range []struct {
+	type step struct {
 		at      time.Duration
 		do      string
 		imports int
 		why     string
-	}{
-		{0, "queued", 2, "the first import, and one replacement once its build failed"},
+	}
+	steps := []step{
+		{0, "push", 2, "the first import, and one replacement once its build failed"},
 		{time.Minute, "pass", 2, "held: the second replacement waits two minutes"},
 		{2 * time.Minute, "pass", 3, "the second replacement"},
 		{5 * time.Minute, "pass", 3, "held: the third waits four minutes"},
 		{6 * time.Minute, "pass", 4, "the third replacement"},
 		{40 * time.Minute, "pass", 4, "held: three replacements in an hour"},
 		{61 * time.Minute, "pass", 5, "the first replacement has left the hour"},
-		{3 * time.Hour, "pass", 5, "stopped: five failed builds in a row"},
-		{3*time.Hour + time.Minute, "restart", 5, "a restart does not lift the stop"},
-		{3*time.Hour + 2*time.Minute, "queued", 6, "a job queued again: one more build"},
-		{3*time.Hour + 30*time.Minute, "pass", 6, "stopped again: that build failed too"},
-		{3*time.Hour + 31*time.Minute, "fixed", 7, "a job queued, and this build finishes"},
-		{4 * time.Hour, "later", 8, "a later runner's first failed build is replaced at once"},
-	} {
+	}
+	// Stopped: the broker's dispatch queues a job every twenty minutes, and a
+	// pass runs every five, for a whole hour — nothing builds.
+	for minute := 120; minute <= 180; minute += 5 {
+		do := "pass"
+		if minute%20 == 0 {
+			do = "dispatch"
+		}
+		steps = append(steps, step{time.Duration(minute) * time.Minute, do, 5, "stopped: five failed builds in a row"})
+	}
+	steps = append(steps,
+		step{3*time.Hour + time.Minute, "restart", 5, "a restart does not lift the stop"},
+		step{3*time.Hour + 2*time.Minute, "push", 6, "a person pushed: one more build"},
+		step{3*time.Hour + 3*time.Minute, "push", 6, "pushed again: the next build waits 32 minutes"},
+		step{3*time.Hour + 20*time.Minute, "dispatch", 6, "still waiting, and a dispatch changes nothing"},
+		step{3*time.Hour + 35*time.Minute, "pass", 7, "the lifted build, once its wait is out"},
+		step{3*time.Hour + 40*time.Minute, "pass", 7, "stopped again: that build failed too"},
+		step{4 * time.Hour, "fixed", 7, "a push once the download is back: the wait is 64 minutes"},
+		step{4*time.Hour + 45*time.Minute, "pass", 8, "the build, and this one finishes"},
+		step{5 * time.Hour, "later", 9, "a later runner's first failed build is replaced at once"},
+	)
+
+	for _, step := range steps {
 		at(step.at)
 		var err error
 		switch step.do {
-		case "queued":
-			err = w.pipe.EnsureRunner(ctx, "acme")
+		case "push":
+			err = w.pipe.EnsureRunner(ctx, "acme", queuedBy(pushRun))
+		case "dispatch":
+			err = w.pipe.EnsureRunner(ctx, "acme", queuedBy(dispatchRun))
 		case "pass":
 			_, err = w.pipe.Pass(ctx)
 		case "restart":
@@ -356,7 +392,7 @@ func TestABuildThatAlwaysFailsIsBoundedAndStops(t *testing.T) {
 			_, err = w.pipe.Pass(ctx)
 		case "fixed":
 			w.zerops.BuildImports(zerops.ProcessFinished)
-			err = w.pipe.EnsureRunner(ctx, "acme")
+			err = w.pipe.EnsureRunner(ctx, "acme", queuedBy(pushRun))
 		case "later":
 			// The runner that ran was replaced (a tainted one is), and the
 			// replacement's build failed.
@@ -377,26 +413,52 @@ func TestABuildThatAlwaysFailsIsBoundedAndStops(t *testing.T) {
 		}
 	}
 
-	// Every import registered with a token of its own.
-	tokens := map[string]bool{}
-	for _, imported := range w.zerops.Imports {
-		for _, line := range strings.Split(imported.Yaml, "\n") {
-			if value, ok := strings.CutPrefix(strings.TrimSpace(line), "value: "); ok {
-				tokens[value] = true
-			}
+	for i, imported := range w.zerops.Imports {
+		if !strings.Contains(imported.Yaml, registrationToken) {
+			t.Fatalf("import %d carries no registration token", i+1)
 		}
-	}
-	if len(tokens) != len(w.zerops.Imports) {
-		t.Fatalf("%d imports registered with %d distinct tokens", len(w.zerops.Imports), len(tokens))
 	}
 	log := logs.String()
 	if strings.Contains(log, registrationToken) {
 		t.Fatalf("a registration token reached the log:\n%s", log)
 	}
-	for _, said := range []string{"held back", "stopped", "build failed"} {
+	for _, said := range []string{"held back", "stopped", "build failed", "pushed"} {
 		if !strings.Contains(log, said) {
 			t.Fatalf("the log never says %q:\n%s", said, log)
 		}
+	}
+}
+
+// TestTheBuildsAreReadOncePerPass: a pass reads the platform's builds once,
+// whatever number of runners need a look, and not at all for a runner it would
+// never replace.
+func TestTheBuildsAreReadOncePerPass(t *testing.T) {
+	t.Parallel()
+	w, _, _ := brokenWorld(t)
+	hq, _ := w.zerops.Project(giteaPrj)
+	hq.TagList = append(hq.TagList, "mate:gn:g-2:beta")
+	var projects []zerops.Project
+	for _, id := range []string{giteaPrj, matePrj, stagePrj, prodPrj} {
+		project, _ := w.zerops.Project(id)
+		if id == giteaPrj {
+			project = hq
+		}
+		projects = append(projects, project)
+	}
+	w.zerops.SetProjects(projects...)
+	w.zerops.SetServices(giteaPrj,
+		zerops.Service{ID: "svc-web", ProjectID: giteaPrj, Name: "web"},
+		zerops.Service{ID: "svc-runner-acme", ProjectID: giteaPrj, Name: registry.RunnerHostname("acme"),
+			Status: "READY_TO_DEPLOY", Created: runnerClock.Add(-time.Minute)},
+		zerops.Service{ID: "svc-runner-beta", ProjectID: giteaPrj, Name: registry.RunnerHostname("beta"),
+			Status: "READY_TO_DEPLOY", Created: runnerClock.Add(-time.Minute)},
+	)
+	if _, err := w.pipe.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	w.queue.Wait()
+	if n := w.zerops.Served("GET /project/" + giteaPrj + "/process"); n != 1 {
+		t.Fatalf("the pass read the builds %d times, want once", n)
 	}
 }
 
@@ -430,7 +492,7 @@ func TestARunnerDeletedButNotImportedIsOwedOne(t *testing.T) {
 			w.zerops.Fail[importRoute] = http.StatusServiceUnavailable
 			w.zerops.FailTimes[importRoute] = 1
 
-			if err := w.pipe.EnsureRunner(context.Background(), "acme"); err == nil {
+			if err := w.pipe.EnsureRunner(context.Background(), "acme", deploy.QueuedJob{}); err == nil {
 				t.Fatal("a refused import was not reported")
 			}
 			w.pipe.WaitRunnerWork()
@@ -469,7 +531,7 @@ func TestOneReplacementAtATime(t *testing.T) {
 	deletion := "DELETE /service-stack/svc-runner"
 
 	first := make(chan error, 1)
-	go func() { first <- w.pipe.EnsureRunner(context.Background(), "acme") }()
+	go func() { first <- w.pipe.EnsureRunner(context.Background(), "acme", deploy.QueuedJob{}) }()
 	deadline := time.Now().Add(5 * time.Second)
 	for w.zerops.Served(deletion) == 0 {
 		if time.Now().After(deadline) {
@@ -480,7 +542,7 @@ func TestOneReplacementAtATime(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_ = w.pipe.EnsureRunner(ctx, "acme")
+	_ = w.pipe.EnsureRunner(ctx, "acme", deploy.QueuedJob{})
 	close(release)
 	if err := <-first; err != nil {
 		t.Fatalf("the first replacement: %v", err)
@@ -520,7 +582,7 @@ func TestARunnerTwoGroupsShareIsNeverReplaced(t *testing.T) {
 			Status: "READY_TO_DEPLOY", Created: runnerClock.Add(-time.Hour)})
 
 	for range 2 {
-		if err := w.pipe.EnsureRunner(context.Background(), "acme"); err != nil {
+		if err := w.pipe.EnsureRunner(context.Background(), "acme", deploy.QueuedJob{}); err != nil {
 			t.Fatalf("EnsureRunner: %v", err)
 		}
 		if _, err := w.pipe.Pass(context.Background()); err != nil {
@@ -531,6 +593,9 @@ func TestARunnerTwoGroupsShareIsNeverReplaced(t *testing.T) {
 	}
 	if len(w.zerops.DeletedServices) != 0 || len(w.zerops.Imports) != 0 {
 		t.Fatalf("deleted %v and imported %d, want the shared runner untouched", w.zerops.DeletedServices, len(w.zerops.Imports))
+	}
+	if n := w.zerops.Served("GET /project/" + giteaPrj + "/process"); n != 0 {
+		t.Fatalf("the builds of a runner never replaced were read %d times", n)
 	}
 	if n := strings.Count(logs.String(), "share"); n != 1 {
 		t.Fatalf("the clash was said %d times, want once:\n%s", n, logs)
@@ -546,7 +611,7 @@ func TestARefusedRunnerImportKeepsItsToken(t *testing.T) {
 	w.zerops.SetServices(giteaPrj, zerops.Service{ID: "svc-runner", ProjectID: giteaPrj,
 		Name: registry.RunnerHostname("acme"), Status: "READY_TO_DEPLOY", Created: runnerClock.Add(-time.Hour)})
 
-	err := w.pipe.EnsureRunner(context.Background(), "acme")
+	err := w.pipe.EnsureRunner(context.Background(), "acme", deploy.QueuedJob{})
 	w.pipe.WaitRunnerWork()
 	if err == nil {
 		t.Fatal("a refused import was not reported")

@@ -211,14 +211,16 @@ func TestAJobsReport(t *testing.T) {
 	}
 }
 
-// fakeRunners records which groups were asked for a runner.
+// fakeRunners records which groups were asked for a runner, and for which job.
 type fakeRunners struct {
 	asked []string
+	jobs  []deploy.QueuedJob
 	err   error
 }
 
-func (f *fakeRunners) EnsureRunner(_ context.Context, org string) error {
+func (f *fakeRunners) EnsureRunner(_ context.Context, org string, job deploy.QueuedJob) error {
 	f.asked = append(f.asked, org)
+	f.jobs = append(f.jobs, job)
 	return f.err
 }
 
@@ -249,9 +251,15 @@ func TestAQueuedJobAsksForARunnerThatNeverRan(t *testing.T) {
 				})
 			}
 
-			r.server.runners.handle(context.Background(), "acme", []byte(`{"action":"queued"}`))
+			r.server.runners.handle(context.Background(), "acme",
+				[]byte(`{"action":"queued","workflow_job":{"run_id":41},"repository":{"full_name":"acme/api"}}`))
 			if asked := len(runners.asked) == 1; asked != tc.asked {
 				t.Fatalf("the importer was asked %v, want asked=%v", runners.asked, tc.asked)
+			}
+			// The importer is told which run queued: whether a person started
+			// it is what may let a stopped runner build again.
+			if want := (deploy.QueuedJob{Owner: "acme", Repo: "api", RunID: 41}); tc.asked && runners.jobs[0] != want {
+				t.Fatalf("the importer was told %+v, want %+v", runners.jobs[0], want)
 			}
 			if started := r.zerops.Started("svc-runner"); started != tc.started {
 				t.Fatalf("started = %v, want %v", started, tc.started)
