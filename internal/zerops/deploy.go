@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -204,10 +205,22 @@ type Process struct {
 	ServiceStackID string `json:"serviceStackId"`
 	Status         string `json:"status"`
 	ActionName     string `json:"actionName"`
-	AppVersion     *struct {
+	// Created is when the platform made the process, on its own clock.
+	Created time.Time `json:"created"`
+	// ServiceStacks is the services the process acts on, by id and hostname.
+	// A deleted service's processes keep its name (run 4, 2026-10-02: the
+	// failed `stack.build` of a deleted runner stayed listed under it).
+	ServiceStacks []ProcessStack `json:"serviceStacks"`
+	AppVersion    *struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
 	} `json:"appVersion"`
+}
+
+// ProcessStack is one service a process acts on.
+type ProcessStack struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // The process statuses that end one.
@@ -231,6 +244,24 @@ func (c *Client) Process(ctx context.Context, processID string) (Process, error)
 	var out Process
 	_, err := c.do(ctx, "GET", "/process/"+url.PathEscape(processID), nil, &out)
 	return out, err
+}
+
+// projectProcessLimit is one read of a project's processes. The direct read
+// pages by limit; zcp reads a thousand in one page, and a project's whole
+// history rarely holds more.
+const projectProcessLimit = 1000
+
+// ProjectProcesses is GET /project/{id}/process: a project's processes, live
+// and ended, read directly rather than through the search index, so one that
+// has just started is already there. It answers `{list: [...]}` (zcp's
+// GetProjectProcessesDirect; run 4's recorder read every process of the Gitea
+// project this way, 2026-10-02). The order is not relied on.
+func (c *Client) ProjectProcesses(ctx context.Context, projectID string) ([]Process, error) {
+	var out struct {
+		List []Process `json:"list"`
+	}
+	_, err := c.do(ctx, "GET", "/project/"+url.PathEscape(projectID)+"/process?limit="+strconv.Itoa(projectProcessLimit), nil, &out)
+	return out.List, err
 }
 
 // DefaultPollInterval is how often a deploy asks the platform where it is.

@@ -829,6 +829,30 @@ func (c *Client) ListOrgRunsSince(ctx context.Context, org string, since time.Ti
 	return all, nil
 }
 
+// RunQueued is the status GET /orgs/{org}/actions/runs gives a run that waits
+// for a runner (measured 2026-09-16 with no runner registered: `queued` until a
+// runner took it).
+const RunQueued = "queued"
+
+// QueuedOrgRuns is how many of an org's newest runs wait for a runner: one
+// page of GET /orgs/{org}/actions/runs, newest first. A run waits only while
+// no runner of the org takes it, so a waiting one is among the newest.
+func (c *Client) QueuedOrgRuns(ctx context.Context, org string) (int, error) {
+	var out struct {
+		Runs []Run `json:"workflow_runs"`
+	}
+	if err := c.do(ctx, http.MethodGet, withPage("/orgs/"+esc(org)+"/actions/runs", 1), nil, &out, authToken); err != nil {
+		return 0, err
+	}
+	queued := 0
+	for _, run := range out.Runs {
+		if run.Status == RunQueued {
+			queued++
+		}
+	}
+	return queued, nil
+}
+
 // DispatchWorkflow is POST /repos/{o}/{r}/actions/workflows/{file}/dispatches:
 // the workflow file as ref carries it, with the inputs it declares. A workflow
 // without a `workflow_dispatch` trigger, or without one of the inputs, is a

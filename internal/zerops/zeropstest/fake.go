@@ -81,6 +81,9 @@ type Fake struct {
 	// FailImports makes a service-stack import a 400 whose message quotes the
 	// document — what a refusal that echoes its input looks like.
 	FailImports bool
+	// HoldDeletes, when set, keeps every service deletion waiting until it is
+	// closed — a deletion still in flight.
+	HoldDeletes chan struct{}
 	// importBuild, when set, makes an import do what the platform's does: each
 	// service in the document appears READY_TO_DEPLOY, made now, and the import
 	// answers its stack.create and stack.build processes, the build ending
@@ -274,6 +277,19 @@ func (f *Fake) Project(id string) (zerops.Project, bool) {
 	return zerops.Project{}, false
 }
 
+// Served counts the requests made to one "METHOD /path".
+func (f *Fake) Served(key string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, r := range f.Requests {
+		if r == key {
+			n++
+		}
+	}
+	return n
+}
+
 // Wrote reports whether any request other than a read was made.
 func (f *Fake) Wrote() bool {
 	f.mu.Lock()
@@ -340,6 +356,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		f.memberList(w, path, identity)
 	case key == "POST /project/search":
 		f.projectSearch(w, r)
+	case r.Method == "GET" && strings.HasPrefix(path, "/project/") && strings.HasSuffix(path, "/process"):
+		f.projectProcesses(w, strings.TrimSuffix(strings.TrimPrefix(path, "/project/"), "/process"))
 	case r.Method == "GET" && strings.HasPrefix(path, "/project/"):
 		f.project(w, path)
 	case r.Method == "PUT" && strings.HasPrefix(path, "/project/"):
@@ -770,15 +788,30 @@ func (f *Fake) importServices(w http.ResponseWriter, r *http.Request, path strin
 			service.Status = "ACTIVE"
 		}
 		f.services[projectID] = append(f.services[projectID], service)
-		created := zerops.Process{ID: "proc-" + itoa(f.sequence) + "-create", ServiceStackID: service.ID,
-			Status: zerops.ProcessFinished, ActionName: "stack.create"}
-		build := zerops.Process{ID: "proc-" + itoa(f.sequence) + "-build", ServiceStackID: service.ID,
-			Status: f.importBuild, ActionName: "stack.build"}
+		actsOn := []zerops.ProcessStack{{ID: service.ID, Name: hostname}}
+		created := zerops.Process{ID: "proc-" + itoa(f.sequence) + "-create", ProjectID: projectID,
+			Status: zerops.ProcessFinished, ActionName: "stack.create", Created: f.Now, ServiceStacks: actsOn}
+		build := zerops.Process{ID: "proc-" + itoa(f.sequence) + "-build", ProjectID: projectID,
+			Status: f.importBuild, ActionName: "stack.build", Created: f.Now, ServiceStacks: actsOn}
 		f.processes[created.ID], f.processes[build.ID] = created, build
 		stacks = append(stacks, stack{ID: service.ID, Name: hostname,
 			Processes: []process{{ID: created.ID}, {ID: build.ID}}})
 	}
 	writeJSON(w, 200, map[string]any{"serviceStacks": stacks})
+}
+
+// projectProcesses is GET /project/{id}/process: every process the fake holds
+// for the project, live and ended.
+func (f *Fake) projectProcesses(w http.ResponseWriter, projectID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	list := []zerops.Process{}
+	for _, process := range f.processes {
+		if process.ProjectID == projectID {
+			list = append(list, process)
+		}
+	}
+	writeJSON(w, 200, map[string]any{"list": list})
 }
 
 // BuildImports makes every later import create its services and end their
