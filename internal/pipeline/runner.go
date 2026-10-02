@@ -162,9 +162,13 @@ func (p *Pipeline) reviewRunner(ctx context.Context, reg registry.Registry, slug
 	return p.importRunner(ctx, slug, hostname)
 }
 
-// importRunner imports a fresh runner for a group, with a registration token
-// read for the import, and watches its build.
+// importRunner sweeps the group's org of runner registrations, imports a
+// fresh runner with a registration token read for the import, and watches its
+// build. A group whose last sweep failed waits out its hold first.
 func (p *Pipeline) importRunner(ctx context.Context, slug, hostname string) error {
+	if p.sweepWaits(slug) {
+		return nil
+	}
 	// One import at a time per group: two `queued` deliveries arrive within a
 	// second of each other, and the platform would make two services.
 	p.mu.Lock()
@@ -183,7 +187,7 @@ func (p *Pipeline) importRunner(ctx context.Context, slug, hostname string) erro
 		p.mu.Unlock()
 	}()
 
-	if err := p.sweepRunners(ctx, slug, hostname); err != nil {
+	if err := p.sweepRunners(ctx, slug); err != nil {
 		return err
 	}
 
@@ -219,66 +223,137 @@ func (p *Pipeline) importRunner(ctx context.Context, slug, hostname string) erro
 	return nil
 }
 
-// runnerSweepPages bounds one sweep of an org's runner registrations: four
-// pages of fifty. A group's org holds its runner's containers and the offline
-// registrations recreated containers leave behind, so one page is the rule.
-const runnerSweepPages = 4
+// runnerSweepRounds bounds one sweep of an org's runner registrations: four
+// rounds of one page of fifty. A group's org holds its runner's containers and
+// the offline registrations recreated containers leave behind, so one round is
+// the rule.
+const runnerSweepRounds = 4
 
-// sweepRunners deletes every runner registration of the group's org before a
-// tainted runner's replacement is imported, and does nothing for a group whose
-// runner was never tainted.
+// sweepRunners deletes every runner registration of the group's org. It runs
+// before every import of the group's runner, when the group has no runner
+// service — a first one, a broken one's replacement, a tainted one's — so
+// every registration of the org then is a dead container's or one somebody
+// made with the org's token: none is the broker's. It keeps no memory of a
+// taint, so a restart cannot skip it, and costs one list when the org holds
+// nothing.
 //
-// A job that ran as root on the tainted container could copy two things: the
+// A job that ran as root on a tainted container could copy two things: the
 // runner's own credential, which fetches jobs until its registration is
 // deleted, and the org's registration token. Gitea 1.27.2 has no API that
 // resets that token — the org route answers the latest active one and mints
 // only when there is none (routers/api/v1/shared/runners.go:27-38) — so the
-// replacement registers with the same token. The sweep runs once the tainted
-// service is gone and before its replacement exists, so every registration of
-// the org then is a dead container's or one somebody made with the token: none
-// is the broker's. Within its bound it deletes them all; a registration that
-// is already gone counts as deleted. Anything left over holds the import back,
-// and the pass that imports a runner for the waiting job sweeps again.
-func (p *Pipeline) sweepRunners(ctx context.Context, slug, hostname string) error {
-	p.mu.Lock()
-	owed := p.sweepOwed[hostname]
-	p.mu.Unlock()
-	if !owed {
-		return nil
-	}
-	var ids []int64
-	var total int64
-	for page := 1; page <= runnerSweepPages; page++ {
-		runners, all, err := p.Gitea.OrgRunners(ctx, slug, page)
-		if err != nil {
-			return fmt.Errorf("the runner registrations of %s could not be read: %w", slug, err)
+// replacement registers with the same token.
+//
+// Gitea orders the list by a status it computes from the clock, so a row can
+// move between two pages. The sweep therefore reads the first page, deletes
+// what it lists, and reads it again until the org holds none. A registration
+// already gone counts as deleted. Whatever is left after the bound, a deletion
+// that fails, or a list that fails holds the import back (see sweepWaits).
+func (p *Pipeline) sweepRunners(ctx context.Context, slug string) error {
+	deleted := 0
+	remain := int64(-1)
+	seen := map[int64]bool{}
+	var err error
+sweep:
+	for round := 0; ; round++ {
+		runners, total, listErr := p.Gitea.OrgRunners(ctx, slug, 1)
+		if listErr != nil {
+			err = fmt.Errorf("the list: %w", listErr)
+			break
 		}
-		total = all
+		remain = total
+		if len(runners) == 0 && total == 0 {
+			p.sweepDone(slug, deleted)
+			return nil
+		}
+		if round == runnerSweepRounds {
+			err = fmt.Errorf("%d rounds ended with registrations left", runnerSweepRounds)
+			break
+		}
+		progressed := false
 		for _, runner := range runners {
-			ids = append(ids, runner.ID)
+			if seen[runner.ID] {
+				continue
+			}
+			seen[runner.ID] = true
+			if ctx.Err() != nil {
+				err = ctx.Err()
+				break sweep
+			}
+			if deleteErr := p.Gitea.DeleteOrgRunner(ctx, slug, runner.ID); deleteErr != nil && !gitea.IsNotFound(deleteErr) {
+				err = fmt.Errorf("the deletion of registration %d: %w", runner.ID, deleteErr)
+				break sweep
+			}
+			deleted++
+			remain--
+			progressed = true
 		}
-		if len(runners) == 0 || int64(len(ids)) >= total {
+		if !progressed {
+			err = errors.New("the list still names registrations already deleted")
 			break
 		}
 	}
-	deleted := 0
-	for _, id := range ids {
-		if err := p.Gitea.DeleteOrgRunner(ctx, slug, id); err != nil && !gitea.IsNotFound(err) {
-			p.log().Warn("a runner registration of a tainted group could not be deleted", "group", slug, "runner", id, "err", err.Error())
-			continue
-		}
-		deleted++
+	return p.sweepFailed(ctx, slug, deleted, remain, err)
+}
+
+// sweepHold is a group whose sweep failed: how many attempts in a row, and
+// when the next may start.
+type sweepHold struct {
+	failed int
+	next   time.Time
+}
+
+// sweepWaits reports a group whose last sweep failed and whose next may not
+// start yet: its import waits, and nothing is read or logged until then.
+func (p *Pipeline) sweepWaits(slug string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	hold, held := p.sweepHeld[slug]
+	return held && p.now().Before(hold.next)
+}
+
+func (p *Pipeline) sweepDone(slug string, deleted int) {
+	p.mu.Lock()
+	delete(p.sweepHeld, slug)
+	p.mu.Unlock()
+	if deleted > 0 {
+		p.log().Info("a group's old runner registrations were deleted before its runner is imported",
+			"group", slug, "deleted", deleted)
 	}
-	if remain := total - int64(deleted); remain > 0 {
-		p.log().Warn("runner registrations of a tainted group remain, so no runner is imported yet",
-			"group", slug, "deleted", deleted, "remain", remain)
-		return fmt.Errorf("%d runner registrations of %s remain", remain, slug)
+}
+
+// sweepFailed holds a group's import back after a sweep that did not finish,
+// for the waits a broken runner's rebuild keeps — two minutes, doubling up to
+// six hours — and says so once. A sweep its caller's context cut short is not
+// the org's fault and starts no wait.
+func (p *Pipeline) sweepFailed(ctx context.Context, slug string, deleted int, remain int64, err error) error {
+	if ctx.Err() != nil {
+		p.log().Info("a sweep of a group's runner registrations was cut short; the next import sweeps again",
+			"group", slug, "deleted", deleted)
+		return fmt.Errorf("the runner registrations of %s: %w", slug, ctx.Err())
 	}
 	p.mu.Lock()
-	delete(p.sweepOwed, hostname)
+	if p.sweepHeld == nil {
+		p.sweepHeld = map[string]sweepHold{}
+	}
+	hold := p.sweepHeld[slug]
+	hold.failed++
+	wait := runnerRepairBackoff
+	for i := 1; i < hold.failed && wait < runnerRepairBackoffCap; i++ {
+		wait *= 2
+	}
+	hold.next = p.now().Add(min(wait, runnerRepairBackoffCap))
+	p.sweepHeld[slug] = hold
 	p.mu.Unlock()
-	p.log().Info("a tainted group's runner registrations were deleted", "group", slug, "deleted", deleted)
-	return nil
+
+	attrs := []any{"group", slug, "deleted", deleted, "failed_in_a_row", hold.failed,
+		"next", hold.next.Format(time.RFC3339), "err", err.Error()}
+	if remain >= 0 {
+		attrs = append(attrs, "remain", remain)
+	}
+	p.log().Warn("the runner registrations of a group could not all be deleted, so its runner is not imported yet", attrs...)
+	return fmt.Errorf("the runner registrations of %s are not all deleted; the import waits until %s",
+		slug, hold.next.Format(time.RFC3339))
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +520,7 @@ func (p *Pipeline) mendRunner(ctx context.Context, reg registry.Registry, slug s
 // of its jobs waits in Gitea.
 func (p *Pipeline) owedRunner(ctx context.Context, reg registry.Registry, slug string, book *buildBook) error {
 	hostname := registry.RunnerHostname(slug)
-	if p.stopped(hostname) || p.busy(hostname) || p.sharedRunner(reg, hostname) {
+	if p.stopped(hostname) || p.busy(hostname) || p.sweepWaits(slug) || p.sharedRunner(reg, hostname) {
 		return nil
 	}
 	queued, err := p.Gitea.QueuedOrgRuns(ctx, slug)
@@ -764,12 +839,6 @@ func (p *Pipeline) replaceRunner(slug string, runner zerops.Service) {
 		if p.sharedRunner(state.Registry, runner.Name) {
 			return
 		}
-		p.mu.Lock()
-		if p.sweepOwed == nil {
-			p.sweepOwed = map[string]bool{}
-		}
-		p.sweepOwed[runner.Name] = true
-		p.mu.Unlock()
 		process, err := p.Zerops.DeleteService(base, runner.ID)
 		if err != nil {
 			p.log().Warn("a tainted runner could not be deleted", "hostname", runner.Name, "err", err.Error())

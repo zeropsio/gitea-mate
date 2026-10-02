@@ -77,10 +77,10 @@ type Pipeline struct {
 	runnerImport map[string]bool
 	// replacing is the runners being thrown away right now, by hostname.
 	replacing map[string]bool
-	// sweepOwed is the hostnames whose runner was tainted and whose org's
-	// runner registrations have not all been deleted since: the next import
-	// of that hostname sweeps them first. Memory only, like the maps below.
-	sweepOwed map[string]bool
+	// sweepHeld is, by group slug, a sweep of the org's runner registrations
+	// that did not finish and when the next may start. Memory only: a restart
+	// sweeps at the next import, which is what the wait only delays.
+	sweepHeld map[string]sweepHold
 	// runnerWork is every runner build being watched and every runner
 	// replacement running on the broker's own context.
 	runnerWork sync.WaitGroup
