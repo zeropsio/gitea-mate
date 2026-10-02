@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/zeropsio/gitea-mate/internal/deploy"
+	"github.com/zeropsio/gitea-mate/internal/gitea"
 	"github.com/zeropsio/gitea-mate/internal/registry"
 	"github.com/zeropsio/gitea-mate/internal/zerops"
 )
@@ -182,6 +183,10 @@ func (p *Pipeline) importRunner(ctx context.Context, slug, hostname string) erro
 		p.mu.Unlock()
 	}()
 
+	if err := p.sweepRunners(ctx, slug, hostname); err != nil {
+		return err
+	}
+
 	// Org scope, never the instance-wide route: labels route jobs, but only
 	// the registration scope isolates them (guide 1.6).
 	token, err := p.Gitea.RunnerRegistrationToken(ctx, slug)
@@ -211,6 +216,68 @@ func (p *Pipeline) importRunner(ctx context.Context, slug, hostname string) erro
 		}
 		p.watchRunnerBuild(slug, hostname, processes)
 	}
+	return nil
+}
+
+// runnerSweepPages bounds one sweep of an org's runner registrations: four
+// pages of fifty. A group's org holds its runner's containers and the offline
+// registrations recreated containers leave behind, so one page is the rule.
+const runnerSweepPages = 4
+
+// sweepRunners deletes every runner registration of the group's org before a
+// tainted runner's replacement is imported, and does nothing for a group whose
+// runner was never tainted.
+//
+// A job that ran as root on the tainted container could copy two things: the
+// runner's own credential, which fetches jobs until its registration is
+// deleted, and the org's registration token. Gitea 1.27.2 has no API that
+// resets that token — the org route answers the latest active one and mints
+// only when there is none (routers/api/v1/shared/runners.go:27-38) — so the
+// replacement registers with the same token. The sweep runs once the tainted
+// service is gone and before its replacement exists, so every registration of
+// the org then is a dead container's or one somebody made with the token: none
+// is the broker's. Within its bound it deletes them all; a registration that
+// is already gone counts as deleted. Anything left over holds the import back,
+// and the pass that imports a runner for the waiting job sweeps again.
+func (p *Pipeline) sweepRunners(ctx context.Context, slug, hostname string) error {
+	p.mu.Lock()
+	owed := p.sweepOwed[hostname]
+	p.mu.Unlock()
+	if !owed {
+		return nil
+	}
+	var ids []int64
+	var total int64
+	for page := 1; page <= runnerSweepPages; page++ {
+		runners, all, err := p.Gitea.OrgRunners(ctx, slug, page)
+		if err != nil {
+			return fmt.Errorf("the runner registrations of %s could not be read: %w", slug, err)
+		}
+		total = all
+		for _, runner := range runners {
+			ids = append(ids, runner.ID)
+		}
+		if len(runners) == 0 || int64(len(ids)) >= total {
+			break
+		}
+	}
+	deleted := 0
+	for _, id := range ids {
+		if err := p.Gitea.DeleteOrgRunner(ctx, slug, id); err != nil && !gitea.IsNotFound(err) {
+			p.log().Warn("a runner registration of a tainted group could not be deleted", "group", slug, "runner", id, "err", err.Error())
+			continue
+		}
+		deleted++
+	}
+	if remain := total - int64(deleted); remain > 0 {
+		p.log().Warn("runner registrations of a tainted group remain, so no runner is imported yet",
+			"group", slug, "deleted", deleted, "remain", remain)
+		return fmt.Errorf("%d runner registrations of %s remain", remain, slug)
+	}
+	p.mu.Lock()
+	delete(p.sweepOwed, hostname)
+	p.mu.Unlock()
+	p.log().Info("a tainted group's runner registrations were deleted", "group", slug, "deleted", deleted)
 	return nil
 }
 
@@ -697,6 +764,12 @@ func (p *Pipeline) replaceRunner(slug string, runner zerops.Service) {
 		if p.sharedRunner(state.Registry, runner.Name) {
 			return
 		}
+		p.mu.Lock()
+		if p.sweepOwed == nil {
+			p.sweepOwed = map[string]bool{}
+		}
+		p.sweepOwed[runner.Name] = true
+		p.mu.Unlock()
 		process, err := p.Zerops.DeleteService(base, runner.ID)
 		if err != nil {
 			p.log().Warn("a tainted runner could not be deleted", "hostname", runner.Name, "err", err.Error())
